@@ -1581,6 +1581,7 @@ impl Treasury {
                             .to_string(),
                     ));
                 }
+                validate_secret_reference(&provider.card.reference, &provider.card.provider_kind)?;
             }
         }
         for reference in self.state.processed_deposits.keys() {
@@ -3058,13 +3059,7 @@ impl Treasury {
             balance_status,
             balance_ttl_secs,
         } = configuration;
-        bounded(&credential_reference, "credential_reference", 256)?;
-        bounded(&provider_kind, "provider_kind", 64)?;
-        if redact_sensitive(&credential_reference) != credential_reference {
-            return Err(TreasuryError::Invalid(
-                "credential_reference appears to contain payment data".to_string(),
-            ));
-        }
+        validate_secret_reference(&credential_reference, &provider_kind)?;
         if self.state.intents.values().any(|intent| {
             !matches!(
                 intent.state,
@@ -3752,6 +3747,45 @@ fn validate_provider_reference(input: &str) -> Result<String> {
         ));
     }
     Ok(input.to_string())
+}
+
+fn validate_secret_reference(reference: &str, provider_kind: &str) -> Result<()> {
+    bounded(reference, "credential_reference", 256)?;
+    bounded(provider_kind, "provider_kind", 64)?;
+    let allowed_provider = matches!(
+        provider_kind,
+        "os-credential-store"
+            | "macos-keychain"
+            | "linux-secret-service"
+            | "windows-credential-manager"
+    );
+    if !allowed_provider {
+        return Err(TreasuryError::Invalid(
+            "provider_kind is not an approved operating-system credential store".to_string(),
+        ));
+    }
+    if redact_sensitive(reference) != reference {
+        return Err(TreasuryError::Invalid(
+            "credential_reference appears to contain payment data".to_string(),
+        ));
+    }
+    let url = Url::parse(reference).map_err(|_| {
+        TreasuryError::Invalid("credential_reference must be an opaque store URL".to_string())
+    })?;
+    if !matches!(
+        url.scheme(),
+        "keychain" | "secret-service" | "credential-manager" | "os-credential-store"
+    ) || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(TreasuryError::Invalid(
+            "credential_reference must use an approved local credential-store scheme".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn sanitize_provider_reference(input: &str) -> String {
@@ -4579,6 +4613,25 @@ mod tests {
         let bootstrap =
             Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
         let mut treasury = bootstrap.treasury;
+        for (credential_reference, provider_kind) in
+            [("737", "os-credential-store"), ("keychain://agent-treasury/card", "arbitrary-plugin")]
+        {
+            assert!(
+                treasury
+                    .handle(
+                        &bootstrap.owner_token,
+                        Request::OwnerConfigureManualProvider {
+                            credential_reference: credential_reference.to_string(),
+                            provider_kind: provider_kind.to_string(),
+                            last_four: Some("1111".to_string()),
+                            balance: Money::positive(1_000, "CAD").unwrap(),
+                            balance_status: BalanceStatus::OwnerConfirmed,
+                            balance_ttl_secs: 60,
+                        },
+                    )
+                    .is_err()
+            );
+        }
         assert!(
             treasury
                 .handle(
