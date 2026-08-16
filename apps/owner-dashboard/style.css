@@ -1,0 +1,34 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  max-width: 54rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+.warning {
+  border: 3px solid #c62828;
+  padding: 1rem;
+  background: #fff3f3;
+  color: #7f0000;
+}
+
+button {
+  font: inherit;
+  padding: 0.7rem 1rem;
+}
+
+#stop {
+  background: #c62828;
+  color: white;
+  border: 0;
+  font-weight: 700;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
