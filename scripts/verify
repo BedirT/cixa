@@ -41,10 +41,14 @@ python3 scripts/license-check.py
 python3 scripts/sbom.py
 printf '%s\n' '[13/14] Secret-canary scan'
 python3 scripts/secret-canary-scan.py build
-if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks dir --redact --no-banner build
-else
-  printf '%s\n' 'gitleaks not installed locally; generated-artifact canary scan remains mandatory'
+if ! command -v gitleaks >/dev/null 2>&1; then
+  printf '%s\n' 'gitleaks 8.30.1 is required for source-tree secret scanning' >&2
+  exit 1
 fi
+if [[ "$(gitleaks version)" != "8.30.1" ]]; then
+  printf '%s\n' 'gitleaks 8.30.1 is required for deterministic source-tree secret scanning' >&2
+  exit 1
+fi
+gitleaks dir --redact --no-banner .
 printf '%s\n' '[14/14] Verification complete'
 printf '%s\n' 'agent-treasury verification passed'
