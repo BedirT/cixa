@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+VERIFY_LOCK="$(git rev-parse --git-path agent-treasury-verify.lock 2>/dev/null || printf '%s' "$ROOT/.verify.lock")"
+if ! mkdir "$VERIFY_LOCK" 2>/dev/null; then
+  printf '%s\n' 'another local verification run owns this checkout; retry after it completes' >&2
+  exit 1
+fi
+trap 'rmdir "$VERIFY_LOCK"' EXIT INT TERM
+
 if [[ "$(python3 -c 'import sys; print(sys.flags.optimize)')" != "0" ]]; then
   printf '%s\n' 'optimized Python disables security assertions; unset PYTHONOPTIMIZE' >&2
   exit 1
