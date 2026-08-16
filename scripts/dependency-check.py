@@ -21,7 +21,7 @@ if audit.returncode != 0:
     raise SystemExit(f"npm audit reported high-severity findings: {counts}")
 
 if shutil.which("cargo-audit"):
-    subprocess.run(["cargo-audit", "audit", "--locked"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "audit", "--file", "Cargo.lock"], cwd=ROOT, check=True)
 else:
     # The canonical path still proves a locked graph and records the tool gap;
     # CI installs cargo-audit so hosted verification performs the advisory scan.
