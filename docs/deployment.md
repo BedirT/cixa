@@ -56,3 +56,7 @@ The dashboard requires two private files: the broker owner token, which remains 
 ## TCP
 
 No TCP mode is shipped. If a future deployment adds one, it must require explicit configuration, authenticated encryption, origin and replay protection, a warning, and a reviewed network threat model. A loopback bind without authenticated encryption is not a substitute for the default Unix socket.
+
+## Local Verification Policy
+
+This solo-developer repository intentionally has no hosted GitHub Actions workflow. The owner runs `./scripts/verify` locally before each push. This is an explicit resource and workflow choice, not evidence that hosted checks passed; a future multi-contributor or public release should reassess hosted branch protection and independent build infrastructure.

@@ -32,6 +32,8 @@ npm ci
 ./scripts/verify
 ```
 
+Hosted GitHub CI is intentionally not configured for this solo-developer repository. Run `./scripts/verify` before every push; it is the canonical local gate and avoids hosted-runner limits and unnecessary remote execution.
+
 The demo proves a valid bounded purchase, duplicate idempotency protection, over-budget denial, recurring denial, currency substitution denial, merchant-controlled-form approval gating, emergency stop, a valid audit chain, and a secret-canary result without printing the synthetic PAN or CVV.
 
 ## Persisted Local Setup
@@ -121,7 +123,7 @@ The MCP server exposes only:
 - `treasury_list_transactions`
 - `treasury_get_receipt`
 
-The owner-only operations for policy changes, agent creation and revocation, approvals, deposits, reconciliation, provider setup, audit export, and emergency stop are implemented in the Rust core and CLI but are not exposed by the MCP server.
+The owner-only operations for policy changes, agent creation and revocation, approvals, deposits, reconciliation, provider setup, audit export, and emergency stop are implemented in the Rust core, CLI, and authenticated local dashboard but are not exposed by the MCP server.
 
 ## Security Warnings
 

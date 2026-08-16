@@ -30,9 +30,8 @@ Completed for the local laboratory. Rust tests, daemon integration, SDK protocol
 
 ## Checkpoint 8 - Documentation and Release Readiness
 
-Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO manual setup, incident response, CI, SBOM generation, dependency checks, license checks, and canonical verification are present. Public release, package publication, account creation, and real-money tests remain owner-controlled actions.
+Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO manual setup, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Public release, package publication, account creation, and real-money tests remain owner-controlled actions.
 
 ## Release Gate
 
-Run `./scripts/verify` from a clean checkout. Before public release, a human must review the exact files listed in the final report, install the hosted advisory scanner in CI, audit the dependency licenses, and decide whether a formal payment-security assessment is required.
-
+Run `./scripts/verify` from a clean checkout before every push. Before public release, a human must review the exact files listed in the final report, run advisory and static-analysis tools locally, audit dependency licenses, and decide whether a formal payment-security assessment is required.

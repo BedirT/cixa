@@ -24,6 +24,6 @@ if shutil.which("cargo-audit"):
     subprocess.run(["cargo", "audit", "--file", "Cargo.lock"], cwd=ROOT, check=True)
 else:
     # The canonical path still proves a locked graph and records the tool gap;
-    # CI installs cargo-audit so hosted verification performs the advisory scan.
+    # Install cargo-audit locally when a full advisory-database scan is required.
     print("cargo-audit not installed locally; Cargo.lock graph integrity checked")
 print("dependency checks passed")
