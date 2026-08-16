@@ -3,6 +3,7 @@ name = "agent-treasury-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true

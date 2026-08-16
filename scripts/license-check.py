@@ -10,9 +10,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-metadata = json.loads(subprocess.run(["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT, check=True, capture_output=True, text=True).stdout)
 allowed = {
     "MIT",
+    "NCSA",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -25,7 +25,18 @@ allowed = {
 
 
 def permissive_expression(expression: str) -> bool:
-    tokens = re.findall(r"\(|\)|AND|OR|WITH|[A-Za-z0-9.+-]+", expression.replace("/", " OR "))
+    normalized = expression.replace("/", " OR ")
+    token_pattern = re.compile(r"\s*(\(|\)|AND|OR|WITH|[A-Za-z0-9.+-]+)")
+    tokens: list[str] = []
+    cursor = 0
+    while cursor < len(normalized):
+        match = token_pattern.match(normalized, cursor)
+        if match is None:
+            raise ValueError(f"invalid SPDX syntax at offset {cursor}")
+        tokens.append(match.group(1))
+        cursor = match.end()
+    if not tokens:
+        raise ValueError("empty SPDX expression")
     position = 0
 
     def factor() -> bool:
@@ -72,11 +83,33 @@ def permissive_expression(expression: str) -> bool:
     return result
 
 
+try:
+    permissive_expression("MIT?")
+except ValueError:
+    pass
+else:
+    raise SystemExit("internal SPDX parser accepted malformed syntax")
+
 unknown = []
-for package in metadata["packages"]:
-    license_value = package.get("license") or ""
-    if license_value and not permissive_expression(license_value):
-        unknown.append(f"{package['name']}={license_value}")
+seen_cargo = set()
+for manifest in ("Cargo.toml", "fuzz/Cargo.toml"):
+    metadata = json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--manifest-path", manifest],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    for package in metadata["packages"]:
+        identity = (package["name"], package["version"], package["source"])
+        if identity in seen_cargo:
+            continue
+        seen_cargo.add(identity)
+        license_value = package.get("license") or ""
+        if not license_value or not permissive_expression(license_value):
+            unknown.append(f"{package['name']}={license_value or 'missing'}")
 if unknown:
     raise SystemExit("non-permissive or unknown Cargo licenses: " + ", ".join(unknown))
 
