@@ -2,4 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p agent-treasury -- demo
+cd "$ROOT"
+cargo build --quiet --locked --workspace
+npm run build --silent
+python3 scripts/system-demo.py
