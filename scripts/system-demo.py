@@ -88,6 +88,7 @@ def purchase(key: str, amount: int = 500) -> dict:
         "final_total": {"minor": amount, "currency": "CAD"},
         "merchant_domain": "merchant.example.test",
         "category": "software",
+        "items": [{"label": "demo item", "quantity": 1, "unit_price_minor": amount}],
         "recurring": False,
         "trial_auto_renew": False,
         "stored_card": False,
