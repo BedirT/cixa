@@ -2,7 +2,7 @@
   "name": "agent-treasury-workspace",
   "private": true,
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "workspaces": [
     "packages/sdk-typescript",
@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc -b packages/sdk-typescript packages/mcp-server",
     "test": "node --test packages/sdk-typescript/test/*.test.mjs",
+    "test:packages": "python3 tests/package-smoke.py",
     "format:check": "tsc -b packages/sdk-typescript packages/mcp-server --pretty false"
   },
   "devDependencies": {

@@ -1,12 +1,16 @@
 {
   "name": "agent-treasury-mcp-server",
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "description": "Local MCP adapter exposing only the agent-scoped agent-treasury interface",
   "type": "module",
   "bin": {
     "agent-treasury-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },

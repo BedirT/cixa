@@ -25,6 +25,7 @@ npm run build
 printf '%s\n' '[7/14] Node tests'
 npm test
 node tests/mcp-smoke.mjs
+python3 tests/package-smoke.py
 printf '%s\n' '[8/14] Python tests and compile'
 PYTHONPATH="$ROOT/packages/sdk-python" python3 -m unittest discover -s packages/sdk-python/tests
 python3 -m py_compile apps/owner-dashboard/server.py packages/sdk-python/agent_treasury.py tests/*.py scripts/*.py
