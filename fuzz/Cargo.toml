@@ -1,0 +1,30 @@
+[package]
+name = "agent-treasury-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+agent-treasury-domain = { path = "../crates/domain" }
+libfuzzer-sys = "0.4.10"
+serde_json = "1.0.145"
+
+[[bin]]
+name = "domain_inputs"
+path = "fuzz_targets/domain_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpc_frames"
+path = "fuzz_targets/rpc_frames.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

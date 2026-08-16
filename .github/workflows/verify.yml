@@ -1,0 +1,40 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+      - run: cargo install cargo-audit --locked
+      - run: npm ci
+      - run: ./scripts/verify
+      - uses: github/codeql-action/analyze@v3
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz run domain_inputs -- -runs=1000 -max_len=4096
+      - run: cargo +nightly fuzz run rpc_frames -- -runs=1000 -max_len=262144
