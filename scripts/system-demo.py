@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "sdk-python"))
-from agent_treasury import TreasuryClient  # noqa: E402
+from agent_treasury import BrokerError, TreasuryClient  # noqa: E402
 
 BINARY = ROOT / "target" / "debug" / "treasury"
 
@@ -183,8 +183,17 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         try:
             client.execute_purchase_intent(duplicate["id"])
             duplicate_execution = {"rejected": False}
-        except Exception:
-            duplicate_execution = {"rejected": True}
+        except BrokerError as error:
+            expected_error = "conflict: intent is not executable in state Settled"
+            duplicate_execution = {"rejected": str(error) == expected_error}
+            if not duplicate_execution["rejected"]:
+                raise RuntimeError("duplicate execution failed for an unexpected reason") from error
+        after_duplicate = client.get_purchase_intent(valid["id"])
+        if (
+            after_duplicate["state"] != "settled"
+            or after_duplicate["receipt_hash"] != settled["intent"]["receipt_hash"]
+        ):
+            raise RuntimeError("duplicate execution changed the settled intent")
 
         over_budget = client.create_purchase_intent(purchase("demo-over-budget", 3000))
         recurring_request = purchase("demo-recurring")
@@ -218,6 +227,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 "remaining_budget": remaining_budget,
                 "duplicate": duplicate,
                 "duplicate_execution": duplicate_execution,
+                "after_duplicate": after_duplicate,
                 "adversarial_results": [over_budget, recurring, currency, hostile, stopped],
                 "audit": audit,
             },
@@ -234,7 +244,27 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         canary_report = json.loads(canary_result.stdout)
         stop_processes()
         scan = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "secret-canary-scan.py"), str(artifacts)],
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "secret-canary-scan.py"),
+                str(artifacts),
+                "--require",
+                "daemon.log",
+                "--require",
+                "dashboard.log",
+                "--require",
+                "merchant.log",
+                "--require",
+                "mcp.stdout",
+                "--require",
+                "mcp.stderr",
+                "--require",
+                "protocol-results.json",
+                "--require",
+                "secret-provider.stdout",
+                "--require",
+                "secret-provider.stderr",
+            ],
             cwd=ROOT, check=False, capture_output=True, text=True,
         )
         scan_clean = scan.returncode == 0
