@@ -1,6 +1,10 @@
 /target/
 /node_modules/
 /dist/
+**/dist/
+*.tsbuildinfo
+__pycache__/
+*.pyc
 *.xcresult
 coverage/
 build/

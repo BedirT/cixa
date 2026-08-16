@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agent-treasury": {
+      "command": "node",
+      "args": ["/absolute/path/to/agent-treasury/packages/mcp-server/dist/index.js"],
+      "env": {
+        "TREASURY_SOCKET_PATH": "/absolute/path/to/.local/treasury.sock",
+        "TREASURY_AGENT_TOKEN_FILE": "/absolute/path/to/.local/agent.token"
+      }
+    }
+  }
+}
+

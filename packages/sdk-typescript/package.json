@@ -1,0 +1,16 @@
+{
+  "name": "agent-treasury-sdk",
+  "version": "0.1.0",
+  "description": "Thin provider-neutral TypeScript client for a local agent-treasury broker",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}
+
