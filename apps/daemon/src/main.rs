@@ -49,7 +49,7 @@ impl DataDirLock {
             )?;
             file.try_lock_exclusive()
                 .map_err(|_| "treasury data directory is already owned by another writer")?;
-            return Ok(Self(file));
+            Ok(Self(file))
         }
         #[cfg(not(unix))]
         {

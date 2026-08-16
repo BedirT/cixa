@@ -791,6 +791,16 @@ pub struct ManualPrepaidCardProvider {
     pub outgoing_supported: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManualProviderConfiguration {
+    pub credential_reference: String,
+    pub provider_kind: String,
+    pub last_four: Option<String>,
+    pub balance: Money,
+    pub balance_status: BalanceStatus,
+    pub balance_ttl_secs: i64,
+}
+
 impl ManualPrepaidCardProvider {
     pub fn new(card: SecretReference) -> Self {
         Self {
@@ -1693,12 +1703,14 @@ impl Treasury {
                 balance_ttl_secs,
             } => self.owner_configure_manual_provider(
                 &actor,
-                credential_reference,
-                provider_kind,
-                last_four,
-                balance,
-                balance_status,
-                balance_ttl_secs,
+                ManualProviderConfiguration {
+                    credential_reference,
+                    provider_kind,
+                    last_four,
+                    balance,
+                    balance_status,
+                    balance_ttl_secs,
+                },
             ),
             Request::OwnerConfigureReceiveInstructions { method, address, memo_template } => {
                 self.owner_configure_receive(&actor, method, address, memo_template)
@@ -2461,8 +2473,8 @@ impl Treasury {
                 | TransactionState::ProviderPending
                 | TransactionState::ReconciliationRequired
         );
-        if !uncertain
-            && !(outcome == ReconciliationOutcome::Refunded
+        if !(uncertain
+            || outcome == ReconciliationOutcome::Refunded
                 && intent.state == TransactionState::Settled)
         {
             return Err(TreasuryError::Conflict(
@@ -2752,14 +2764,17 @@ impl Treasury {
     fn owner_configure_manual_provider(
         &mut self,
         actor: &Actor,
-        credential_reference: String,
-        provider_kind: String,
-        last_four: Option<String>,
-        balance: Money,
-        balance_status: BalanceStatus,
-        balance_ttl_secs: i64,
+        configuration: ManualProviderConfiguration,
     ) -> Result<Value> {
         Self::require_owner(actor)?;
+        let ManualProviderConfiguration {
+            credential_reference,
+            provider_kind,
+            last_four,
+            balance,
+            balance_status,
+            balance_ttl_secs,
+        } = configuration;
         bounded(&credential_reference, "credential_reference", 256)?;
         bounded(&provider_kind, "provider_kind", 64)?;
         if redact_sensitive(&credential_reference) != credential_reference {
