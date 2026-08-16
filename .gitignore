@@ -1,0 +1,8 @@
+/target/
+/node_modules/
+/dist/
+*.xcresult
+coverage/
+build/
+demo-state/
+.DS_Store

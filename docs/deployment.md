@@ -1,0 +1,55 @@
+# Local Deployment
+
+The broker and the agent should run as separate OS identities or containers. The agent receives only the scoped interface and token file. It must not mount the broker data directory, secret-helper socket, owner dashboard session, raw audit files, or browser debugging ports.
+
+## macOS launchd
+
+Create an owner-reviewed `~/Library/LaunchAgents/com.example.agent-treasury.plist` with absolute paths and a private data directory. The important arguments are:
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/absolute/path/target/release/treasury</string>
+  <string>serve</string>
+  <string>--data-dir</string>
+  <string>/Users/OWNER/.local/agent-treasury</string>
+</array>
+<key>RunAtLoad</key><true/>
+<key>Umask</key><integer>63</integer>
+<key>StandardOutPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.out</string>
+<key>StandardErrorPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.err</string>
+```
+
+Review the plist before `launchctl bootstrap gui/$UID ...`. Do not put a token or card secret in the plist.
+
+## Linux systemd
+
+Use a dedicated service account and a private directory. An owner-reviewed unit can use:
+
+```ini
+[Service]
+ExecStart=/absolute/path/target/release/treasury serve --data-dir /var/lib/agent-treasury
+User=agent-treasury
+Group=agent-treasury
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/agent-treasury
+```
+
+The agent should connect through a deliberately shared socket or a brokered IPC proxy, not receive read access to `/var/lib/agent-treasury`.
+
+## Windows
+
+The current reference binary intentionally fails closed on Windows because it does not yet ship a named-pipe implementation. Do not substitute a public TCP listener. A Windows service adapter must bind a named pipe with a DACL granting only the broker service and explicitly authorized agent identity, use the same v1 envelope, and keep the data directory and Credential Manager access owner-only. This limitation is a release gate for Windows rather than a hidden unsafe fallback.
+
+## Containerized Agent
+
+Run the agent with a read-only root filesystem, no host network, no Docker socket, no browser remote-debugging port, and only a narrow socket proxy or mounted token file. Keep the broker on the host or a separate service account. The owner dashboard remains on loopback and is never mounted into the agent container.
+
+## TCP
+
+No TCP mode is shipped. If a future deployment adds one, it must require explicit configuration, authenticated encryption, origin and replay protection, a warning, and a reviewed network threat model. A loopback bind without authenticated encryption is not a substitute for the default Unix socket.
+
