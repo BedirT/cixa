@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -122,4 +123,5 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
         [str(virtualenv / "bin" / "python"), "-c", "import agent_treasury"], check=True
     )
 
+shutil.rmtree(ROOT / "packages" / "sdk-python" / "agent_treasury_sdk.egg-info", ignore_errors=True)
 print("npm package tarball assertions passed")
