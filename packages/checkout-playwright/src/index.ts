@@ -114,14 +114,17 @@ export function validateConfiguration(config: AdapterConfig, request: PurchaseRe
     if (!navigation.has(canonicalOrigin(redirect))) fail("approved redirect is outside adapter origins");
   }
   if (config.allowedProcessorOrigins.length === 0) fail("a hosted-fields processor origin is required");
-  config.allowedProcessorOrigins.map(canonicalOrigin);
+  const processors = config.allowedProcessorOrigins.map(canonicalOrigin);
+  if (processors.some((origin) => navigation.has(origin))) {
+    fail("hosted-field processor origins must be disjoint from navigation origins");
+  }
 }
 
 async function text(page: Page, selector: string): Promise<string> {
   return (await page.locator(selector).textContent())?.trim() ?? fail("checkout evidence is missing");
 }
 
-async function observeAndValidate(page: Page, config: AdapterConfig, request: PurchaseRequest): Promise<void> {
+export async function observeAndValidate(page: Page, config: AdapterConfig, request: PurchaseRequest): Promise<void> {
   const selectors = config.selectors;
   if (new URL(page.url()).hostname !== request.merchant_domain) fail("final merchant origin changed");
   if (parseMinorUnits(await text(page, selectors.finalTotal)) !== request.final_total.minor) {
@@ -149,6 +152,21 @@ async function observeAndValidate(page: Page, config: AdapterConfig, request: Pu
   ] as const) {
     if (parseBoolean(await text(page, selector)) !== expected) fail("checkout consent facts changed");
   }
+}
+
+async function requireProcessorFrame(
+  page: Page,
+  config: AdapterConfig,
+  processorOrigins: ReadonlySet<string>,
+) {
+  const frameHandle = await page.locator(config.selectors.paymentFrame).elementHandle();
+  const paymentFrame = await frameHandle?.contentFrame();
+  if (!paymentFrame
+      || canonicalOrigin(paymentFrame.url()) === canonicalOrigin(page.url())
+      || !processorOrigins.has(canonicalOrigin(paymentFrame.url()))) {
+    fail("payment frame is not cross-origin and owned by an approved processor");
+  }
+  return paymentFrame;
 }
 
 async function run(config: AdapterConfig, input: AdapterInput): Promise<object> {
@@ -182,11 +200,18 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
       serviceWorkers: "block",
       permissions: [],
     });
+    let page: Page;
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.protocol !== "https:" || url.username || url.password) return route.abort("blockedbyclient");
       const origin = canonicalOrigin(url.toString());
       if (!navigationOrigins.has(origin) && !processorOrigins.has(origin)) return route.abort("blockedbyclient");
+      const request = route.request();
+      if (request.isNavigationRequest()
+          && request.frame().parentFrame() !== null
+          && !processorOrigins.has(origin)) {
+        return route.abort("blockedbyclient");
+      }
       try {
         await resolvePublicHost(url.hostname);
         await route.continue();
@@ -194,7 +219,7 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
         await route.abort("blockedbyclient");
       }
     });
-    const page = await context.newPage();
+    page = await context.newPage();
     const observedNavigations: string[] = [];
     page.on("request", (requestEvent) => {
       if (requestEvent.isNavigationRequest() && requestEvent.frame() === page.mainFrame()) {
@@ -209,17 +234,20 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
       fail("observed redirect chain differs from the approved chain");
     }
     await observeAndValidate(page, config, input.request);
-    const frameElement = page.locator(config.selectors.paymentFrame);
-    const frameHandle = await frameElement.elementHandle();
-    const paymentFrame = await frameHandle?.contentFrame();
-    if (!paymentFrame || !processorOrigins.has(canonicalOrigin(paymentFrame.url()))) {
-      fail("payment frame is not owned by an approved processor");
-    }
+    let paymentFrame = await requireProcessorFrame(page, config, processorOrigins);
     await paymentFrame.locator(config.selectors.pan).fill(input.secret.pan);
+    paymentFrame = await requireProcessorFrame(page, config, processorOrigins);
     await paymentFrame.locator(config.selectors.expiry).fill(input.secret.expiry);
+    paymentFrame = await requireProcessorFrame(page, config, processorOrigins);
     await paymentFrame.locator(config.selectors.cvv).fill(input.secret.cvv);
     if (config.selectors.cardholder && input.secret.cardholder) {
+      paymentFrame = await requireProcessorFrame(page, config, processorOrigins);
       await paymentFrame.locator(config.selectors.cardholder).fill(input.secret.cardholder);
+    }
+    await observeAndValidate(page, config, input.request);
+    await requireProcessorFrame(page, config, processorOrigins);
+    if (JSON.stringify(observedNavigations) !== JSON.stringify(expectedNavigations)) {
+      fail("checkout navigation changed during the payment critical section");
     }
     await page.locator(config.selectors.submit).click({ noWaitAfter: true });
     const outcome = await Promise.any([

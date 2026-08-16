@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseMinorUnits, validateConfiguration } from "../dist/index.js";
+import { observeAndValidate, parseMinorUnits, validateConfiguration } from "../dist/index.js";
 
 const request = {
   final_total: { minor: 1234, currency: "CAD" },
@@ -28,4 +28,36 @@ test("validates canonical money and bound origins", () => {
   assert.throws(() => parseMinorUnits("12.3"));
   assert.throws(() => validateConfiguration({ ...config, checkoutUrl: "https://evil.example/" }, request));
   assert.throws(() => validateConfiguration(config, { ...request, payment_form: "merchant_controlled" }));
+  assert.throws(() => validateConfiguration({
+    ...config,
+    allowedProcessorOrigins: ["https://merchant.example.com"],
+  }, request));
+});
+
+test("live fact mutation fails the pre-submit revalidation", async () => {
+  const values = {
+    total: "12.34",
+    currency: "CAD",
+    fulfillment: "digital-email",
+    items: JSON.stringify(request.items),
+    recurring: "false",
+    trial: "false",
+    stored: "false",
+  };
+  const selectors = {
+    finalTotal: "total",
+    currency: "currency",
+    fulfillment: "fulfillment",
+    items: "items",
+    recurring: "recurring",
+    trialAutoRenew: "trial",
+    storedCard: "stored",
+  };
+  const page = {
+    url: () => "https://merchant.example.com/checkout",
+    locator: (selector) => ({ textContent: async () => values[selector] }),
+  };
+  await assert.doesNotReject(() => observeAndValidate(page, { ...config, selectors }, request));
+  values.recurring = "true";
+  await assert.rejects(() => observeAndValidate(page, { ...config, selectors }, request));
 });
