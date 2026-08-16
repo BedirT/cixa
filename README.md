@@ -103,7 +103,9 @@ target/debug/treasury reconcile --data-dir .local \
   --outcome settled --provider-reference OWNER_VERIFIED_REFERENCE
 ```
 
-`begin-handoff` durably records `executing` before the owner can submit. `complete-handoff` records an ambiguous, non-retryable outcome, and only owner reconciliation can settle it. The project never receives card data or automates the KOHO login or payment form in this supported path.
+These two manual commands require a continuously running `treasury serve` daemon so an intentional continuation is not mistaken for crash recovery. `begin-handoff` durably records `executing` before the owner can submit. `complete-handoff` records an ambiguous, non-retryable outcome, and only owner reconciliation can settle it. The project never receives card data or automates the KOHO login or payment form in this default path.
+
+An experimental owner-only Playwright adapter and one-shot helper are also shipped for explicitly reviewed hosted-field integrations. They run only through `execute-handoff` while the broker lock excludes the daemon and therefore suspends agent RPC. See [docs/checkout-adapters.md](docs/checkout-adapters.md) for the strict adapter configuration, helper lifecycle, and safe-denial requirements. This is not universal checkout support and must not be pointed at KOHO login pages or unknown merchant-controlled forms.
 
 Owner and agent credentials must be written to their required protected token files. The CLI never prints either credential. Intent approval is scoped to that immutable intent; durable merchant trust requires the separate owner-authenticated `approve-merchant` command.
 

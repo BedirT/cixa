@@ -101,7 +101,7 @@ sequenceDiagram
   B-->>A: sanitized receipt or reconciliation state
 ```
 
-The diagram is the contract for a future trusted executor. The default simulator exercises the state shape with synthetic facts and no money. The manual provider always requires owner approval and returns an ambiguous reconciliation result; it does not trust agent claims to submit a real payment. A real browser executor must prove it can independently observe the checkout, revoke agent browser control, prevent secret capture in traces and screenshots, prevent DOM or autofill reads, and destroy the profile. If it cannot prove those properties, it must return an explicit unsupported or approval-required result.
+The default simulator exercises the state shape with synthetic facts and no money. The manual provider always requires owner approval and never trusts agent claims. The default real-card workflow is a two-phase owner-manual handoff. For owner-reviewed hosted-field integrations, the experimental Playwright adapter independently observes configured checkout facts, excludes agent RPC with the broker lock, leaves capture channels disabled, and destroys its fresh context. Unknown forms or observations return an explicit unsupported or ambiguous result.
 
 ## Provider Abstraction
 
