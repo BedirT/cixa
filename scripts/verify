@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+if [[ "$(python3 -c 'import sys; print(sys.flags.optimize)')" != "0" ]]; then
+  printf '%s\n' 'optimized Python disables security assertions; unset PYTHONOPTIMIZE' >&2
+  exit 1
+fi
+
 printf '%s\n' '[1/14] Rust format'
 cargo fmt --all -- --check
 printf '%s\n' '[2/14] Rust build'

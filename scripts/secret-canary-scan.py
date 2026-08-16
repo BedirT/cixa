@@ -15,7 +15,7 @@ canaries = ("4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111", "4
 cvv_pattern = re.compile(
     r'''(?ix)
     ["']?\b(?:cvv2?|cvc2?|security[ _-]?code)\b["']?
-    \s*[:=]\s*["']?737["']?
+    \s*(?:[:=]\s*)?["']?737["']?
     '''
 )
 violations: list[str] = []
@@ -30,8 +30,9 @@ if not files:
     raise SystemExit(f"secret-canary scan found no artifacts: {root}")
 for path in files:
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as error:
+        encoded = path.read_bytes()
+        content = encoded.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
         raise SystemExit(f"cannot read secret-canary artifact {path}: {error}") from error
     for canary in canaries:
         if canary in content:

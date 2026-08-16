@@ -32,6 +32,7 @@ assert report["secret_canary"]["injected_through_secret_provider"] is True
 assert report["secret_canary"]["scan"] == "passed"
 for leaked_value in (
     "checkout error: cvv=737\n",
+    "checkout error: CVV 737\n",
     '{"cvv":"737"}\n',
     '{\n  "cvc": "737"\n}\n',
     '{"security_code":"737"}\n',
@@ -52,6 +53,15 @@ missing_scan = subprocess.run(
     text=True,
 )
 assert missing_scan.returncode != 0
+with tempfile.TemporaryDirectory(prefix="agent-treasury-binary-regression-") as directory:
+    Path(directory, "capture.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    binary_scan = subprocess.run(
+        ["python3", str(ROOT / "scripts" / "secret-canary-scan.py"), directory],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert binary_scan.returncode != 0
 for name in ("over_budget", "recurring", "currency_substitution", "emergency_stop"):
     assert report[name]["state"] == "failed", (name, report[name])
 assert report["merchant_controlled_form"]["state"] == "approval_required"
