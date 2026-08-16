@@ -2,7 +2,7 @@
 
 ## Checkpoint 1 - Research and Architecture
 
-Completed. Current official KOHO, PCI SSC, MCP, Playwright, and OS credential-store sources are recorded in [docs/research.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/research.md). The Rust boundary, manual-provider decision, CVV strategy, local IPC, checkout trust model, and ledger choice are recorded in `docs/adr/`.
+Completed. Current official KOHO, PCI SSC, MCP, Playwright, and OS credential-store sources are recorded in [docs/research.md](docs/research.md). The Rust boundary, manual-provider decision, CVV strategy, local IPC, checkout trust model, and ledger choice are recorded in `docs/adr/`.
 
 ## Checkpoint 2 - Core Domain and Simulator
 
@@ -22,7 +22,7 @@ Completed. Owner CLI operations, loopback dashboard, CSRF and origin checks, pro
 
 ## Checkpoint 6 - Checkout Execution
 
-Completed as a safe reference boundary. The simulator executes known outcomes. The core exposes `CheckoutExecutor` and merchant trust tiers. Unknown merchant-controlled forms, hostile redirects, recurring behavior, and ambiguous provider outcomes are denied or approval-gated. A real browser automation adapter is intentionally not enabled by default; see [docs/checkout-adapters.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/checkout-adapters.md).
+Completed as a safe reference boundary. The simulator executes known outcomes. The core exposes `CheckoutExecutor` and merchant trust tiers. Unknown merchant-controlled forms, hostile redirects, recurring behavior, and ambiguous provider outcomes are denied or approval-gated. A real browser automation adapter is intentionally not enabled by default; see [docs/checkout-adapters.md](docs/checkout-adapters.md).
 
 ## Checkpoint 7 - Adversarial Validation
 

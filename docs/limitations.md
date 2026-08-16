@@ -1,7 +1,7 @@
 # Limitations
 
 - There is no authoritative KOHO balance API adapter. KOHO is manual-only unless a future officially supported API is documented and reviewed.
-- Manual balances can be stale. The UI labels provider-verified, owner-confirmed, and estimated states separately.
+- Manual balances can become stale. The UI labels provider-verified, owner-confirmed, and estimated states separately; estimated or expired snapshots cannot authorize spending.
 - KOHO 3-D Secure, fraud alerts, CAPTCHAs, card locks, card replacement, account recovery, and identity verification remain manual owner actions.
 - The project has no outgoing Interac e-Transfer implementation.
 - Merchant compatibility is not universal. Unknown forms and uncertain totals require approval or denial.
@@ -13,4 +13,3 @@
 - Merchant disputes, chargebacks, tax treatment, and accounting treatment require human professional advice.
 - The current browser reference is a safe-denial boundary, not a claim of universal Playwright payment isolation.
 - Local IPC protects against ordinary accidental exposure with OS permissions. It is not a defense against a privileged local attacker.
-

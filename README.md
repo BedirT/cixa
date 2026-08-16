@@ -11,7 +11,7 @@ The project is local-first and provider-agnostic. The security-critical core is 
 - Supports observe, approval-required, bounded-autonomous, and disabled modes.
 - Applies deterministic budgets, merchant and currency rules, fulfillment allowlists, recurring-payment denial, redirect validation, pre-submit revalidation, and emergency stop.
 - Uses scoped, expiring, revocable agent capability tokens stored hashed in the broker state.
-- Provides an append-only ledger and HMAC hash-chain audit log.
+- Provides an append-only ledger, HMAC hash-chain audit log, and HMAC-authenticated state envelope.
 - Quarantines ambiguous payments as `unknown` or `reconciliation_required` and never retries them automatically.
 - Includes a deterministic simulated provider, a manual prepaid-card adapter boundary, a hostile local merchant fixture, a loopback-only owner dashboard, MCP tools, SDKs, and a fully local demo.
 
@@ -43,6 +43,8 @@ mkdir -p .local
 target/debug/treasury init --data-dir .local --owner-token-file .local/owner.token
 target/debug/treasury create-agent --data-dir .local --owner-token-file .local/owner.token \
   --agent-token-file .local/agent.token --mode bounded_autonomous
+target/debug/treasury arm-session --data-dir .local --owner-token-file .local/owner.token \
+  --agent-id AGENT_ID --ttl-secs 600
 target/debug/treasury configure-receive --data-dir .local \
   --owner-token-file .local/owner.token --address public-inbox@example.invalid
 target/debug/treasury serve --data-dir .local
@@ -59,12 +61,27 @@ node packages/mcp-server/dist/index.js
 The owner dashboard is an optional loopback-only bridge:
 
 ```bash
+umask 077
+openssl rand -hex 32 > .local/dashboard.token
 python3 apps/owner-dashboard/server.py \
   --socket-path "$PWD/.local/treasury.sock" \
-  --owner-token-file "$PWD/.local/owner.token"
+  --owner-token-file "$PWD/.local/owner.token" \
+  --access-token-file "$PWD/.local/dashboard.token"
 ```
 
-It has no CDN, analytics, third-party script, public bind, or agent endpoint. Stop the daemon and manually lock or replace a real card after a risky run.
+The browser prompts for HTTP Basic authentication. Use username `owner` and the separate dashboard access token as the password. CSRF, origin, host, and authenticated session checks remain additional controls. It has no CDN, analytics, third-party script, public bind, or agent endpoint. Stop the daemon and manually lock or replace a real card after a risky run.
+
+Configure a reference-only manual prepaid card without supplying card data:
+
+```bash
+target/debug/treasury configure-manual-provider --data-dir .local \
+  --owner-token-file .local/owner.token \
+  --credential-reference keychain://agent-treasury/card \
+  --provider-kind os-credential-store --last-four 1111 \
+  --balance-minor 5000 --balance-status owner_confirmed
+```
+
+The credential reference identifies an owner-controlled helper entry. It is not a PAN or CVV. Manual-provider purchases always require owner approval and finish in an ambiguous reconciliation state because the project does not submit a real card payment.
 
 ## Architecture
 
@@ -80,7 +97,7 @@ flowchart LR
   B --> X[Secure handoff / safe-denial checkout boundary]
 ```
 
-The agent-facing surface does not register owner operations. The raw card number, CVV, billing identity, shipping identity, account login, and security settings are outside the agent capability model. See [docs/architecture.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/architecture.md) and [THREAT_MODEL.md](/Users/bedirt/Documents/ChatGPT/cha-ching/THREAT_MODEL.md).
+The agent-facing surface does not register owner operations. The raw card number, CVV, billing identity, shipping identity, account login, and security settings are outside the agent capability model. See [docs/architecture.md](docs/architecture.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Agent Operations
 
@@ -106,11 +123,12 @@ The owner-only operations for policy changes, agent creation and revocation, app
 - The default secret provider does not persist CVV. Encrypted CVV storage is not automatically compliant and is not implemented here.
 - A manual card balance is owner-confirmed or estimated, not an authoritative provider balance.
 - A compromised local administrator, kernel, browser runtime, issuer, merchant, or owner is outside some guarantees.
-- Payments that time out after submission are unknown and require owner reconciliation. Never refresh or retry them.
+- Payments that time out after submission are unknown and require owner reconciliation. An `executing` intent is persisted before provider submission, and restart recovery quarantines it rather than retrying.
+- Caller-provided `session_id` values are metadata only. Budget sessions are broker-issued, owner-armed, expiring, and bound to the agent capability.
 
 ## KOHO Reference Setup
 
-Read [docs/koho-setup.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/koho-setup.md) for the dated, manual-only Canadian setup and current official-source links. Read [docs/limitations.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/limitations.md) before using any real card. Do not share a KOHO password, verification code, card number, CVV, recovery information, or government identity data with this project or an agent.
+Read [docs/koho-setup.md](docs/koho-setup.md) for the dated, manual-only Canadian setup and current official-source links. Read [docs/limitations.md](docs/limitations.md) before using any real card. Do not share a KOHO password, verification code, card number, CVV, recovery information, or government identity data with this project or an agent.
 
 ## Project Status
 
@@ -120,4 +138,4 @@ No real transaction has been made by this repository or its verification harness
 
 ## License
 
-Apache-2.0. See [LICENSE](/Users/bedirt/Documents/ChatGPT/cha-ching/LICENSE). Dependency licenses are checked against the locked graph by the verification harness.
+Apache-2.0. See [LICENSE](LICENSE). Dependency licenses are checked against the locked graph by the verification harness.

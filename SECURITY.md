@@ -34,5 +34,5 @@ Include the affected version, platform, exact command, sanitized logs, threat-mo
 5. Search logs, traces, screenshots, crash artifacts, MCP output, and browser profiles for canary or real secrets.
 6. Reconcile every unknown transaction with the issuer before any new execution.
 
-See [docs/incident-response.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/incident-response.md) for the detailed runbook.
+See [docs/incident-response.md](docs/incident-response.md) for the detailed runbook.
 

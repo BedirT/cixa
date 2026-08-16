@@ -49,7 +49,10 @@ The current reference binary intentionally fails closed on Windows because it do
 
 Run the agent with a read-only root filesystem, no host network, no Docker socket, no browser remote-debugging port, and only a narrow socket proxy or mounted token file. Keep the broker on the host or a separate service account. The owner dashboard remains on loopback and is never mounted into the agent container.
 
+## Owner Dashboard
+
+The dashboard requires two private files: the broker owner token, which remains server-side, and a separate dashboard access token that the owner enters through the browser's HTTP Basic prompt. Generate the latter under `umask 077`, pass it with `--access-token-file`, and never mount it into the agent sandbox. Authentication is required before the HTML, static assets, status API, or emergency endpoint are served. The HTTP-only session cookie, readable CSRF cookie, Host allowlist, and exact Origin check are secondary controls. Stop the dashboard when it is not needed.
+
 ## TCP
 
 No TCP mode is shipped. If a future deployment adds one, it must require explicit configuration, authenticated encryption, origin and replay protection, a warning, and a reviewed network threat model. A loopback bind without authenticated encryption is not a substitute for the default Unix socket.
-

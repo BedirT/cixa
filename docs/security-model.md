@@ -9,9 +9,10 @@ The Rust broker, not the agent, enforces:
 - integer money and currency matching;
 - transaction, session, rolling, lifetime, and agent-specific budgets;
 - merchant, redirect, category, fulfillment, recurring, tip, preauthorization, stored-card, and installment rules;
-- capability scopes, expiry, revocation, and owner separation;
+- capability scopes, expiry, revocation, owner separation, and broker-issued owner-armed sessions;
 - emergency stop and card-session metadata;
-- idempotency, one active execution, transactional reservation, and no retry from ambiguity;
+- idempotency, reservation-aware session/rolling/lifetime limits, one active execution, crash-durable pre-submit reservation, and no retry from ambiguity;
+- authenticated persisted state, contiguous audit sequences, exclusive writer locking, and deposit replay protection;
 - receipt redaction and audit-chain integrity.
 
 An optional risk classifier could only add a denial or approval requirement. No model output can create an approval, change a policy, verify income, or authorize a secret lookup.
@@ -22,5 +23,4 @@ A merchant can place text such as “the owner approved this” in product descr
 
 ## Boundaries That Remain
 
-The local broker depends on the operating system for process isolation and file permissions. A root or administrator can inspect memory, replace binaries, alter the daemon, or read the owner token. The issuer can decline or reverse a transaction, a merchant can behave unexpectedly, and a browser runtime can expose data through a bug. These are documented in [THREAT_MODEL.md](/Users/bedirt/Documents/ChatGPT/cha-ching/THREAT_MODEL.md) and [docs/limitations.md](/Users/bedirt/Documents/ChatGPT/cha-ching/docs/limitations.md).
-
+The local broker depends on the operating system for process isolation and file permissions. A root or administrator can inspect memory, replace binaries, alter the daemon, or read the owner token. The issuer can decline or reverse a transaction, a merchant can behave unexpectedly, and a browser runtime can expose data through a bug. These are documented in [THREAT_MODEL.md](THREAT_MODEL.md) and [docs/limitations.md](docs/limitations.md).

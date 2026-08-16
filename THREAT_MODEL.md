@@ -31,9 +31,10 @@ This model uses STRIDE categories plus payment-specific abuse cases. The protect
 | SSRF, DNS rebinding, Unicode/homograph and redirect manipulation | HTTPS-only canonicalization, IDNA ASCII, no credentials/ports, no local/private/link-local/metadata IPs, redirect limit, revalidation contract | URL unit tests and hostile fixture | Deny checkout; do not retry |
 | Amount or currency substitution, hidden subscription, preauthorization, stored-card consent | Integer money, final-total recheck, currency allowlist, deny recurring/trials/tips/holds/stored card by default | Decision evidence and adversarial cases | Approval or denial; owner reconciles provider |
 | Process crash or network loss after submit | Explicit `unknown`, no blind retry, state persistence, provider reference capture | Restart test and reconciliation state | Owner verifies issuer and marks settled/declined/refunded |
-| Ledger tampering or audit deletion | Atomic state write, append-only event model, separate HMAC key, hash-chain verification | Load-time and owner export chain check | Preserve sanitized evidence; rotate key and restore trusted backup |
+| Ledger, policy, authorization-state tampering, or audit deletion | HMAC-authenticated complete state envelope, append-only event model, separate private key, contiguous hash-chain verification | Load-time MAC and audit verification | Preserve sanitized evidence; rotate key and restore trusted backup |
 | Forged income, spoofed email, screenshot, webhook | Only official adapter, owner-authenticated action, or configured signed integration can verify income | Verified/unverified status and ledger source | Keep unverified notification non-spendable; reconcile manually |
 | Provider fraud controls, 3-D Secure, CAPTCHA, identity checks bypass | No issuer login automation or bypass; manual provider returns unknown/manual boundary | Provider decline and alert review | Owner handles official app, lock, or support process |
+| Local owner-dashboard request forgery | Separate owner-entered dashboard credential, HTTP-only session cookie, CSRF token, Host and Origin checks, loopback bind | Raw unauthenticated HTTP integration test | Stop daemon and rotate owner and dashboard credentials |
 | Malicious dependency or package-install script | Lockfiles, npm audit, Cargo metadata, optional cargo-audit, license check, CI and CodeQL workflow | SBOM and dependency checks | Pin/upgrade, revoke builds, investigate release artifacts |
 | Unsafe update or accidental public exposure | No public bind, explicit TCP not implemented by default, release review, versioned state | Socket permissions, docs and CI checks | Stop daemon, rotate credentials, restore reviewed build |
 
@@ -51,4 +52,3 @@ This model uses STRIDE categories plus payment-specific abuse cases. The protect
 ## Residual Risk Decision
 
 No critical or high-severity finding is left unresolved within this documented reference threat model. Unsupported or uncertain paths fail closed, become approval-required, or become owner reconciliation tasks. The residual local-admin, issuer, browser-runtime, dependency, and legal risks above require human controls and are not silently represented as solved by a green test suite.
-

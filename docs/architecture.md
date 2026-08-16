@@ -35,12 +35,14 @@ flowchart LR
   SDK -->|v1 newline JSON| Socket[Unix-domain socket 0600]
   Socket --> Daemon[treasury daemon]
   Daemon --> Mutex[Single process state lock]
-  Mutex --> State[Atomic state.json write]
+  Mutex --> State[Atomic authenticated state envelope]
   Mutex --> Audit[Audit entries + separate audit.key]
   Daemon --> Provider[Simulated provider]
 ```
 
-The daemon serializes requests in one process. State writes use a temporary file, `sync_all`, private permissions, and rename. The socket is loopback-local by construction and is not a public TCP listener.
+The daemon owns an exclusive data-directory lock for its lifetime and serializes requests in one process. CLI mutations route through the live daemon or acquire the same lock when it is offline. State and audit entries are covered by an HMAC-authenticated envelope; writes use a random private temporary file, `sync_all`, atomic rename, and parent-directory synchronization. The socket is local by construction and is not a public TCP listener.
+
+Before a provider call, the broker persists `funds_reserved` and `executing`. If the process exits before the final outcome is durable, restart recovery changes `executing` to `unknown` and forbids automatic resubmission. The intent ID is the provider idempotency key in the simulated adapter.
 
 ## Purchase State Machine
 
@@ -97,7 +99,7 @@ sequenceDiagram
   B-->>A: sanitized receipt or reconciliation state
 ```
 
-The default simulated executor follows this shape. A real browser executor must prove it can revoke agent browser control, prevent secret capture in traces and screenshots, prevent DOM or autofill reads, and destroy the profile. If it cannot prove those properties, it must return an explicit unsupported or approval-required result.
+The diagram is the contract for a future trusted executor. The default simulator exercises the state shape with synthetic facts and no money. The manual provider always requires owner approval and returns an ambiguous reconciliation result; it does not trust agent claims to submit a real payment. A real browser executor must prove it can independently observe the checkout, revoke agent browser control, prevent secret capture in traces and screenshots, prevent DOM or autofill reads, and destroy the profile. If it cannot prove those properties, it must return an explicit unsupported or approval-required result.
 
 ## Provider Abstraction
 
@@ -115,7 +117,7 @@ classDiagram
   PaymentProvider <|.. ManualPrepaidCardProvider
 ```
 
-The manual adapter stores a secret reference and an owner-confirmed balance snapshot, not a login or private issuer session. It returns an ambiguous/manual outcome for submission so the owner controls the real checkout and reconciliation.
+The manual adapter is selectable through the owner CLI. It stores a non-secret credential reference and a freshness-limited balance snapshot, not a login or private issuer session. Estimated or expired snapshots cannot authorize spending. It returns an ambiguous/manual outcome for submission so the owner controls the real checkout and reconciliation.
 
 ## Owner Versus Agent Interfaces
 
@@ -132,4 +134,3 @@ The manual adapter stores a secret reference and an owner-confirmed balance snap
 | Reconcile unknown transaction | No | Yes |
 | Read credentials or audit key | No | No normal agent or dashboard path |
 | Emergency stop | No | Yes |
-

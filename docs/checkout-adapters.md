@@ -16,11 +16,11 @@ The intended handoff sequence is:
 6. The trusted executor submits exactly once and observes the result.
 7. The broker clears secret material, sanitizes or destroys the context, appends the ledger and audit entries, and returns only a sanitized result.
 
-If any property is unknown, the broker requires owner approval or denies. It never relies on the agent's natural-language summary of a page.
+This sequence is the contract for a future trusted executor, not a claim that the current repository observes a real merchant DOM. If any property is unknown, the broker requires owner approval or denies. It never relies on the agent's natural-language summary of a page.
 
 ## Hosted Fields and Merchant Trust
 
-The policy distinguishes recognized hosted fields, an explicitly owner-approved merchant integration, and an unknown merchant-controlled payment form. The latter is approval-required in the default policy. The broker validates HTTPS origin, canonical host, no credentials or explicit ports, no local/private/link-local/metadata destination, redirect count, and final visible total.
+The policy distinguishes recognized hosted fields, an explicitly owner-approved merchant integration, and an unknown merchant-controlled payment form. The latter is approval-required in the default policy. In the simulator, these values are synthetic adversarial fixtures. For a manual card, every checkout requires owner approval and ends in reconciliation, so agent-asserted origin, amount, or form trust can never cause autonomous real spending. A future real executor must independently validate HTTPS origin, canonical host, resolved address, redirect chain, final visible total, currency, purchase type, and form ownership before authorization.
 
 ## Browser Reference Boundary
 
@@ -29,4 +29,3 @@ The repository includes a hostile static merchant laboratory and the `CheckoutEx
 ## Failure Behavior
 
 No blind refresh, form resubmission, or automatic retry follows a timeout. `provider_pending`, `unknown`, and `reconciliation_required` are owner workflows. A misleading success page is not provider evidence. A provider reference or owner-authenticated reconciliation is required before a settled ledger event is recorded.
-
