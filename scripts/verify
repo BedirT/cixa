@@ -9,7 +9,9 @@ if ! mkdir "$VERIFY_LOCK" 2>/dev/null; then
   printf '%s\n' 'another local verification run owns this checkout; retry after it completes' >&2
   exit 1
 fi
-trap 'rmdir "$VERIFY_LOCK"' EXIT INT TERM
+trap 'rmdir "$VERIFY_LOCK"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ "$(python3 -c 'import sys; print(sys.flags.optimize)')" != "0" ]]; then
   printf '%s\n' 'optimized Python disables security assertions; unset PYTHONOPTIMIZE' >&2
@@ -49,7 +51,7 @@ python3 scripts/dependency-check.py
 python3 scripts/license-check.py
 python3 scripts/sbom.py
 printf '%s\n' '[13/14] Secret-canary scan'
-python3 scripts/secret-canary-scan.py build
+python3 scripts/secret-canary-scan.py build --require handoff-artifacts/helper-success.stdout --require handoff-artifacts/helper-success.stderr --require handoff-artifacts/helper-timeout.stdout --require handoff-artifacts/helper-timeout.stderr --require handoff-artifacts/execute-timeout.stdout --require handoff-artifacts/execute-timeout.stderr
 if ! command -v gitleaks >/dev/null 2>&1; then
   printf '%s\n' 'gitleaks 8.30.1 is required for source-tree secret scanning' >&2
   exit 1
