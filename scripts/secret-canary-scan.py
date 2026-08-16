@@ -2,11 +2,13 @@
 """Scan generated runtime artifacts for the synthetic payment canary only."""
 
 from pathlib import Path
+import re
 import sys
 
 
 root = Path(sys.argv[1] if len(sys.argv) > 1 else "build")
 canaries = ("4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111", "4111111111111111737")
+cvv_pattern = re.compile(r"(?i)\b(?:cvv2?|cvc2?|security[ _-]?code)\s*[:=]?\s*737\b")
 violations: list[str] = []
 if root.exists():
     for path in root.rglob("*"):
@@ -18,6 +20,8 @@ if root.exists():
             for canary in canaries:
                 if canary in content:
                     violations.append(f"{path}: {canary}")
+            if content.strip() == "737" or cvv_pattern.search(content):
+                violations.append(f"{path}: synthetic CVV")
 if violations:
     raise SystemExit("secret canary leaked:\n" + "\n".join(violations))
 print(f"secret-canary scan passed ({root})")

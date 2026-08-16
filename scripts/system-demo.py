@@ -108,6 +108,21 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         artifact_handles.append(output)
         processes.append(subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=output))
 
+    def stop_processes() -> None:
+        for process in reversed(processes):
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+        for process in reversed(processes):
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        for handle in artifact_handles:
+            if not handle.closed:
+                handle.close()
+
     try:
         start_process(
             "daemon",
@@ -165,6 +180,11 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         receipt = client.get_receipt(valid["id"])
         remaining_budget = client.get_budget()
         duplicate = client.create_purchase_intent(purchase("demo-valid"))
+        try:
+            client.execute_purchase_intent(duplicate["id"])
+            duplicate_execution = {"rejected": False}
+        except Exception:
+            duplicate_execution = {"rejected": True}
 
         over_budget = client.create_purchase_intent(purchase("demo-over-budget", 3000))
         recurring_request = purchase("demo-recurring")
@@ -197,6 +217,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 "receipt": receipt,
                 "remaining_budget": remaining_budget,
                 "duplicate": duplicate,
+                "duplicate_execution": duplicate_execution,
                 "adversarial_results": [over_budget, recurring, currency, hostile, stopped],
                 "audit": audit,
             },
@@ -211,12 +232,14 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             canary_result.stderr, encoding="utf-8"
         )
         canary_report = json.loads(canary_result.stdout)
-        for handle in artifact_handles:
-            handle.flush()
+        stop_processes()
         scan = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "secret-canary-scan.py"), str(artifacts)],
             cwd=ROOT, check=False, capture_output=True, text=True,
         )
+        scan_clean = scan.returncode == 0
+        if not scan_clean:
+            raise RuntimeError("secret canary scan failed; inspect controlled artifacts")
         report = {
             "demo": "passed",
             "components": {"daemon": True, "dashboard": True, "mcp": True, "simulated_provider": True, "test_merchant": True},
@@ -231,6 +254,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             "receipt": receipt,
             "remaining_budget": remaining_budget,
             "duplicate_intent_same_id": duplicate["id"] == valid["id"],
+            "duplicate_execution_rejected": duplicate_execution["rejected"],
             "provider_charge_count_after_duplicate": provider_charge_count,
             "over_budget": over_budget,
             "recurring": recurring,
@@ -242,18 +266,10 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 "injected_through_secret_provider": canary_report["secret_canary"][
                     "volatile_secret_consumed_and_cleared"
                 ],
-                "full_pan_or_cvv_emitted": scan.returncode != 0,
-                "scan": "passed" if scan.returncode == 0 else "failed",
+                "full_pan_or_cvv_emitted": not scan_clean,
+                "scan": "passed",
             },
         }
         print(json.dumps(report, indent=2))
     finally:
-        for process in reversed(processes):
-            process.send_signal(signal.SIGTERM)
-        for process in reversed(processes):
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        for handle in artifact_handles:
-            handle.close()
+        stop_processes()
