@@ -14,7 +14,7 @@ root = Path(args.root)
 canaries = ("4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111", "4111111111111111737")
 cvv_pattern = re.compile(
     r'''(?ix)
-    ["']?\b(?:cvv2?|cvc2?|security[ _-]?code)\b["']?
+    ["']?\b(?:cvv2?|cvc2?|security[ _-]?code|card[ _-]?verification[ _-]?value)\b["']?
     \s*(?:[:=]\s*)?["']?737["']?
     '''
 )

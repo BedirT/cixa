@@ -23,7 +23,7 @@ The first real-world configuration is a manual adapter for a user-owned Canadian
 
 ## Quickstart
 
-Requirements: Rust stable, Node.js 20 or newer, npm, and Python 3.11 or newer. The simulated demo needs no account, paid service, API key, or network connection after dependencies are installed.
+Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, and `cargo-audit` 0.22.2. Install the pinned local advisory scanner with `cargo install cargo-audit --version 0.22.2 --locked`. The simulated demo needs no account, paid service, or API key.
 
 ```bash
 cargo build --locked

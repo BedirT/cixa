@@ -20,10 +20,12 @@ if audit.returncode != 0:
         counts = {"raw": audit.stdout[-500:]}
     raise SystemExit(f"npm audit reported high-severity findings: {counts}")
 
-if shutil.which("cargo-audit"):
-    subprocess.run(["cargo", "audit", "--file", "Cargo.lock"], cwd=ROOT, check=True)
-else:
-    # The canonical path still proves a locked graph and records the tool gap;
-    # Install cargo-audit locally when a full advisory-database scan is required.
-    print("cargo-audit not installed locally; Cargo.lock graph integrity checked")
+if not shutil.which("cargo-audit"):
+    raise SystemExit("cargo-audit 0.22.2 is required; install it with: cargo install cargo-audit --version 0.22.2 --locked")
+version = subprocess.run(
+    ["cargo", "audit", "--version"], cwd=ROOT, check=True, capture_output=True, text=True
+).stdout
+if "0.22.2" not in version:
+    raise SystemExit(f"cargo-audit 0.22.2 is required, found: {version.strip()}")
+subprocess.run(["cargo", "audit", "--file", "Cargo.lock"], cwd=ROOT, check=True)
 print("dependency checks passed")
