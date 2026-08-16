@@ -1,6 +1,7 @@
 {
   "name": "agent-treasury-sdk",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Thin provider-neutral TypeScript client for a local agent-treasury broker",
   "type": "module",
   "exports": {
@@ -13,4 +14,3 @@
     "build": "tsc -p tsconfig.json"
   }
 }
-

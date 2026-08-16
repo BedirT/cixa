@@ -1,6 +1,7 @@
 {
   "name": "agent-treasury-mcp-server",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Local MCP adapter exposing only the agent-scoped agent-treasury interface",
   "type": "module",
   "bin": {
@@ -15,4 +16,3 @@
     "zod": "^4.4.3"
   }
 }
-
