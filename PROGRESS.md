@@ -27,7 +27,6 @@ No unresolved critical or high-severity finding is known within the documented r
 ## Remaining Human Decisions
 
 - Review the exact release diff and lockfiles before publishing.
-- Decide whether to install and pin `cargo-audit`, CodeQL, and an independent license scanner in hosted CI.
+- Keep pinned local `cargo-audit` 0.22.2 installed; both Rust lockfiles are mandatory audit inputs. Hosted CI remains intentionally absent for the solo workflow.
 - Review the KOHO terms and current features again immediately before any real manual test.
 - Confirm the owner’s operating-system permissions, local account isolation, browser settings, card limits, fraud-alert process, and emergency-stop runbook.
-

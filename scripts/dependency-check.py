@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -22,10 +23,15 @@ if audit.returncode != 0:
 
 if not shutil.which("cargo-audit"):
     raise SystemExit("cargo-audit 0.22.2 is required; install it with: cargo install cargo-audit --version 0.22.2 --locked")
-version = subprocess.run(
+version_output = subprocess.run(
     ["cargo", "audit", "--version"], cwd=ROOT, check=True, capture_output=True, text=True
-).stdout
-if "0.22.2" not in version:
-    raise SystemExit(f"cargo-audit 0.22.2 is required, found: {version.strip()}")
-subprocess.run(["cargo", "audit", "--file", "Cargo.lock"], cwd=ROOT, check=True)
+).stdout.strip()
+version_match = re.fullmatch(r"cargo-audit(?:-audit)? ([0-9]+\.[0-9]+\.[0-9]+)", version_output)
+if version_match is None or version_match.group(1) != "0.22.2":
+    raise SystemExit(f"cargo-audit 0.22.2 is required, found: {version_output}")
+for near_match in ("cargo-audit 0.22.20", "cargo-audit 10.22.2", "cargo-audit 0.22.2-beta"):
+    if re.fullmatch(r"cargo-audit(?:-audit)? 0\.22\.2", near_match):
+        raise SystemExit("internal cargo-audit version matcher accepted a near match")
+for lockfile in ("Cargo.lock", "fuzz/Cargo.lock"):
+    subprocess.run(["cargo", "audit", "--file", lockfile], cwd=ROOT, check=True)
 print("dependency checks passed")

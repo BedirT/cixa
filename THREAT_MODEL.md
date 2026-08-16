@@ -35,7 +35,7 @@ This model uses STRIDE categories plus payment-specific abuse cases. The protect
 | Forged income, spoofed email, screenshot, webhook | Only official adapter, owner-authenticated action, or configured signed integration can verify income | Verified/unverified status and ledger source | Keep unverified notification non-spendable; reconcile manually |
 | Provider fraud controls, 3-D Secure, CAPTCHA, identity checks bypass | No issuer login automation or bypass; manual provider returns unknown/manual boundary | Provider decline and alert review | Owner handles official app, lock, or support process |
 | Local owner-dashboard request forgery | Separate owner-entered dashboard credential, HTTP-only session cookie, CSRF token, Host and Origin checks, loopback bind | Raw unauthenticated HTTP integration test | Stop daemon and rotate owner and dashboard credentials |
-| Malicious dependency or package-install script | Lockfiles, npm audit, Cargo metadata, optional local cargo-audit, license check, and local static analysis | SBOM and dependency checks | Pin/upgrade, revoke builds, investigate release artifacts |
+| Malicious dependency or package-install script | Lockfiles, npm audit, pinned local cargo-audit over both Rust graphs, license check, and local static analysis | SBOM and dependency checks | Pin/upgrade, revoke builds, investigate release artifacts |
 | Unsafe update or accidental public exposure | No public bind, explicit TCP not implemented by default, release review, versioned state | Socket permissions, documentation, and local verification | Stop daemon, rotate credentials, restore reviewed build |
 
 ## Out of Scope and Assumptions
