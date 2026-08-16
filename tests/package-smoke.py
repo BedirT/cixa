@@ -22,13 +22,29 @@ build_version = subprocess.run(
 ).stdout.strip()
 if build_version != "1.4.2":
     raise SystemExit(f"Python build 1.4.2 is required, found {build_version}")
+for package, expected in {
+    "setuptools": "83.0.0",
+    "packaging": "26.0",
+    "pyproject_hooks": "1.2.0",
+}.items():
+    installed = subprocess.run(
+        [
+            "python3",
+            "-c",
+            f"import importlib.metadata; print(importlib.metadata.version('{package}'))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if installed != expected:
+        raise SystemExit(f"{package} {expected} is required, found {installed}")
 
 subprocess.run(
     [
         "cargo",
         "package",
         "--locked",
-        "--no-verify",
         "--allow-dirty",
         "-p",
         "agent-treasury-domain",
@@ -49,6 +65,25 @@ if not {"Cargo.toml", "src/main.rs"}.issubset(daemon_files):
 
 with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_directory:
     directory = Path(raw_directory)
+    rust_install = directory / "rust-install"
+    subprocess.run(
+        [
+            "cargo",
+            "install",
+            "--path",
+            "apps/daemon",
+            "--locked",
+            "--root",
+            str(rust_install),
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    installed_treasury = rust_install / "bin" / "treasury"
+    subprocess.run([str(installed_treasury), "--help"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([str(installed_treasury), "demo"], check=True, stdout=subprocess.DEVNULL)
+
     tarballs: list[Path] = []
     for workspace in ("packages/sdk-typescript", "packages/mcp-server"):
         result = subprocess.run(
@@ -99,7 +134,15 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
 
     python_dist = directory / "python-dist"
     subprocess.run(
-        ["python3", "-m", "build", "--outdir", str(python_dist), "packages/sdk-python"],
+        [
+            "python3",
+            "-m",
+            "build",
+            "--no-isolation",
+            "--outdir",
+            str(python_dist),
+            "packages/sdk-python",
+        ],
         cwd=ROOT,
         check=True,
         stdout=subprocess.DEVNULL,
@@ -124,4 +167,4 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
     )
 
 shutil.rmtree(ROOT / "packages" / "sdk-python" / "agent_treasury_sdk.egg-info", ignore_errors=True)
-print("npm package tarball assertions passed")
+print("Rust, npm, and Python package smoke assertions passed")

@@ -20,5 +20,12 @@ lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 for package_path, package in lock.get("packages", {}).items():
     if package_path and package.get("version"):
         components.append({"type": "library", "name": package_path.rsplit("/node_modules/", 1)[-1], "version": package["version"], "ecosystem": "npm"})
+for line in (ROOT / "requirements-build.lock").read_text(encoding="utf-8").splitlines():
+    if line and not line.startswith("#"):
+        requirement = line.split(" ", 1)[0]
+        name, version = requirement.split("==", 1)
+        components.append(
+            {"type": "library", "name": name, "version": version, "ecosystem": "pypi"}
+        )
 OUT.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.5", "components": components}, indent=2) + "\n", encoding="utf-8")
 print(f"SBOM written to {OUT}")

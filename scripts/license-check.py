@@ -131,4 +131,14 @@ for path, package in lockfile["packages"].items():
         unknown_npm.append(f"{path}={license_value or 'missing'}")
 if unknown_npm:
     raise SystemExit("non-permissive or unknown npm licenses: " + ", ".join(unknown_npm))
-print("license check passed for the locked Cargo and npm graphs")
+
+python_lock = (ROOT / "requirements-build.lock").read_text(encoding="utf-8").splitlines()
+for line in python_lock:
+    if not line or line.startswith("#"):
+        continue
+    if "# license: " not in line:
+        raise SystemExit(f"Python build dependency lacks reviewed license evidence: {line}")
+    expression = line.split("# license: ", 1)[1]
+    if not permissive_expression(expression):
+        raise SystemExit(f"non-permissive Python build license: {expression}")
+print("license check passed for the locked Cargo, npm, and Python build graphs")

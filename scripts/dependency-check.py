@@ -34,4 +34,16 @@ for near_match in ("cargo-audit 0.22.20", "cargo-audit 10.22.2", "cargo-audit 0.
         raise SystemExit("internal cargo-audit version matcher accepted a near match")
 for lockfile in ("Cargo.lock", "fuzz/Cargo.lock"):
     subprocess.run(["cargo", "audit", "--file", lockfile], cwd=ROOT, check=True)
+if not shutil.which("pip-audit"):
+    raise SystemExit("pip-audit 2.9.0 is required for the Python build graph")
+pip_audit_version = subprocess.run(
+    ["pip-audit", "--version"], cwd=ROOT, check=True, capture_output=True, text=True
+).stdout.strip()
+if not pip_audit_version.endswith(" 2.9.0"):
+    raise SystemExit(f"pip-audit 2.9.0 is required, found: {pip_audit_version}")
+subprocess.run(
+    ["pip-audit", "--require-hashes", "-r", "requirements-build.lock"],
+    cwd=ROOT,
+    check=True,
+)
 print("dependency checks passed")

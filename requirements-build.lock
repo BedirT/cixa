@@ -1,0 +1,5 @@
+# Hashed build-only Python graph. Licenses are reviewed by scripts/license-check.py.
+build==1.4.2 --hash=sha256:7a4d8651ea877cb2a89458b1b198f2e69f536c95e89129dbf5d448045d60db88 # license: MIT
+packaging==26.0 --hash=sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529 # license: Apache-2.0 OR BSD-2-Clause
+pyproject_hooks==1.2.0 --hash=sha256:9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913 # license: MIT
+setuptools==83.0.0 --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3 # license: MIT
