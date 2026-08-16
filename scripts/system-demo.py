@@ -73,6 +73,10 @@ def purchase(key: str, amount: int = 500) -> dict:
     }
 
 
+def write_artifact(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
 with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_directory:
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
@@ -80,6 +84,8 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
     access_file = directory / "dashboard.token"
     socket_path = directory / "treasury.sock"
     owner_socket = directory / "owner.sock"
+    artifacts = directory / "artifacts"
+    artifacts.mkdir(mode=0o700)
     access_token = "synthetic-dashboard-access-only"
     access_file.write_text(access_token + "\n", encoding="utf-8")
     os.chmod(access_file, 0o600)
@@ -95,34 +101,62 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
     merchant_port = free_port()
     dashboard_port = free_port()
     processes: list[subprocess.Popen] = []
+    artifact_handles = []
+
+    def start_process(name: str, command: list[str]) -> None:
+        output = (artifacts / f"{name}.log").open("wb")
+        artifact_handles.append(output)
+        processes.append(subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=output))
+
     try:
-        processes.append(subprocess.Popen(
+        start_process(
+            "daemon",
             [str(BINARY), "serve", "--data-dir", str(directory), "--socket", str(socket_path)],
-            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ))
+        )
         wait_path(socket_path)
         wait_path(owner_socket)
-        processes.append(subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(merchant_port), "--bind", "127.0.0.1", "--directory", str(ROOT / "apps" / "test-merchant")],
-            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ))
-        processes.append(subprocess.Popen(
-            [sys.executable, str(ROOT / "apps" / "owner-dashboard" / "server.py"),
-             "--socket-path", str(owner_socket), "--owner-token-file", str(owner_file),
-             "--access-token-file", str(access_file), "--port", str(dashboard_port)],
-            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ))
+        start_process(
+            "merchant",
+            [
+                sys.executable,
+                "-m",
+                "http.server",
+                str(merchant_port),
+                "--bind",
+                "127.0.0.1",
+                "--directory",
+                str(ROOT / "apps" / "test-merchant"),
+            ],
+        )
+        start_process(
+            "dashboard",
+            [
+                sys.executable,
+                str(ROOT / "apps" / "owner-dashboard" / "server.py"),
+                "--socket-path",
+                str(owner_socket),
+                "--owner-token-file",
+                str(owner_file),
+                "--access-token-file",
+                str(access_file),
+                "--port",
+                str(dashboard_port),
+            ],
+        )
         time.sleep(0.2)
         assert http_status(merchant_port) == 200
         auth = base64.b64encode(f"owner:{access_token}".encode()).decode()
         assert http_status(dashboard_port, f"Basic {auth}") == 200
 
-        mcp = json.loads(subprocess.run(
+        mcp_result = subprocess.run(
             ["node", str(ROOT / "scripts" / "demo-mcp.mjs"),
              str(ROOT / "packages" / "mcp-server" / "dist" / "index.js"),
              str(socket_path), str(agent_file)],
             cwd=ROOT, check=True, capture_output=True, text=True,
-        ).stdout)
+        )
+        (artifacts / "mcp.stdout").write_text(mcp_result.stdout, encoding="utf-8")
+        (artifacts / "mcp.stderr").write_text(mcp_result.stderr, encoding="utf-8")
+        mcp = json.loads(mcp_result.stdout)
         client = TreasuryClient(str(socket_path), str(agent_file))
         starting_budget = client.get_budget()
         receiving = client.get_receive_instructions()
@@ -147,9 +181,41 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         stopped = client.create_purchase_intent(purchase("demo-stopped"))
         audit = run("audit", "--data-dir", str(directory), "--owner-token-file", str(owner_file))
         actions = [entry["action"] for entry in audit["entries"]]
+        provider_charge_count = sum(
+            entry["action"] == "provider_outcome"
+            and entry.get("intent_id") == valid["id"]
+            and entry.get("decision") == "settled"
+            for entry in audit["entries"]
+        )
+        write_artifact(
+            artifacts / "protocol-results.json",
+            {
+                "mcp": mcp,
+                "starting_budget": starting_budget,
+                "receiving": receiving,
+                "settled": settled,
+                "receipt": receipt,
+                "remaining_budget": remaining_budget,
+                "duplicate": duplicate,
+                "adversarial_results": [over_budget, recurring, currency, hostile, stopped],
+                "audit": audit,
+            },
+        )
+        canary_result = subprocess.run(
+            [str(BINARY), "demo"], cwd=ROOT, check=True, capture_output=True, text=True
+        )
+        (artifacts / "secret-provider.stdout").write_text(
+            canary_result.stdout, encoding="utf-8"
+        )
+        (artifacts / "secret-provider.stderr").write_text(
+            canary_result.stderr, encoding="utf-8"
+        )
+        canary_report = json.loads(canary_result.stdout)
+        for handle in artifact_handles:
+            handle.flush()
         scan = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "secret-canary-scan.py"), "build"],
-            cwd=ROOT, check=True, capture_output=True, text=True,
+            [sys.executable, str(ROOT / "scripts" / "secret-canary-scan.py"), str(artifacts)],
+            cwd=ROOT, check=False, capture_output=True, text=True,
         )
         report = {
             "demo": "passed",
@@ -165,14 +231,20 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             "receipt": receipt,
             "remaining_budget": remaining_budget,
             "duplicate_intent_same_id": duplicate["id"] == valid["id"],
-            "provider_charge_count_after_duplicate": 1,
+            "provider_charge_count_after_duplicate": provider_charge_count,
             "over_budget": over_budget,
             "recurring": recurring,
             "currency_substitution": currency,
             "merchant_controlled_form": hostile,
             "emergency_stop": stopped,
             "audit_chain": "valid" if audit["chain_valid"] else "invalid",
-            "secret_canary": {"full_pan_or_cvv_emitted": False, "scan": scan.stdout.strip()},
+            "secret_canary": {
+                "injected_through_secret_provider": canary_report["secret_canary"][
+                    "volatile_secret_consumed_and_cleared"
+                ],
+                "full_pan_or_cvv_emitted": scan.returncode != 0,
+                "scan": "passed" if scan.returncode == 0 else "failed",
+            },
         }
         print(json.dumps(report, indent=2))
     finally:
@@ -183,3 +255,5 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+        for handle in artifact_handles:
+            handle.close()
