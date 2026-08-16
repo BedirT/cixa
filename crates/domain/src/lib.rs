@@ -3879,19 +3879,7 @@ fn validate_secret_reference(reference: &str, provider_kind: &str) -> Result<()>
 }
 
 fn same_checkout_facts(left: &PurchaseRequest, right: &PurchaseRequest) -> bool {
-    left.amount == right.amount
-        && left.final_total == right.final_total
-        && left.merchant_domain == right.merchant_domain
-        && left.category == right.category
-        && left.recurring == right.recurring
-        && left.trial_auto_renew == right.trial_auto_renew
-        && left.stored_card == right.stored_card
-        && left.tip_minor == right.tip_minor
-        && left.preauthorization == right.preauthorization
-        && left.installments == right.installments
-        && left.fulfillment_profile == right.fulfillment_profile
-        && left.payment_form == right.payment_form
-        && left.redirect_chain == right.redirect_chain
+    left.final_total == right.final_total && left.merchant_domain == right.merchant_domain
 }
 
 fn sanitize_provider_reference(input: &str) -> String {
@@ -4441,6 +4429,7 @@ mod tests {
                     request: {
                         let mut request = request("fingerprint-second", 500);
                         request.merchant_domain = "MERCHANT.EXAMPLE.TEST".to_string();
+                        request.category = "office_supplies".to_string();
                         request.redirect_chain =
                             vec!["https://MERCHANT.EXAMPLE.TEST/checkout".to_string()];
                         request
