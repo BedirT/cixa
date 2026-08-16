@@ -80,6 +80,17 @@ class TreasuryClient:
                 raise ValueError(f"{field}.minor must be a positive integer")
             if not isinstance(money.get("currency"), str) or len(money["currency"]) != 3 or not money["currency"].isupper():
                 raise ValueError(f"{field}.currency must be an uppercase ISO 4217 code")
+        items = request.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= 50:
+            raise ValueError("items must contain 1..50 entries")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("each item must be an object")
+            _bounded(str(item.get("label", "")), "item.label", 160)
+            if not isinstance(item.get("quantity"), int) or not 1 <= item["quantity"] <= 10_000:
+                raise ValueError("item.quantity is invalid")
+            if not isinstance(item.get("unit_price_minor"), int) or item["unit_price_minor"] < 0:
+                raise ValueError("item.unit_price_minor is invalid")
         return self.request({"type": "create_purchase_intent", "request": request})
 
     def get_purchase_intent(self, intent_id: str) -> dict[str, Any]:
@@ -100,4 +111,3 @@ class TreasuryClient:
     def get_receipt(self, intent_id: str) -> dict[str, Any]:
         _bounded(intent_id, "intent_id", 128)
         return self.request({"type": "get_receipt", "intent_id": intent_id})
-

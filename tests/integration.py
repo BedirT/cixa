@@ -126,6 +126,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
             "final_total": {"minor": 500, "currency": "CAD"},
             "merchant_domain": "merchant.example.test",
             "category": "software",
+            "items": [{"label": "integration item", "quantity": 1, "unit_price_minor": 500}],
             "recurring": False,
             "trial_auto_renew": False,
             "stored_card": False,

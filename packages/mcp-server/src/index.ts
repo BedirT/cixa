@@ -25,6 +25,11 @@ const purchaseInput = z.object({
   final_total: money,
   merchant_domain: z.string().min(1).max(253),
   category: z.string().min(1).max(64),
+  items: z.array(z.object({
+    label: z.string().min(1).max(160),
+    quantity: z.number().int().positive().max(10_000),
+    unit_price_minor: z.number().int().nonnegative().safe(),
+  }).strict()).min(1).max(50),
   recurring: z.boolean(),
   trial_auto_renew: z.boolean(),
   stored_card: z.boolean(),

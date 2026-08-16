@@ -505,12 +505,21 @@ impl Policy {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct PurchaseItem {
+    pub label: String,
+    pub quantity: u32,
+    pub unit_price_minor: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PurchaseRequest {
     pub idempotency_key: String,
     pub amount: Money,
     pub final_total: Money,
     pub merchant_domain: String,
     pub category: String,
+    pub items: Vec<PurchaseItem>,
     pub recurring: bool,
     pub trial_auto_renew: bool,
     pub stored_card: bool,
@@ -534,6 +543,30 @@ impl PurchaseRequest {
         bounded(&self.session_id, "session_id", 128)?;
         if self.amount.minor <= 0 || self.final_total.minor <= 0 {
             return Err(TreasuryError::Invalid("purchase amount must be positive".to_string()));
+        }
+        if self.items.is_empty() || self.items.len() > 50 {
+            return Err(TreasuryError::Invalid(
+                "purchase must contain 1..50 line items".to_string(),
+            ));
+        }
+        let mut item_total = 0_i64;
+        for item in &self.items {
+            bounded(&item.label, "item_label", 160)?;
+            if item.quantity == 0 || item.quantity > 10_000 || item.unit_price_minor < 0 {
+                return Err(TreasuryError::Invalid("purchase line item is invalid".to_string()));
+            }
+            item_total = item_total
+                .checked_add(
+                    item.unit_price_minor.checked_mul(i64::from(item.quantity)).ok_or_else(
+                        || TreasuryError::Money("line-item total overflow".to_string()),
+                    )?,
+                )
+                .ok_or_else(|| TreasuryError::Money("line-item total overflow".to_string()))?;
+        }
+        if item_total > self.amount.minor {
+            return Err(TreasuryError::Invalid(
+                "line-item subtotal exceeds the approved amount".to_string(),
+            ));
         }
         if self.tip_minor < 0 {
             return Err(TreasuryError::Invalid("tip amount cannot be negative".to_string()));
@@ -761,7 +794,8 @@ pub struct SimulatedProvider {
     pub incoming_deposits: Vec<Money>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ProviderOutcome {
     Approved { reference: String },
     Declined { reason: String },
@@ -3703,6 +3737,7 @@ impl Treasury {
             "amount": intent.request.final_total,
             "merchant_domain": intent.request.merchant_domain,
             "category": intent.request.category,
+            "items": intent.request.items,
             "fulfillment_profile": intent.request.fulfillment_profile,
             "decision": intent.decision,
             "policy_version": intent.policy_version,
@@ -4638,6 +4673,11 @@ mod tests {
             final_total: Money::positive(amount, "CAD").unwrap(),
             merchant_domain: "merchant.example.test".to_string(),
             category: "software".to_string(),
+            items: vec![PurchaseItem {
+                label: "test item".to_string(),
+                quantity: 1,
+                unit_price_minor: amount,
+            }],
             recurring: false,
             trial_auto_renew: false,
             stored_card: false,

@@ -31,6 +31,7 @@ PYTHONPATH="$ROOT/packages/sdk-python" python3 -m unittest discover -s packages/
 python3 -m py_compile apps/owner-dashboard/server.py packages/sdk-python/agent_treasury.py tests/*.py scripts/*.py
 printf '%s\n' '[9/14] Persisted daemon integration'
 PYTHONPATH="$ROOT/packages/sdk-python" python3 tests/integration.py
+python3 tests/handoff.py
 printf '%s\n' '[10/14] Owner dashboard integration'
 python3 tests/dashboard.py
 printf '%s\n' '[11/14] Adversarial demo'

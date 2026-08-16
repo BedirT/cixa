@@ -261,6 +261,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
             "final_total": {"minor": 500, "currency": "CAD"},
             "merchant_domain": "merchant.example.test",
             "category": "software",
+            "items": [{"label": "dashboard item", "quantity": 1, "unit_price_minor": 500}],
             "recurring": False,
             "trial_auto_renew": False,
             "stored_card": False,
@@ -290,17 +291,24 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
             "scenario": "normal",
         }
         owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
-        owner_token = owner_file.read_text().strip()
-        handoff = rpc(
-            owner_socket_path,
-            owner_token,
-            {"type": "owner_begin_manual_handoff", "intent_id": intent["id"]},
+        handoff = run(
+            "begin-handoff",
+            "--data-dir",
+            str(directory),
+            "--owner-token-file",
+            str(owner_file),
+            "--intent-id",
+            intent["id"],
         )
         assert handoff["status"] == "owner_handoff_ready"
-        execution = rpc(
-            owner_socket_path,
-            owner_token,
-            {"type": "owner_complete_manual_handoff", "intent_id": intent["id"]},
+        execution = run(
+            "complete-handoff",
+            "--data-dir",
+            str(directory),
+            "--owner-token-file",
+            str(owner_file),
+            "--intent-id",
+            intent["id"],
         )
         assert execution["status"] == "unknown"
         owner_post(

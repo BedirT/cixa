@@ -1,7 +1,13 @@
 use agent_treasury_domain::{
-    API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money, Policy,
-    PurchaseRequest, ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider,
-    SimulatedScenario, SimulatedSecretProvider, Treasury, redact_sensitive,
+    API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money,
+    OwnerHandoffTransport, Policy, ProviderOutcome, PurchaseItem, PurchaseRequest,
+    ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider, SimulatedScenario,
+    SimulatedSecretProvider, Treasury, VolatileSecret, redact_sensitive,
+};
+#[cfg(unix)]
+use agent_treasury_domain::{
+    DurableNonceRedemptionStore, OwnerControlledSecretHelperProvider,
+    redeem_owner_helper_operation, unix_peer_effective_uid,
 };
 use fs2::FileExt;
 use serde_json::{Value, json};
@@ -9,6 +15,7 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -109,6 +116,9 @@ fn run() -> CliResult<()> {
         "approve" => owner_intent_command(&rest, false),
         "begin-handoff" => owner_handoff_command(&rest, false),
         "complete-handoff" => owner_handoff_command(&rest, true),
+        "init-helper" => init_helper_command(&rest),
+        "secret-helper" => secret_helper_command(&rest),
+        "execute-handoff" => execute_handoff_command(&rest),
         "approve-merchant" => approve_merchant_command(&rest),
         "reconcile" => reconcile_command(&rest),
         "stop" => stop_command(&rest, true),
@@ -121,7 +131,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -175,6 +185,109 @@ fn write_token(path: &Path, token: &str) -> CliResult<()> {
     file.write_all(format!("{token}\n").as_bytes())?;
     file.sync_all()?;
     Ok(())
+}
+
+fn read_private_text(path: &Path, label: &str) -> CliResult<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label} must be a regular file").into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!("{label} permissions are too broad").into());
+        }
+    }
+    let value = fs::read_to_string(path)?.trim().to_string();
+    if value.is_empty() {
+        return Err(format!("{label} is empty").into());
+    }
+    Ok(value)
+}
+
+fn require_absolute_regular_file(path: &Path, label: &str) -> CliResult<()> {
+    if !path.is_absolute() {
+        return Err(format!("{label} must be an absolute path").into());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label} must be a regular non-symlink file").into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(
+                format!("{label} must be owner-controlled and not group/world writable").into()
+            );
+        }
+    }
+    Ok(())
+}
+
+struct PlaywrightCheckoutTransport {
+    node_path: PathBuf,
+    adapter_script: PathBuf,
+    adapter_config: PathBuf,
+}
+
+impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
+    fn transport_id(&self) -> &str {
+        "owner-controlled-playwright"
+    }
+
+    fn submit(
+        &mut self,
+        request: &PurchaseRequest,
+        secret: &VolatileSecret,
+    ) -> agent_treasury_domain::Result<ProviderOutcome> {
+        let secret: Value = serde_json::from_slice(secret.as_bytes()).map_err(|_| {
+            agent_treasury_domain::TreasuryError::Invalid(
+                "owner secret must be a JSON object for the controlled checkout adapter"
+                    .to_string(),
+            )
+        })?;
+        let mut child = Command::new(&self.node_path)
+            .arg(&self.adapter_script)
+            .arg(&self.adapter_config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let encoded = serde_json::to_vec(&json!({ "request": request, "secret": secret }))?;
+        if encoded.len() > 16 * 1024 {
+            let _ = child.kill();
+            return Err(agent_treasury_domain::TreasuryError::Invalid(
+                "checkout adapter request is too large".to_string(),
+            ));
+        }
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            agent_treasury_domain::TreasuryError::Conflict(
+                "checkout adapter stdin is unavailable".to_string(),
+            )
+        })?;
+        stdin.write_all(&encoded)?;
+        stdin.write_all(b"\n")?;
+        drop(stdin);
+        let output = child.wait_with_output()?;
+        if !output.status.success() || output.stdout.len() > 16 * 1024 {
+            return Err(agent_treasury_domain::TreasuryError::Conflict(
+                "controlled checkout adapter failed; payment outcome is unknown".to_string(),
+            ));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            agent_treasury_domain::TreasuryError::Conflict(
+                "controlled checkout adapter returned an invalid sanitized outcome".to_string(),
+            )
+        })
+    }
+
+    fn cleanup(&mut self) -> agent_treasury_domain::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -460,6 +573,18 @@ fn owner_intent_command(args: &[String], _unused: bool) -> CliResult<()> {
 
 fn owner_handoff_command(args: &[String], complete: bool) -> CliResult<()> {
     let token = token_file(args, true)?;
+    #[cfg(unix)]
+    {
+        let directory = data_dir(args)?;
+        let owner_socket = value(args, "--owner-socket")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| directory.join("owner.sock"));
+        if !owner_socket.exists() {
+            return Err(
+                "manual handoff commands require a continuously running broker daemon".into()
+            );
+        }
+    }
     let intent_id = required(args, "--intent-id")?;
     let operation = if complete {
         Request::OwnerCompleteManualHandoff { intent_id }
@@ -467,6 +592,177 @@ fn owner_handoff_command(args: &[String], complete: bool) -> CliResult<()> {
         Request::OwnerBeginManualHandoff { intent_id }
     };
     print_json(&run_request(args, token, operation)?)
+}
+
+#[cfg(unix)]
+fn init_helper_command(args: &[String]) -> CliResult<()> {
+    let directory = PathBuf::from(required(args, "--helper-dir")?);
+    fs::create_dir_all(&directory)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let mut random = [0_u8; 48];
+    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let key_path = directory.join("helper.key");
+    let id_path = directory.join("helper.id");
+    write_token(&key_path, &hex::encode(&random[..32]))?;
+    write_token(&id_path, &hex::encode(&random[32..]))?;
+    print_json(&json!({
+        "initialized": true,
+        "helper_key_file": key_path,
+        "helper_id_file": id_path,
+        "rotate_by_reinitializing_only_when_no_handoff_is_active": true,
+    }))
+}
+
+#[cfg(not(unix))]
+fn init_helper_command(_args: &[String]) -> CliResult<()> {
+    Err("the owner helper requires authenticated Unix-domain sockets".into())
+}
+
+#[cfg(unix)]
+fn secret_helper_command(args: &[String]) -> CliResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let socket_path = PathBuf::from(required(args, "--socket")?);
+    let helper_key =
+        read_private_text(&PathBuf::from(required(args, "--helper-key-file")?), "helper key file")?;
+    let helper_id =
+        read_private_text(&PathBuf::from(required(args, "--helper-id-file")?), "helper id file")?;
+    let redemption_store =
+        DurableNonceRedemptionStore::open(PathBuf::from(required(args, "--redemption-dir")?))?;
+    if socket_path.exists() {
+        return Err("secret-helper socket already exists".into());
+    }
+    let mut secret = Vec::new();
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+        let mut terminal: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut terminal) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let original = terminal;
+        terminal.c_lflag &= !libc::ECHO;
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &terminal) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        eprint!("Owner payment JSON (hidden): ");
+        let read_result = std::io::stdin().take(4097).read_to_end(&mut secret);
+        let restore_result =
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &original) };
+        eprintln!();
+        read_result?;
+        if restore_result != 0 {
+            secret.fill(0);
+            return Err(std::io::Error::last_os_error().into());
+        }
+    } else {
+        std::io::stdin().take(4097).read_to_end(&mut secret)?;
+    }
+    while matches!(secret.last(), Some(b'\n' | b'\r')) {
+        secret.pop();
+    }
+    if secret.is_empty() || secret.len() > 4096 {
+        return Err("owner secret on stdin must contain 1..4096 bytes".into());
+    }
+    let listener = UnixListener::bind(&socket_path)?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+    let result = (|| -> CliResult<()> {
+        let (stream, _) = listener.accept()?;
+        let peer_uid = unix_peer_effective_uid(&stream)?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.by_ref().take((MAX_FRAME_BYTES + 1) as u64).read_line(&mut line)?;
+        if line.len() > MAX_FRAME_BYTES || !line.ends_with('\n') {
+            return Err("secret-helper request frame is invalid".into());
+        }
+        let operation: ApprovedSecretOperation = serde_json::from_str(&line)?;
+        redeem_owner_helper_operation(
+            &operation,
+            helper_key.as_bytes(),
+            &helper_id,
+            peer_uid,
+            &redemption_store,
+        )?;
+        let mut stream = reader.into_inner();
+        stream.write_all(&(secret.len() as u32).to_be_bytes())?;
+        stream.write_all(&secret)?;
+        stream.flush()?;
+        Ok(())
+    })();
+    secret.fill(0);
+    let _ = fs::remove_file(&socket_path);
+    result
+}
+
+#[cfg(not(unix))]
+fn secret_helper_command(_args: &[String]) -> CliResult<()> {
+    Err("the owner helper requires authenticated Unix-domain sockets".into())
+}
+
+#[cfg(unix)]
+fn execute_handoff_command(args: &[String]) -> CliResult<()> {
+    let directory = data_dir(args)?;
+    let _lock = DataDirLock::acquire(&directory)?;
+    let owner_token = token_file(args, true)?;
+    let intent_id = required(args, "--intent-id")?;
+    let helper_socket = PathBuf::from(required(args, "--helper-socket")?);
+    let helper_key =
+        read_private_text(&PathBuf::from(required(args, "--helper-key-file")?), "helper key file")?;
+    let helper_id =
+        read_private_text(&PathBuf::from(required(args, "--helper-id-file")?), "helper id file")?;
+    let node_path = PathBuf::from(required(args, "--node-path")?);
+    let adapter_script = PathBuf::from(required(args, "--adapter-script")?);
+    let adapter_config = PathBuf::from(required(args, "--adapter-config")?);
+    require_absolute_regular_file(&node_path, "Node executable")?;
+    require_absolute_regular_file(&adapter_script, "checkout adapter script")?;
+    require_absolute_regular_file(&adapter_config, "checkout adapter config")?;
+    let mut treasury = Treasury::load_from(&directory)?;
+    if treasury.recover_interrupted_executions()? > 0 {
+        treasury.save_to(&directory)?;
+    }
+    let operation = treasury.bind_approved_secret_helper_operation(
+        &owner_token,
+        &intent_id,
+        helper_key.as_bytes(),
+        &helper_id,
+        unsafe { libc::geteuid() },
+    )?;
+    let reference = treasury
+        .state
+        .manual_provider
+        .as_ref()
+        .ok_or("manual provider is not configured")?
+        .card
+        .reference
+        .clone();
+    let expected_request = treasury
+        .state
+        .intents
+        .get(&intent_id)
+        .ok_or("purchase intent was not found")?
+        .request
+        .clone();
+    let provider =
+        OwnerControlledSecretHelperProvider::new(helper_socket, &reference, operation.clone())?;
+    let transport = PlaywrightCheckoutTransport { node_path, adapter_script, adapter_config };
+    let mut executor = agent_treasury_domain::SecureOwnerHandoffExecutor::new(
+        operation,
+        expected_request,
+        provider,
+        transport,
+    )?;
+    let result = treasury.owner_execute_approved_handoff_persisted(
+        &owner_token,
+        &intent_id,
+        &mut executor,
+        &directory,
+    )?;
+    print_json(&result)
+}
+
+#[cfg(not(unix))]
+fn execute_handoff_command(_args: &[String]) -> CliResult<()> {
+    Err("controlled checkout requires authenticated Unix-domain sockets".into())
 }
 
 fn approve_merchant_command(args: &[String]) -> CliResult<()> {
@@ -742,6 +1038,11 @@ fn demo_request(key: &str, amount: i64) -> PurchaseRequest {
         final_total: Money::positive(amount, "CAD").expect("demo money"),
         merchant_domain: "merchant.example.test".to_string(),
         category: "software".to_string(),
+        items: vec![PurchaseItem {
+            label: "demo item".to_string(),
+            quantity: 1,
+            unit_price_minor: amount,
+        }],
         recurring: false,
         trial_auto_renew: false,
         stored_card: false,

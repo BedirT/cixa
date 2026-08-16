@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "agent-treasury-domain",
  "fs2",
+ "hex",
  "libc",
  "serde",
  "serde_json",

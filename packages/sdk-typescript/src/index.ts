@@ -133,6 +133,17 @@ export class BrokerClient {
     for (const [field, max] of [["idempotency_key", 128], ["merchant_domain", 253], ["category", 64], ["fulfillment_profile", 64], ["session_id", 128]] as const) {
       assertBounded(String(request[field]), field, max);
     }
+    const items = request.items;
+    if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
+      throw new TypeError("items must contain 1..50 entries");
+    }
+    for (const item of items as Array<Record<string, unknown>>) {
+      assertBounded(String(item.label), "item.label", 160);
+      if (!Number.isInteger(item.quantity) || Number(item.quantity) <= 0 || Number(item.quantity) > 10_000
+          || !Number.isSafeInteger(item.unit_price_minor) || Number(item.unit_price_minor) < 0) {
+        throw new TypeError("purchase item quantity or unit price is invalid");
+      }
+    }
     return this.request({ type: "create_purchase_intent", request });
   }
 
@@ -160,4 +171,3 @@ export class BrokerClient {
     return this.request({ type: "get_receipt", intent_id: intentId });
   }
 }
-
