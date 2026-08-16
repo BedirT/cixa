@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+printf '%s\n' '[1/14] Rust format'
+cargo fmt --all -- --check
+printf '%s\n' '[2/14] Rust build'
+cargo build --locked --workspace
+printf '%s\n' '[3/14] Rust clippy'
+cargo clippy --locked --workspace --all-targets -- -D warnings
+printf '%s\n' '[4/14] Rust tests'
+cargo test --locked --workspace
+printf '%s\n' '[5/14] Fuzz harness build'
+cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+printf '%s\n' '[6/14] Node dependencies and build'
+npm ci --ignore-scripts
+npm run build
+printf '%s\n' '[7/14] Node tests'
+npm test
+node tests/mcp-smoke.mjs
+printf '%s\n' '[8/14] Python tests and compile'
+PYTHONPATH="$ROOT/packages/sdk-python" python3 -m unittest discover -s packages/sdk-python/tests
+python3 -m py_compile apps/owner-dashboard/server.py packages/sdk-python/agent_treasury.py tests/*.py scripts/*.py
+printf '%s\n' '[9/14] Persisted daemon integration'
+PYTHONPATH="$ROOT/packages/sdk-python" python3 tests/integration.py
+printf '%s\n' '[10/14] Owner dashboard integration'
+python3 tests/dashboard.py
+printf '%s\n' '[11/14] Adversarial demo'
+python3 tests/adversarial.py
+printf '%s\n' '[12/14] Documentation and supply chain'
+python3 scripts/check-docs.py
+python3 scripts/dependency-check.py
+python3 scripts/license-check.py
+python3 scripts/sbom.py
+printf '%s\n' '[13/14] Secret-canary scan'
+python3 scripts/secret-canary-scan.py build
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks dir --redact --no-banner build
+else
+  printf '%s\n' 'gitleaks not installed locally; generated-artifact canary scan remains mandatory'
+fi
+printf '%s\n' '[14/14] Verification complete'
+printf '%s\n' 'agent-treasury verification passed'
