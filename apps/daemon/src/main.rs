@@ -10,16 +10,16 @@ use agent_treasury_domain::{
     redeem_owner_helper_operation, unix_peer_effective_uid,
 };
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use wait_timeout::ChildExt;
+use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -226,6 +226,22 @@ fn require_absolute_regular_file(path: &Path, label: &str) -> CliResult<()> {
                 format!("{label} must be owner-controlled and not group/world writable").into()
             );
         }
+        let effective_uid = unsafe { libc::geteuid() };
+        let mut ancestor = path.parent();
+        while let Some(directory) = ancestor {
+            let metadata = fs::symlink_metadata(directory)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || (metadata.uid() != 0 && metadata.uid() != effective_uid)
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(format!(
+                    "{label} ancestors must be root/owner-controlled non-symlink directories"
+                )
+                .into());
+            }
+            ancestor = directory.parent();
+        }
     }
     Ok(())
 }
@@ -240,13 +256,109 @@ fn require_owner_executable(path: &Path, label: &str) -> CliResult<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckoutSecret<'a> {
+    pan: &'a str,
+    expiry: &'a str,
+    cvv: &'a str,
+    #[serde(default)]
+    cardholder: Option<&'a str>,
+}
+
+#[cfg(unix)]
+#[derive(Serialize)]
+struct CheckoutAdapterInput<'a> {
+    config: &'a Value,
+    request: &'a PurchaseRequest,
+    secret: CheckoutSecret<'a>,
+}
+
+#[cfg(unix)]
+fn terminate_child_group(child: &mut Child) {
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn collect_child_output(
+    child: &mut Child,
+    mut stdout: ChildStdout,
+    timeout: Duration,
+) -> agent_treasury_domain::Result<(ExitStatus, Vec<u8>)> {
+    use std::os::fd::AsRawFd;
+
+    let descriptor = stdout.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        terminate_child_group(child);
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut status = None;
+    let mut eof = false;
+    while Instant::now() < deadline {
+        let mut buffer = [0_u8; 4096];
+        match stdout.read(&mut buffer) {
+            Ok(0) => eof = true,
+            Ok(count) => {
+                output.extend_from_slice(&buffer[..count]);
+                if output.len() > 16 * 1024 {
+                    terminate_child_group(child);
+                    return Err(agent_treasury_domain::TreasuryError::Conflict(
+                        "controlled checkout adapter output is too large".to_string(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                terminate_child_group(child);
+                return Err(error.into());
+            }
+        }
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    terminate_child_group(child);
+                    return Err(error.into());
+                }
+            };
+        }
+        if let Some(status) = status
+            && eof
+        {
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            return Ok((status, output));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    terminate_child_group(child);
+    Err(agent_treasury_domain::TreasuryError::Conflict(
+        "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
+            .to_string(),
+    ))
+}
+
+#[cfg(unix)]
 struct PlaywrightCheckoutTransport {
     node_path: PathBuf,
     adapter_script: PathBuf,
-    adapter_config: PathBuf,
-    hard_timeout: Duration,
+    adapter_config: Value,
+    deadline: Instant,
 }
 
+#[cfg(unix)]
 impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
     fn transport_id(&self) -> &str {
         "owner-controlled-playwright"
@@ -257,23 +369,28 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         request: &PurchaseRequest,
         secret: &VolatileSecret,
     ) -> agent_treasury_domain::Result<ProviderOutcome> {
-        let trimmed = secret.as_bytes().iter().copied().skip_while(u8::is_ascii_whitespace);
-        if trimmed.clone().next() != Some(b'{')
-            || trimmed.filter(|byte| !byte.is_ascii_whitespace()).last() != Some(b'}')
+        let secret: CheckoutSecret<'_> =
+            serde_json::from_slice(secret.as_bytes()).map_err(|_| {
+                agent_treasury_domain::TreasuryError::Invalid(
+                "owner secret must be one strict JSON object for the controlled checkout adapter"
+                    .to_string(),
+            )
+            })?;
+        if secret.pan.is_empty()
+            || secret.pan.len() > 32
+            || secret.expiry.is_empty()
+            || secret.expiry.len() > 16
+            || secret.cvv.is_empty()
+            || secret.cvv.len() > 8
+            || secret.cardholder.is_some_and(|value| value.is_empty() || value.len() > 128)
         {
             return Err(agent_treasury_domain::TreasuryError::Invalid(
-                "owner secret must be a JSON object for the controlled checkout adapter"
-                    .to_string(),
+                "owner secret fields are missing or outside their size limits".to_string(),
             ));
         }
-        let request = serde_json::to_vec(request)?;
-        let mut encoded =
-            Zeroizing::new(Vec::with_capacity(request.len() + secret.as_bytes().len() + 25));
-        encoded.extend_from_slice(b"{\"request\":");
-        encoded.extend_from_slice(&request);
-        encoded.extend_from_slice(b",\"secret\":");
-        encoded.extend_from_slice(secret.as_bytes());
-        encoded.extend_from_slice(b"}\n");
+        let input = CheckoutAdapterInput { config: &self.adapter_config, request, secret };
+        let mut encoded = Zeroizing::new(serde_json::to_vec(&input)?);
+        encoded.push(b'\n');
         if encoded.len() > 16 * 1024 {
             return Err(agent_treasury_domain::TreasuryError::Invalid(
                 "checkout adapter request is too large".to_string(),
@@ -282,7 +399,6 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let mut command = Command::new(&self.node_path);
         command
             .arg(&self.adapter_script)
-            .arg(&self.adapter_config)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -292,45 +408,39 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             command.process_group(0);
         }
         let mut child = command.spawn()?;
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            agent_treasury_domain::TreasuryError::Conflict(
-                "checkout adapter stdin is unavailable".to_string(),
-            )
-        })?;
-        stdin.write_all(&encoded)?;
-        encoded.zeroize();
-        drop(stdin);
-        let stdout = child.stdout.take().ok_or_else(|| {
-            agent_treasury_domain::TreasuryError::Conflict(
-                "checkout adapter stdout is unavailable".to_string(),
-            )
-        })?;
-        let reader = std::thread::spawn(move || {
-            let mut output = Vec::new();
-            stdout.take(16 * 1024 + 1).read_to_end(&mut output).map(|_| output)
-        });
-        let status = match child.wait_timeout(self.hard_timeout)? {
-            Some(status) => status,
+        let mut stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
             None => {
-                #[cfg(unix)]
-                unsafe {
-                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-                }
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
+                terminate_child_group(&mut child);
                 return Err(agent_treasury_domain::TreasuryError::Conflict(
-                    "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
-                        .to_string(),
+                    "checkout adapter stdin is unavailable".to_string(),
                 ));
             }
         };
-        let output = reader.join().map_err(|_| {
-            agent_treasury_domain::TreasuryError::Conflict(
-                "checkout adapter output reader failed".to_string(),
-            )
-        })??;
-        if !status.success() || output.len() > 16 * 1024 {
+        if let Err(error) = stdin.write_all(&encoded) {
+            terminate_child_group(&mut child);
+            return Err(error.into());
+        }
+        encoded.zeroize();
+        drop(stdin);
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate_child_group(&mut child);
+                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                    "checkout adapter stdout is unavailable".to_string(),
+                ));
+            }
+        };
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            terminate_child_group(&mut child);
+            return Err(agent_treasury_domain::TreasuryError::Conflict(
+                "owner handoff deadline expired before adapter completion".to_string(),
+            ));
+        }
+        let (status, output) = collect_child_output(&mut child, stdout, remaining)?;
+        if !status.success() {
             return Err(agent_treasury_domain::TreasuryError::Conflict(
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
             ));
@@ -681,21 +791,39 @@ fn init_helper_command(_args: &[String]) -> CliResult<()> {
 }
 
 #[cfg(unix)]
+struct SocketPathGuard(PathBuf);
+
+#[cfg(unix)]
+impl Drop for SocketPathGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
 fn secret_helper_command(args: &[String]) -> CliResult<()> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
     let socket_path = PathBuf::from(required(args, "--socket")?);
-    let helper_key =
-        read_private_text(&PathBuf::from(required(args, "--helper-key-file")?), "helper key file")?;
-    let helper_id =
-        read_private_text(&PathBuf::from(required(args, "--helper-id-file")?), "helper id file")?;
+    let helper_key = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-key-file")?),
+        "helper key file",
+    )?);
+    let helper_id = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-id-file")?),
+        "helper id file",
+    )?);
     let redemption_store =
         DurableNonceRedemptionStore::open(PathBuf::from(required(args, "--redemption-dir")?))?;
     if socket_path.exists() {
         return Err("secret-helper socket already exists".into());
     }
-    let mut secret = Vec::new();
+    let listener = UnixListener::bind(&socket_path)?;
+    let _socket_guard = SocketPathGuard(socket_path.clone());
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    let mut secret = Zeroizing::new(Vec::new());
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
         let mut terminal: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut terminal) } != 0 {
@@ -725,10 +853,24 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
     if secret.is_empty() || secret.len() > 4096 {
         return Err("owner secret on stdin must contain 1..4096 bytes".into());
     }
-    let listener = UnixListener::bind(&socket_path)?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
     let result = (|| -> CliResult<()> {
-        let (stream, _) = listener.accept()?;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "secret-helper expired before an authenticated broker connected".into(),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         let peer_uid = unix_peer_effective_uid(&stream)?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -750,8 +892,6 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
         stream.flush()?;
         Ok(())
     })();
-    secret.fill(0);
-    let _ = fs::remove_file(&socket_path);
     result
 }
 
@@ -767,10 +907,14 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
     let owner_token = token_file(args, true)?;
     let intent_id = required(args, "--intent-id")?;
     let helper_socket = PathBuf::from(required(args, "--helper-socket")?);
-    let helper_key =
-        read_private_text(&PathBuf::from(required(args, "--helper-key-file")?), "helper key file")?;
-    let helper_id =
-        read_private_text(&PathBuf::from(required(args, "--helper-id-file")?), "helper id file")?;
+    let helper_key = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-key-file")?),
+        "helper key file",
+    )?);
+    let helper_id = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-id-file")?),
+        "helper id file",
+    )?);
     let node_path = PathBuf::from(required(args, "--node-path")?);
     let adapter_script = PathBuf::from(required(args, "--adapter-script")?);
     let adapter_config = PathBuf::from(required(args, "--adapter-config")?);
@@ -794,6 +938,7 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
     }
     let hard_timeout =
         Duration::from_millis(timeout_ms.saturating_mul(2).saturating_add(1_000).min(180_000));
+    let handoff_deadline = Instant::now() + hard_timeout;
     let mut treasury = Treasury::load_from(&directory)?;
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
@@ -821,9 +966,14 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
         .request
         .clone();
     let provider =
-        OwnerControlledSecretHelperProvider::new(helper_socket, &reference, operation.clone())?;
-    let transport =
-        PlaywrightCheckoutTransport { node_path, adapter_script, adapter_config, hard_timeout };
+        OwnerControlledSecretHelperProvider::new(helper_socket, &reference, operation.clone())?
+            .with_deadline(handoff_deadline);
+    let transport = PlaywrightCheckoutTransport {
+        node_path,
+        adapter_script,
+        adapter_config: config,
+        deadline: handoff_deadline,
+    };
     let mut executor = agent_treasury_domain::SecureOwnerHandoffExecutor::new(
         operation,
         expected_request,

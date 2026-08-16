@@ -12,7 +12,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "wait-timeout",
  "zeroize",
 ]
 

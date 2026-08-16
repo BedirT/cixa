@@ -4434,6 +4434,7 @@ pub struct OwnerControlledSecretHelperProvider {
     reference: String,
     operation: ApprovedSecretOperation,
     consumed: bool,
+    deadline: Option<std::time::Instant>,
 }
 
 #[cfg(target_os = "macos")]
@@ -4487,7 +4488,18 @@ impl OwnerControlledSecretHelperProvider {
                     .to_string(),
             ));
         }
-        Ok(Self { socket_path, reference: reference.to_string(), operation, consumed: false })
+        Ok(Self {
+            socket_path,
+            reference: reference.to_string(),
+            operation,
+            consumed: false,
+            deadline: None,
+        })
+    }
+
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 }
 
@@ -4520,6 +4532,17 @@ impl SecretProvider for OwnerControlledSecretHelperProvider {
             ));
         }
         let mut stream = UnixStream::connect(&self.socket_path)?;
+        let timeout = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_else(|| std::time::Duration::from_secs(30));
+        if timeout.is_zero() {
+            return Err(TreasuryError::Conflict(
+                "owner handoff deadline expired before secret retrieval".to_string(),
+            ));
+        }
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         serde_json::to_writer(&mut stream, operation)?;
         stream.write_all(b"\n")?;
         stream.flush()?;
