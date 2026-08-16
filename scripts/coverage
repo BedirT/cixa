@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+  printf '%s\n' 'cargo-llvm-cov is required: cargo install cargo-llvm-cov --locked' >&2
+  exit 2
+fi
+if ! rustup run nightly rustc --version >/dev/null 2>&1; then
+  printf '%s\n' 'nightly with llvm-tools-preview is required' >&2
+  exit 2
+fi
+
+mkdir -p build
+cargo +nightly llvm-cov --workspace --branch --json --summary-only \
+  --output-path build/coverage-summary.json
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("build/coverage-summary.json").read_text(encoding="utf-8"))
+domain = next(
+    item["summary"]
+    for item in report["data"][0]["files"]
+    if item["filename"].endswith("crates/domain/src/lib.rs")
+)
+print(
+    "domain coverage: "
+    f"branches={domain['branches']['percent']:.2f}% "
+    f"lines={domain['lines']['percent']:.2f}% "
+    f"functions={domain['functions']['percent']:.2f}%"
+)
+PY

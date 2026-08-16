@@ -22,6 +22,7 @@ REQUIRED = [
     "docs/checkout-adapters.md",
     "docs/limitations.md",
     "docs/incident-response.md",
+    "docs/coverage.md",
     "docs/deployment.md",
     "docs/koho-setup.md",
     "docs/adr/0001-core-boundary.md",
