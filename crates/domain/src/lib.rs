@@ -1364,6 +1364,71 @@ impl Treasury {
         ApprovedSecretOperation::new(&new_id("secret_op"), intent_id, &card)
     }
 
+    pub fn bind_approved_secret_helper_operation(
+        &self,
+        owner_token: &str,
+        intent_id: &str,
+        helper_key: &[u8],
+    ) -> Result<ApprovedSecretOperation> {
+        let mut operation = self.bind_approved_secret_operation(owner_token, intent_id)?;
+        operation.sign_for_helper(helper_key)?;
+        Ok(operation)
+    }
+
+    pub fn owner_execute_approved_handoff(
+        &mut self,
+        owner_token: &str,
+        intent_id: &str,
+        executor: &mut dyn CheckoutExecutor,
+    ) -> Result<Value> {
+        let actor = self.authenticate(owner_token)?;
+        Self::require_owner(&actor)?;
+        if self.state.provider_mode != ProviderMode::ManualPrepaidCard {
+            return Err(TreasuryError::Conflict(
+                "owner handoff is available only for the manual prepaid-card provider".to_string(),
+            ));
+        }
+        let existing = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?
+            .clone();
+        if existing.state != TransactionState::Approved {
+            return Err(TreasuryError::Conflict(
+                "owner handoff requires an explicitly approved intent".to_string(),
+            ));
+        }
+        executor.validate_origin_and_total(&existing.request)?;
+        let agent_actor = Actor::Agent(existing.agent_id.clone());
+        let snapshot = self.state.clone();
+        if let Err(error) = self.prepare_intent_execution(&agent_actor, intent_id) {
+            self.state = snapshot;
+            return Err(error);
+        }
+        let executing = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?
+            .clone();
+        self.audit(
+            "owner",
+            "owner_checkout_handoff",
+            Some(intent_id),
+            Some(executing.policy_version),
+            Some("submitted"),
+            json!({ "executor_id": redact_sensitive(executor.executor_id()) }),
+        )?;
+        match executor.submit_once(&executing) {
+            Ok(outcome) => self.apply_provider_outcome(&existing.agent_id, intent_id, outcome),
+            Err(error) => {
+                self.quarantine_execution(intent_id, &error.to_string())?;
+                Err(error)
+            }
+        }
+    }
+
     pub fn bootstrap(owner_name: &str, initial_balance: Money) -> Result<Bootstrap> {
         bounded(owner_name, "owner_name", 128)?;
         let owner_token = new_token();
@@ -2380,14 +2445,29 @@ impl Treasury {
 
     fn complete_intent_execution(&mut self, actor: &Actor, intent_id: &str) -> Result<Value> {
         let agent_id = self.require_agent_scope(actor, "purchase_intents:execute")?.to_string();
-        let mut intent = self.intent_for_agent(&agent_id, intent_id)?.clone();
+        let intent = self.intent_for_agent(&agent_id, intent_id)?.clone();
         if intent.state != TransactionState::Executing {
             return Err(TreasuryError::Conflict(
                 "provider completion requires an executing intent".to_string(),
             ));
         }
-        let policy_version = intent.policy_version;
         let outcome = self.provider_authorize(&intent)?;
+        self.apply_provider_outcome(&agent_id, intent_id, outcome)
+    }
+
+    fn apply_provider_outcome(
+        &mut self,
+        agent_id: &str,
+        intent_id: &str,
+        outcome: ProviderOutcome,
+    ) -> Result<Value> {
+        let mut intent = self.intent_for_agent(agent_id, intent_id)?.clone();
+        if intent.state != TransactionState::Executing {
+            return Err(TreasuryError::Conflict(
+                "provider outcome requires an executing intent".to_string(),
+            ));
+        }
+        let policy_version = intent.policy_version;
         let response = match outcome {
             ProviderOutcome::Approved { reference } => {
                 intent.provider_reference = Some(sanitize_provider_reference(&reference));
@@ -2420,7 +2500,7 @@ impl Treasury {
             }
         };
         self.audit(
-            &agent_id,
+            agent_id,
             "provider_outcome",
             Some(intent_id),
             Some(policy_version),
@@ -3908,11 +3988,14 @@ fn redact_json_value(value: Value) -> Value {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovedSecretOperation {
     operation_id: String,
     intent_id: String,
     card_reference: String,
+    expires_at: i64,
+    nonce: String,
+    helper_mac: Option<String>,
 }
 
 impl ApprovedSecretOperation {
@@ -3924,12 +4007,60 @@ impl ApprovedSecretOperation {
             operation_id: operation_id.to_string(),
             intent_id: intent_id.to_string(),
             card_reference: card_reference.to_string(),
+            expires_at: now() + 5 * 60,
+            nonce: random_hex(16),
+            helper_mac: None,
         })
     }
 
     pub fn for_simulated_test(operation_id: &str) -> Result<Self> {
         Self::new(operation_id, "simulated-intent", "simulated-card")
     }
+
+    fn helper_payload(&self) -> Value {
+        json!({
+            "operation_id": self.operation_id,
+            "intent_id": self.intent_id,
+            "card_reference": self.card_reference,
+            "expires_at": self.expires_at,
+            "nonce": self.nonce,
+        })
+    }
+
+    pub fn sign_for_helper(&mut self, helper_key: &[u8]) -> Result<()> {
+        if helper_key.len() < 32 {
+            return Err(TreasuryError::Invalid(
+                "secret-helper signing key must contain at least 32 bytes".to_string(),
+            ));
+        }
+        self.helper_mac = Some(hmac_hash(helper_key, &self.helper_payload()));
+        Ok(())
+    }
+}
+
+pub fn redeem_owner_helper_operation(
+    operation: &ApprovedSecretOperation,
+    helper_key: &[u8],
+    redeemed_nonces: &mut BTreeSet<String>,
+) -> Result<()> {
+    if helper_key.len() < 32 || operation.expires_at <= now() {
+        return Err(TreasuryError::Forbidden(
+            "secret-helper grant is invalid or expired".to_string(),
+        ));
+    }
+    let expected = hmac_hash(helper_key, &operation.helper_payload());
+    let provided = operation.helper_mac.as_deref().unwrap_or_default();
+    if !constant_time_eq(expected.as_bytes(), provided.as_bytes()) {
+        return Err(TreasuryError::Forbidden(
+            "secret-helper grant authentication failed".to_string(),
+        ));
+    }
+    if !redeemed_nonces.insert(operation.nonce.clone()) {
+        return Err(TreasuryError::Conflict(
+            "secret-helper grant was already redeemed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub trait SecretProvider {
@@ -3972,6 +4103,12 @@ impl VolatileSecret {
 
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
+    }
+
+    /// Exposes the secret only to the owner-controlled transport during its
+    /// single synchronous submission. Callers must not retain this slice.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -4106,9 +4243,10 @@ impl OwnerControlledSecretHelperProvider {
         reference: &str,
         operation: ApprovedSecretOperation,
     ) -> Result<Self> {
-        if operation.card_reference != reference {
+        if operation.card_reference != reference || operation.helper_mac.is_none() {
             return Err(TreasuryError::Forbidden(
-                "helper reference does not match the approved operation".to_string(),
+                "helper requires an authenticated grant bound to the approved operation"
+                    .to_string(),
             ));
         }
         Ok(Self { socket_path, reference: reference.to_string(), operation, consumed: false })
@@ -4158,6 +4296,79 @@ impl SecretProvider for OwnerControlledSecretHelperProvider {
         let mut bytes = vec![0_u8; length];
         stream.read_exact(&mut bytes)?;
         Ok(VolatileSecret::new(bytes))
+    }
+}
+
+pub trait OwnerHandoffTransport {
+    fn transport_id(&self) -> &str;
+    fn submit(
+        &mut self,
+        request: &PurchaseRequest,
+        secret: &VolatileSecret,
+    ) -> Result<ProviderOutcome>;
+    fn cleanup(&mut self) -> Result<()>;
+}
+
+pub struct SecureOwnerHandoffExecutor<P, T> {
+    operation: ApprovedSecretOperation,
+    expected_request: PurchaseRequest,
+    provider: P,
+    transport: T,
+    submitted: bool,
+}
+
+impl<P: SecretProvider, T: OwnerHandoffTransport> SecureOwnerHandoffExecutor<P, T> {
+    pub fn new(
+        operation: ApprovedSecretOperation,
+        expected_request: PurchaseRequest,
+        provider: P,
+        transport: T,
+    ) -> Result<Self> {
+        if operation.intent_id.is_empty() || provider.reference() != operation.card_reference {
+            return Err(TreasuryError::Forbidden(
+                "handoff provider is not bound to the approved operation".to_string(),
+            ));
+        }
+        Ok(Self { operation, expected_request, provider, transport, submitted: false })
+    }
+}
+
+impl<P: SecretProvider, T: OwnerHandoffTransport> CheckoutExecutor
+    for SecureOwnerHandoffExecutor<P, T>
+{
+    fn executor_id(&self) -> &str {
+        self.transport.transport_id()
+    }
+
+    fn validate_origin_and_total(&self, request: &PurchaseRequest) -> Result<()> {
+        if request != &self.expected_request {
+            return Err(TreasuryError::Forbidden(
+                "checkout origin or total differs from the owner-approved request".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn submit_once(&mut self, intent: &PurchaseIntent) -> Result<ProviderOutcome> {
+        if self.submitted || intent.id != self.operation.intent_id {
+            return Err(TreasuryError::Conflict(
+                "checkout handoff is consumed or bound to another intent".to_string(),
+            ));
+        }
+        self.validate_origin_and_total(&intent.request)?;
+        self.submitted = true;
+        let secret = self.provider.fetch_for_owner_operation(&self.operation)?;
+        let outcome = self.transport.submit(&intent.request, &secret);
+        drop(secret);
+        let cleanup = self.transport.cleanup();
+        match (outcome, cleanup) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(TreasuryError::Conflict(format!(
+                "owner handoff cleanup failed; payment outcome is unknown: {}",
+                redact_sensitive(&error.to_string())
+            ))),
+        }
     }
 }
 
@@ -5354,18 +5565,21 @@ mod tests {
         let socket_path = directory.path().join("owner-helper.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
-        let operation =
+        let helper_key = [7_u8; 32];
+        let mut operation =
             ApprovedSecretOperation::new("helper-op", "intent-1", "card-ref-1").unwrap();
+        operation.sign_for_helper(&helper_key).unwrap();
         let expected = operation.clone();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["operation_id"], expected.operation_id);
-            assert_eq!(request["intent_id"], expected.intent_id);
-            assert_eq!(request["card_reference"], expected.card_reference);
+            let request: ApprovedSecretOperation = serde_json::from_str(&line).unwrap();
+            assert_eq!(request, expected);
+            let mut redeemed = BTreeSet::new();
+            redeem_owner_helper_operation(&request, &helper_key, &mut redeemed).unwrap();
+            assert!(redeem_owner_helper_operation(&request, &helper_key, &mut redeemed).is_err());
             let response = b"synthetic-helper-value";
             let mut stream = reader.into_inner();
             stream.write_all(&(response.len() as u32).to_be_bytes()).unwrap();
@@ -5377,6 +5591,116 @@ mod tests {
         assert!(!provider.fetch_for_owner_operation(&operation).unwrap().is_empty());
         assert!(provider.fetch_for_owner_operation(&operation).is_err());
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_grants_reject_tampering_and_unsigned_requests() {
+        let helper_key = [9_u8; 32];
+        let mut operation =
+            ApprovedSecretOperation::new("helper-op", "intent-1", "card-ref-1").unwrap();
+        assert!(
+            OwnerControlledSecretHelperProvider::new(
+                PathBuf::from("/unused"),
+                "card-ref-1",
+                operation.clone(),
+            )
+            .is_err()
+        );
+        operation.sign_for_helper(&helper_key).unwrap();
+        let mut tampered = operation.clone();
+        tampered.intent_id = "intent-2".to_string();
+        assert!(
+            redeem_owner_helper_operation(&tampered, &helper_key, &mut BTreeSet::new(),).is_err()
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingOwnerTransport {
+        submissions: usize,
+        cleaned: bool,
+    }
+
+    impl OwnerHandoffTransport for RecordingOwnerTransport {
+        fn transport_id(&self) -> &str {
+            "test-owner-transport"
+        }
+
+        fn submit(
+            &mut self,
+            _request: &PurchaseRequest,
+            secret: &VolatileSecret,
+        ) -> Result<ProviderOutcome> {
+            assert_eq!(secret.as_bytes(), b"synthetic-owner-secret");
+            self.submissions += 1;
+            Ok(ProviderOutcome::Approved {
+                reference: "provider receipt containing spaces".to_string(),
+            })
+        }
+
+        fn cleanup(&mut self) -> Result<()> {
+            self.cleaned = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn owner_handoff_executes_approved_intent_once_without_persisting_secret() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        treasury
+            .owner_configure_manual_provider(
+                &Actor::Owner,
+                ManualProviderConfiguration {
+                    credential_reference: "keychain://local/test-card".to_string(),
+                    provider_kind: "os-credential-store".to_string(),
+                    last_four: Some("1111".to_string()),
+                    balance: Money::positive(10_000, "CAD").unwrap(),
+                    balance_status: BalanceStatus::OwnerConfirmed,
+                    balance_ttl_secs: 3600,
+                },
+            )
+            .unwrap();
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let created = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("handoff", 500) })
+            .unwrap();
+        let intent_id = created["id"].as_str().unwrap();
+        treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerApproveIntent { intent_id: intent_id.to_string() },
+            )
+            .unwrap();
+        let operation =
+            treasury.bind_approved_secret_operation(&bootstrap.owner_token, intent_id).unwrap();
+        let expected_request = treasury.state.intents[intent_id].request.clone();
+        let provider = InteractiveOwnerEntryProvider::from_owner_reader(
+            "keychain://local/test-card",
+            operation.clone(),
+            &b"synthetic-owner-secret"[..],
+        )
+        .unwrap();
+        let transport = RecordingOwnerTransport::default();
+        let mut executor =
+            SecureOwnerHandoffExecutor::new(operation, expected_request, provider, transport)
+                .unwrap();
+        let result = treasury
+            .owner_execute_approved_handoff(&bootstrap.owner_token, intent_id, &mut executor)
+            .unwrap();
+        assert_eq!(result["status"], "settled");
+        assert_eq!(executor.transport.submissions, 1);
+        assert!(executor.transport.cleaned);
+        assert!(executor.submit_once(&treasury.state.intents[intent_id].clone()).is_err());
+        let persisted = serde_json::to_string(&treasury.state).unwrap();
+        assert!(!persisted.contains("synthetic-owner-secret"));
+        assert!(!persisted.contains("provider receipt containing spaces"));
     }
 
     proptest! {
