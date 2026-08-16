@@ -335,9 +335,6 @@ fn collect_child_output(
         if let Some(status) = status
             && eof
         {
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-            }
             return Ok((status, output));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -853,7 +850,7 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
     if secret.is_empty() || secret.len() > 4096 {
         return Err("owner secret on stdin must contain 1..4096 bytes".into());
     }
-    let result = (|| -> CliResult<()> {
+    (|| -> CliResult<()> {
         let deadline = Instant::now() + Duration::from_secs(300);
         let stream = loop {
             match listener.accept() {
@@ -891,8 +888,7 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
         stream.write_all(&secret)?;
         stream.flush()?;
         Ok(())
-    })();
-    result
+    })()
 }
 
 #[cfg(not(unix))]
