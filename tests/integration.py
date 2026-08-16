@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -83,16 +84,35 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
     ):
         assert protected.stat().st_mode & 0o077 == 0, protected
     socket_path = directory / "treasury.sock"
+    owner_socket_path = directory / "owner.sock"
     daemon = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(directory), "--socket", str(socket_path)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         for _ in range(100):
-            if socket_path.exists():
+            if socket_path.exists() and owner_socket_path.exists():
                 break
             time.sleep(0.05)
-        if not socket_path.exists():
-            raise SystemExit("daemon did not create its Unix socket")
+        if not socket_path.exists() or not owner_socket_path.exists():
+            raise SystemExit("daemon did not create its separate agent and owner sockets")
+        flood = []
+        for _ in range(32):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.connect(str(socket_path))
+            flood.append(connection)
+        time.sleep(0.1)
+        assert run("stop", "--data-dir", str(directory), "--owner-token-file", str(owner_file))["emergency_stop"] is True
+        assert run("resume", "--data-dir", str(directory), "--owner-token-file", str(owner_file))["emergency_stop"] is False
+        for connection in flood:
+            connection.close()
         client = TreasuryClient(str(socket_path), str(agent_file))
-        assert client.get_status()["principal"] == "agent"
+        for _ in range(100):
+            try:
+                status = client.get_status()
+                break
+            except BrokerError:
+                time.sleep(0.05)
+        else:
+            raise SystemExit("agent connection pool did not recover after flood connections closed")
+        assert status["principal"] == "agent"
         try:
             client.request({"type": "get_status", "unexpected": True})
         except BrokerError:

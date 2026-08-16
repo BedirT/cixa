@@ -39,7 +39,7 @@ ProtectHome=yes
 ReadWritePaths=/var/lib/agent-treasury
 ```
 
-The agent should connect through a deliberately shared socket or a brokered IPC proxy, not receive read access to `/var/lib/agent-treasury`.
+The agent should connect through only the bounded `treasury.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/agent-treasury`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
 
 ## Windows
 

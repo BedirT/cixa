@@ -32,17 +32,19 @@ The agent, merchant, notifications, screenshots, and model traces are never trus
 ```mermaid
 flowchart LR
   MCP[MCP stdio process] -->|JSON-RPC tool call| SDK[SDK client]
-  SDK -->|v1 newline JSON| Socket[Unix-domain socket 0600]
-  Socket --> Daemon[treasury daemon]
+  SDK -->|v1 newline JSON| AgentSocket[Bounded agent socket 0600]
+  Owner[Owner CLI and dashboard] -->|owner token| OwnerSocket[Independent owner socket 0600]
+  AgentSocket --> Daemon[treasury daemon]
+  OwnerSocket --> Daemon
   Daemon --> Mutex[Single process state lock]
   Mutex --> State[Atomic authenticated state envelope]
   Mutex --> Audit[Audit entries + separate audit.key]
   Daemon --> Provider[Simulated provider]
 ```
 
-The daemon owns an exclusive data-directory lock for its lifetime and serializes requests in one process. CLI mutations route through the live daemon or acquire the same lock when it is offline. State and audit entries are covered by an HMAC-authenticated envelope; writes use a random private temporary file, `sync_all`, atomic rename, and parent-directory synchronization. The socket is local by construction and is not a public TCP listener.
+The daemon owns an exclusive data-directory lock for its lifetime and serializes requests in one process. CLI mutations route through the independently admitted owner socket or acquire the same lock when the daemon is offline. The agent socket rejects owner operations, and the owner socket rejects non-owner credentials. State and audit entries are covered by an HMAC-authenticated envelope; writes use a random private temporary file, `sync_all`, atomic rename, and parent-directory synchronization. Both sockets are local by construction and are not public TCP listeners.
 
-Before a provider call, the broker persists `funds_reserved` and `executing`. If the process exits before the final outcome is durable, restart recovery changes `executing` to `unknown` and forbids automatic resubmission. The intent ID is the provider idempotency key in the simulated adapter.
+Before a provider call, the broker persists `funds_reserved` and `executing`. The verified `final_total`, rather than the earlier requested estimate, is the authoritative value for policy limits, reservations, provider submission, reconciliation, ledger events, and receipts. If the process exits before the final outcome is durable, restart recovery changes `executing` to `unknown` and forbids automatic resubmission. The intent ID is the provider idempotency key in the simulated adapter.
 
 ## Purchase State Machine
 

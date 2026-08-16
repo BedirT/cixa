@@ -9,7 +9,7 @@ target/debug/treasury create-agent --data-dir .local --owner-token-file .local/o
 target/debug/treasury serve --data-dir .local
 ```
 
-The daemon creates a private Unix-domain socket at `.local/treasury.sock` by default. It does not bind a TCP port. An agent container should receive only the socket endpoint and a scoped token file or brokered IPC handle, not the data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
+The daemon creates a bounded agent Unix-domain socket at `.local/treasury.sock` and an independently admitted owner control socket at `.local/owner.sock`. It does not bind a TCP port. An agent container must receive only `treasury.sock` and a scoped token file or brokered IPC handle, never `owner.sock`, the data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
 
 ## MCP
 

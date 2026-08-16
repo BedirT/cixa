@@ -16,6 +16,7 @@ use std::time::Duration;
 type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 32;
+const MAX_OWNER_CONNECTIONS: usize = 8;
 
 struct DataDirLock(fs::File);
 
@@ -114,7 +115,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds to a Unix-domain socket by default and does not expose a public listener.",
+        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -200,9 +201,12 @@ fn run_request(args: &[String], token: String, operation: Request) -> CliResult<
     let directory = data_dir(args)?;
     #[cfg(unix)]
     {
-        let socket = value(args, "--socket")
+        let socket_argument =
+            if operation.requires_owner() { "--owner-socket" } else { "--socket" };
+        let default_name = if operation.requires_owner() { "owner.sock" } else { "treasury.sock" };
+        let socket = value(args, socket_argument)
             .map(PathBuf::from)
-            .unwrap_or_else(|| directory.join("treasury.sock"));
+            .unwrap_or_else(|| directory.join(default_name));
         if socket.exists() {
             return rpc_over_socket(&socket, token, operation);
         }
@@ -457,40 +461,68 @@ fn stop_command(args: &[String], stopped: bool) -> CliResult<()> {
 
 #[cfg(unix)]
 fn serve_command(args: &[String]) -> CliResult<()> {
-    use std::os::unix::net::UnixListener;
     let directory = data_dir(args)?;
     let _lock = DataDirLock::acquire(&directory)?;
-    let socket = value(args, "--socket")
+    let agent_socket = value(args, "--socket")
         .map(PathBuf::from)
         .unwrap_or_else(|| directory.join("treasury.sock"));
+    let owner_socket = value(args, "--owner-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| directory.join("owner.sock"));
+    if agent_socket == owner_socket {
+        return Err("agent and owner sockets must use different paths".into());
+    }
     let mut treasury = Treasury::load_from(&directory)?;
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
     }
     let state = Arc::new(Mutex::new(treasury));
+    let agent_listener = bind_private_socket(&agent_socket)?;
+    let owner_listener = bind_private_socket(&owner_socket)?;
+    eprintln!("agent-treasury agent broker listening on {}", agent_socket.display());
+    eprintln!("agent-treasury owner control listening on {}", owner_socket.display());
+    let owner_state = Arc::clone(&state);
+    let owner_directory = directory.clone();
+    std::thread::spawn(move || {
+        serve_listener(owner_listener, owner_state, owner_directory, true, MAX_OWNER_CONNECTIONS)
+    });
+    serve_listener(agent_listener, state, directory, false, MAX_CONNECTIONS);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn bind_private_socket(socket: &Path) -> CliResult<std::os::unix::net::UnixListener> {
+    use std::os::unix::net::UnixListener;
     if socket.exists() {
         use std::os::unix::fs::FileTypeExt;
-        let metadata = fs::symlink_metadata(&socket)?;
+        let metadata = fs::symlink_metadata(socket)?;
         if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
             return Err(format!("refusing to replace non-socket path {}", socket.display()).into());
         }
-        fs::remove_file(&socket)?;
+        fs::remove_file(socket)?;
     }
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
     }
-    let listener = UnixListener::bind(&socket)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    }
-    eprintln!("agent-treasury broker listening on {}", socket.display());
+    let listener = UnixListener::bind(socket)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn serve_listener(
+    listener: std::os::unix::net::UnixListener,
+    state: Arc<Mutex<Treasury>>,
+    directory: PathBuf,
+    owner_channel: bool,
+    connection_limit: usize,
+) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if active_connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+                if active_connections.fetch_add(1, Ordering::AcqRel) >= connection_limit {
                     active_connections.fetch_sub(1, Ordering::AcqRel);
                     let _ = stream.write_all(b"{\"api_version\":\"v1\",\"request_id\":\"busy\",\"ok\":false,\"data\":null,\"error\":\"broker is busy\"}\n");
                     continue;
@@ -499,7 +531,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
                 let directory = directory.clone();
                 let active_connections = Arc::clone(&active_connections);
                 std::thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, state, directory) {
+                    if let Err(error) = handle_connection(stream, state, directory, owner_channel) {
                         eprintln!("connection error: {}", redact_sensitive(&error.to_string()));
                     }
                     active_connections.fetch_sub(1, Ordering::AcqRel);
@@ -508,7 +540,6 @@ fn serve_command(args: &[String]) -> CliResult<()> {
             Err(error) => eprintln!("accept error: {}", error),
         }
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -521,6 +552,7 @@ fn handle_connection(
     stream: std::os::unix::net::UnixStream,
     state: Arc<Mutex<Treasury>>,
     directory: PathBuf,
+    owner_channel: bool,
 ) -> CliResult<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -543,7 +575,13 @@ fn handle_connection(
         match serde_json::from_slice::<RpcRequest>(&frame) {
             Ok(request) => {
                 let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
-                treasury.handle_rpc_persisted(request, &directory)
+                if owner_channel && !treasury.is_owner_token(&request.token) {
+                    rejected_rpc(&request, "owner control authentication failed")
+                } else if !owner_channel && request.operation.requires_owner() {
+                    rejected_rpc(&request, "owner operations require the owner control socket")
+                } else {
+                    treasury.handle_rpc_persisted(request, &directory)
+                }
             }
             Err(error) => RpcResponse {
                 api_version: API_VERSION.to_string(),
@@ -557,6 +595,16 @@ fn handle_connection(
     writeln!(writer, "{}", serde_json::to_string(&response)?)?;
     writer.flush()?;
     Ok(())
+}
+
+fn rejected_rpc(request: &RpcRequest, error: &str) -> RpcResponse {
+    RpcResponse {
+        api_version: API_VERSION.to_string(),
+        request_id: request.request_id.clone(),
+        ok: false,
+        data: None,
+        error: Some(error.to_string()),
+    }
 }
 
 fn demo_request(key: &str, amount: i64) -> PurchaseRequest {
