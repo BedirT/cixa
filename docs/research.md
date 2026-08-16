@@ -26,7 +26,7 @@ The project does not claim PCI DSS compliance. CVV is not persisted. The secret-
 
 - [MCP TypeScript SDK v2](https://ts.sdk.modelcontextprotocol.io/v2/) and [the first-server guide](https://ts.sdk.modelcontextprotocol.io/v2/get-started/first-server) document `@modelcontextprotocol/server`, Zod schemas, stdio transport, and the rule that stdout is the protocol channel. The adapter logs only to stderr and uses strict schemas.
 - [MCP specification](https://modelcontextprotocol.io/specification/2025-03-26/index) is the protocol source of truth. The project uses local stdio for the MCP boundary and a separate local Unix socket for the broker.
-- [Playwright browser contexts](https://playwright.dev/docs/browser-contexts) and [trace viewer](https://playwright.dev/docs/trace-viewer) document ephemeral contexts and trace artifacts. A future browser adapter must treat screenshots, traces, videos, DOM snapshots, and network bodies as sensitive. The current reference fails closed rather than exposing a payment browser to an agent.
+- [Playwright browser contexts](https://playwright.dev/docs/browser-contexts) and [trace viewer](https://playwright.dev/docs/trace-viewer) document ephemeral contexts and trace artifacts. The shipped experimental adapter uses a fresh owner-only process and context, leaves capture channels disabled, accepts only reviewed cross-origin hosted-field integrations, and destroys the context after one attempt. A future universal adapter would need broader merchant-specific proof; unsupported configurations continue to fail closed rather than exposing a payment browser to an agent.
 
 ## OS Credential Facilities
 
@@ -43,4 +43,3 @@ The current code provides interactive, volatile, owner-helper, and simulated pro
 3. Local stdio/Unix socket by default; no public network listener.
 4. MCP tools are agent-only and schemas reject unknown properties.
 5. Browser automation is a safe-denial boundary until a separately reviewed executor can prove critical-section isolation.
-
