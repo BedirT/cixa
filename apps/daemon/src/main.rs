@@ -335,6 +335,10 @@ fn collect_child_output(
         if let Some(status) = status
             && eof
         {
+            // The direct adapter may have spawned descendants that closed stdout.
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
             return Ok((status, output));
         }
         std::thread::sleep(Duration::from_millis(10));
