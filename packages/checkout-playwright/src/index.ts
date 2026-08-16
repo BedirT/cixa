@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { promises as dns } from "node:dns";
-import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { createInterface } from "node:readline";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
@@ -21,7 +20,7 @@ type PurchaseRequest = {
   redirect_chain: string[];
 };
 type Secret = { pan: string; expiry: string; cvv: string; cardholder?: string };
-type AdapterInput = { request: PurchaseRequest; secret: Secret };
+type AdapterInput = { config: AdapterConfig; request: PurchaseRequest; secret: Secret };
 type SelectorConfig = {
   finalTotal: string;
   currency: string;
@@ -98,6 +97,34 @@ function canonicalOrigin(raw: string): string {
     fail("checkout origins must be credential-free HTTPS default-port URLs");
   }
   return url.origin;
+}
+
+export function requestOriginAllowed(
+  rawUrl: string,
+  navigationOrigins: ReadonlySet<string>,
+  processorOrigins: ReadonlySet<string>,
+  isSubframeNavigation: boolean,
+): boolean {
+  try {
+    const origin = canonicalOrigin(rawUrl);
+    return (navigationOrigins.has(origin) || processorOrigins.has(origin))
+      && (!isSubframeNavigation || processorOrigins.has(origin));
+  } catch {
+    return false;
+  }
+}
+
+export function processorFrameAllowed(
+  frameUrl: string,
+  pageUrl: string,
+  processorOrigins: ReadonlySet<string>,
+): boolean {
+  try {
+    const frameOrigin = canonicalOrigin(frameUrl);
+    return frameOrigin !== canonicalOrigin(pageUrl) && processorOrigins.has(frameOrigin);
+  } catch {
+    return false;
+  }
 }
 
 export function validateConfiguration(config: AdapterConfig, request: PurchaseRequest): void {
@@ -188,9 +215,7 @@ async function requireProcessorFrame(
 ) {
   const frameHandle = await page.locator(config.selectors.paymentFrame).elementHandle();
   const paymentFrame = await frameHandle?.contentFrame();
-  if (!paymentFrame
-      || canonicalOrigin(paymentFrame.url()) === canonicalOrigin(page.url())
-      || !processorOrigins.has(canonicalOrigin(paymentFrame.url()))) {
+  if (!paymentFrame || !processorFrameAllowed(paymentFrame.url(), page.url(), processorOrigins)) {
     fail("payment frame is not cross-origin and owned by an approved processor");
   }
   return paymentFrame;
@@ -231,12 +256,10 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.protocol !== "https:" || url.username || url.password) return route.abort("blockedbyclient");
-      const origin = canonicalOrigin(url.toString());
-      if (!navigationOrigins.has(origin) && !processorOrigins.has(origin)) return route.abort("blockedbyclient");
       const request = route.request();
-      if (request.isNavigationRequest()
-          && request.frame().parentFrame() !== null
-          && !processorOrigins.has(origin)) {
+      const isSubframeNavigation = request.isNavigationRequest()
+        && request.frame().parentFrame() !== null;
+      if (!requestOriginAllowed(url.toString(), navigationOrigins, processorOrigins, isSubframeNavigation)) {
         return route.abort("blockedbyclient");
       }
       try {
@@ -293,14 +316,11 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
 }
 
 async function main(): Promise<void> {
-  const configPath = process.argv[2];
-  if (!configPath) fail("adapter config path is required");
-  const config = JSON.parse(await readFile(configPath, "utf8")) as AdapterConfig;
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
   for await (const line of lines) {
     if (line.length > 16_384) fail("adapter input is too large");
     const input = JSON.parse(line) as AdapterInput;
-    process.stdout.write(`${JSON.stringify(await run(config, input))}\n`);
+    process.stdout.write(`${JSON.stringify(await run(input.config, input))}\n`);
     return;
   }
   fail("adapter input is missing");

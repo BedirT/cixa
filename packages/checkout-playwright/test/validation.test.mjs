@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { observeAndValidate, parseMinorUnits, validateConfiguration } from "../dist/index.js";
+import {
+  observeAndValidate,
+  parseMinorUnits,
+  processorFrameAllowed,
+  requestOriginAllowed,
+  validateConfiguration,
+} from "../dist/index.js";
 
 const request = {
   final_total: { minor: 1234, currency: "CAD" },
@@ -35,6 +41,32 @@ test("validates canonical money and bound origins", () => {
     ...config,
     allowedProcessorOrigins: ["https://merchant.example.com"],
   }, request));
+});
+
+test("route and frame policy deny merchant subframes and origin changes", () => {
+  const navigation = new Set(["https://merchant.example.com"]);
+  const processors = new Set(["https://processor.example.com"]);
+  assert.equal(requestOriginAllowed(
+    "https://merchant.example.com/checkout", navigation, processors, false,
+  ), true);
+  assert.equal(requestOriginAllowed(
+    "https://merchant.example.com/embedded", navigation, processors, true,
+  ), false);
+  assert.equal(requestOriginAllowed(
+    "https://processor.example.com/fields", navigation, processors, true,
+  ), true);
+  assert.equal(requestOriginAllowed(
+    "http://processor.example.com/fields", navigation, processors, true,
+  ), false);
+  assert.equal(processorFrameAllowed(
+    "https://processor.example.com/fields", "https://merchant.example.com/checkout", processors,
+  ), true);
+  assert.equal(processorFrameAllowed(
+    "https://merchant.example.com/fields", "https://merchant.example.com/checkout", processors,
+  ), false);
+  assert.equal(processorFrameAllowed(
+    "https://other-processor.example.com/fields", "https://merchant.example.com/checkout", processors,
+  ), false);
 });
 
 test("live fact mutation fails the pre-submit revalidation", async () => {
