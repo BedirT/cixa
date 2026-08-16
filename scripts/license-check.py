@@ -20,8 +20,9 @@ allowed = {
     "Zlib",
     "Unicode-3.0",
     "Unlicense",
-    "LLVM-exception",
 }
+allowed_exceptions = {"LLVM-exception"}
+allowed_with_pairs = {("Apache-2.0", "LLVM-exception")}
 
 
 def permissive_expression(expression: str) -> bool:
@@ -57,7 +58,11 @@ def permissive_expression(expression: str) -> bool:
             position += 1
             if position >= len(tokens):
                 raise ValueError("missing SPDX exception")
-            value = value and tokens[position] in allowed
+            exception_id = tokens[position]
+            value = value and exception_id in allowed_exceptions and (
+                license_id,
+                exception_id,
+            ) in allowed_with_pairs
             position += 1
         return value
 
@@ -89,6 +94,9 @@ except ValueError:
     pass
 else:
     raise SystemExit("internal SPDX parser accepted malformed syntax")
+for invalid_expression in ("LLVM-exception", "MIT WITH MIT"):
+    if permissive_expression(invalid_expression):
+        raise SystemExit(f"internal SPDX parser accepted invalid expression: {invalid_expression}")
 
 unknown = []
 seen_cargo = set()
