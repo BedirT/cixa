@@ -375,26 +375,29 @@ impl Policy {
         if matches!(mode, AutonomyMode::Observe | AutonomyMode::Disabled) {
             reasons.push("agent is not armed for spending".to_string());
         }
-        if !self.allowed_currencies.contains(&request.amount.currency) {
+        if !self.allowed_currencies.contains(&request.final_total.currency) {
             reasons.push("currency is not allowed".to_string());
         }
-        if request.amount.currency != self.primary_currency {
+        if request.final_total.currency != self.primary_currency {
             reasons.push("foreign exchange is denied by default".to_string());
         }
-        if request.amount.currency == self.primary_currency {
-            if request.amount.minor > self.max_per_transaction.minor {
+        if request.final_total.currency == self.primary_currency {
+            if request.final_total.minor > self.max_per_transaction.minor {
                 reasons.push("per-transaction limit exceeded".to_string());
             }
-            if usage.session_amount.checked_add(&request.amount)?.minor > self.max_per_session.minor
+            if usage.session_amount.checked_add(&request.final_total)?.minor
+                > self.max_per_session.minor
             {
                 reasons.push("per-session limit exceeded".to_string());
             }
-            if usage.rolling_24h_amount.checked_add(&request.amount)?.minor
+            if usage.rolling_24h_amount.checked_add(&request.final_total)?.minor
                 > self.max_rolling_24h.minor
             {
                 reasons.push("rolling 24-hour limit exceeded".to_string());
             }
-            if usage.lifetime_amount.checked_add(&request.amount)?.minor > self.max_lifetime.minor {
+            if usage.lifetime_amount.checked_add(&request.final_total)?.minor
+                > self.max_lifetime.minor
+            {
                 reasons.push("lifetime limit exceeded".to_string());
             }
             if usage.recent_transaction_count >= self.max_transactions_per_minute {
@@ -908,22 +911,22 @@ impl SimulatedProvider {
             }
             _ => {}
         }
-        if self.available_balance()?.minor < intent.request.amount.minor {
+        if self.available_balance()?.minor < intent.request.final_total.minor {
             return Ok(ProviderOutcome::Declined {
                 reason: "simulated provider balance is insufficient".to_string(),
             });
         }
         let reference = new_id("sim_charge");
         if intent.request.scenario == SimulatedScenario::DelayedSettlement {
-            self.holds.insert(intent.id.clone(), intent.request.amount.clone());
+            self.holds.insert(intent.id.clone(), intent.request.final_total.clone());
             return Ok(ProviderOutcome::Pending { reference });
         }
-        self.balance = self.balance.checked_sub(&intent.request.amount)?;
+        self.balance = self.balance.checked_sub(&intent.request.final_total)?;
         self.charges.insert(
             intent.id.clone(),
             ProviderCharge {
                 intent_id: intent.id.clone(),
-                amount: intent.request.amount.clone(),
+                amount: intent.request.final_total.clone(),
                 provider_reference: reference.clone(),
                 settled: intent.request.scenario != SimulatedScenario::TimeoutAfterSubmit,
                 refunded: false,
@@ -986,17 +989,17 @@ impl SimulatedProvider {
             charge.settled = true;
             return Ok(charge.provider_reference.clone());
         }
-        if self.available_balance()?.minor < intent.request.amount.minor {
+        if self.available_balance()?.minor < intent.request.final_total.minor {
             return Err(TreasuryError::Money(
                 "provider balance is insufficient for reconciled settlement".to_string(),
             ));
         }
-        self.balance = self.balance.checked_sub(&intent.request.amount)?;
+        self.balance = self.balance.checked_sub(&intent.request.final_total)?;
         self.charges.insert(
             intent.id.clone(),
             ProviderCharge {
                 intent_id: intent.id.clone(),
-                amount: intent.request.amount.clone(),
+                amount: intent.request.final_total.clone(),
                 provider_reference: reference.to_string(),
                 settled: true,
                 refunded: false,
@@ -1183,6 +1186,27 @@ pub enum Request {
     OwnerListAudit,
 }
 
+impl Request {
+    pub fn requires_owner(&self) -> bool {
+        matches!(
+            self,
+            Self::OwnerCreateAgent { .. }
+                | Self::OwnerUpdatePolicy { .. }
+                | Self::OwnerSetAgentMode { .. }
+                | Self::OwnerRevokeAgent { .. }
+                | Self::OwnerSetEmergencyStop { .. }
+                | Self::OwnerApproveIntent { .. }
+                | Self::OwnerApproveMerchant { .. }
+                | Self::OwnerReconcile { .. }
+                | Self::OwnerRecordDeposit { .. }
+                | Self::OwnerArmAgentSession { .. }
+                | Self::OwnerConfigureManualProvider { .. }
+                | Self::OwnerConfigureReceiveInstructions { .. }
+                | Self::OwnerListAudit
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationOutcome {
@@ -1274,6 +1298,10 @@ enum Actor {
 }
 
 impl Treasury {
+    pub fn is_owner_token(&self, token: &str) -> bool {
+        self.state.owner.capability_token_hash == token_hash(token)
+    }
+
     pub fn bootstrap(owner_name: &str, initial_balance: Money) -> Result<Bootstrap> {
         bounded(owner_name, "owner_name", 128)?;
         let owner_token = new_token();
@@ -2019,7 +2047,7 @@ impl Treasury {
             }),
             json!({
                 "merchant_domain": intent.request.merchant_domain,
-                "amount": intent.request.amount,
+                "amount": intent.request.final_total,
                 "reasons": decision.reasons,
             }),
         )?;
@@ -2114,7 +2142,7 @@ impl Treasury {
         intent.transition(TransactionState::FundsReserved)?;
         self.append_ledger(
             LedgerEventKind::HoldReserved,
-            intent.request.amount.clone(),
+            intent.request.final_total.clone(),
             Some(intent.id.clone()),
             "policy-reservation",
             true,
@@ -2125,7 +2153,7 @@ impl Treasury {
             Some(intent_id),
             Some(policy.version),
             Some("allowed"),
-            json!({ "amount": intent.request.amount }),
+            json!({ "amount": intent.request.final_total }),
         )?;
         intent.transition(TransactionState::Executing)?;
         self.state.intents.insert(intent.id.clone(), intent);
@@ -2156,7 +2184,7 @@ impl Treasury {
                 intent.transition(TransactionState::Declined)?;
                 self.append_ledger(
                     LedgerEventKind::HoldReleased,
-                    intent.request.amount.clone(),
+                    intent.request.final_total.clone(),
                     Some(intent.id.clone()),
                     "provider-decline",
                     true,
@@ -2609,13 +2637,14 @@ impl Treasury {
                                 "manual balance snapshot is unavailable".to_string(),
                             )
                         })?;
-                        if snapshot.amount.minor < intent.request.amount.minor {
+                        if snapshot.amount.minor < intent.request.final_total.minor {
                             return Err(TreasuryError::Conflict(
                                 "manual settlement exceeds the reported provider balance"
                                     .to_string(),
                             ));
                         }
-                        snapshot.amount = snapshot.amount.checked_sub(&intent.request.amount)?;
+                        snapshot.amount =
+                            snapshot.amount.checked_sub(&intent.request.final_total)?;
                         snapshot.observed_at = now();
                         reference
                     }
@@ -2638,7 +2667,7 @@ impl Treasury {
                 intent.transition(TransactionState::Declined)?;
                 self.append_ledger(
                     LedgerEventKind::HoldReleased,
-                    intent.request.amount.clone(),
+                    intent.request.final_total.clone(),
                     Some(intent.id.clone()),
                     "owner-reconciliation",
                     true,
@@ -2668,10 +2697,10 @@ impl Treasury {
                         })?;
                         if was_settled {
                             snapshot.amount =
-                                snapshot.amount.checked_add(&intent.request.amount)?;
+                                snapshot.amount.checked_add(&intent.request.final_total)?;
                         }
                         snapshot.observed_at = now();
-                        intent.request.amount.clone()
+                        intent.request.final_total.clone()
                     }
                 };
                 intent.transition(TransactionState::Refunded)?;
@@ -3043,14 +3072,14 @@ impl Treasury {
                     | TransactionState::ReconciliationRequired
             ) {
                 usage.reserved_amount =
-                    usage.reserved_amount.checked_add(&intent.request.amount)?;
+                    usage.reserved_amount.checked_add(&intent.request.final_total)?;
                 usage.lifetime_amount =
-                    usage.lifetime_amount.checked_add(&intent.request.amount)?;
+                    usage.lifetime_amount.checked_add(&intent.request.final_total)?;
                 usage.rolling_24h_amount =
-                    usage.rolling_24h_amount.checked_add(&intent.request.amount)?;
+                    usage.rolling_24h_amount.checked_add(&intent.request.final_total)?;
                 if intent.broker_session_id == session_id {
                     usage.session_amount =
-                        usage.session_amount.checked_add(&intent.request.amount)?;
+                        usage.session_amount.checked_add(&intent.request.final_total)?;
                 }
             }
         }
@@ -3064,17 +3093,17 @@ impl Treasury {
         usage: &BudgetUsage,
         policy: &Policy,
     ) -> Result<()> {
-        if request.amount.currency != policy.primary_currency {
+        if request.final_total.currency != policy.primary_currency {
             return Ok(());
         }
         let ledger = self.ledger_snapshot(&policy.primary_currency)?;
-        if ledger.available_authority.minor < request.amount.minor {
+        if ledger.available_authority.minor < request.final_total.minor {
             decision.allowed = false;
             decision.requires_approval = false;
             decision.reasons.push("available policy authority is insufficient".to_string());
         }
         let provider_balance = self.provider_available_balance()?;
-        if provider_balance.minor < request.amount.minor {
+        if provider_balance.minor < request.final_total.minor {
             decision.allowed = false;
             decision.requires_approval = false;
             decision.reasons.push("provider balance is insufficient".to_string());
@@ -3100,7 +3129,7 @@ impl Treasury {
             decision.requires_approval = false;
             decision.reasons.push("provider balance exceeds maximum treasury size".to_string());
         }
-        if usage.lifetime_amount.checked_add(&request.amount)?.minor
+        if usage.lifetime_amount.checked_add(&request.final_total)?.minor
             > policy.absolute_exposure_ceiling.minor
         {
             decision.allowed = false;
@@ -3147,7 +3176,7 @@ impl Treasury {
         }) {
             self.append_ledger(
                 LedgerEventKind::HoldReleased,
-                intent.request.amount.clone(),
+                intent.request.final_total.clone(),
                 Some(intent.id.clone()),
                 "settlement",
                 true,
@@ -3161,7 +3190,7 @@ impl Treasury {
         }
         self.append_ledger(
             LedgerEventKind::SpendingSettled,
-            intent.request.amount.clone(),
+            intent.request.final_total.clone(),
             Some(intent.id.clone()),
             "simulated-provider",
             true,
@@ -3212,7 +3241,7 @@ impl Treasury {
             }
         }
         for intent in self.state.intents.values() {
-            if intent.request.amount.currency == currency
+            if intent.request.final_total.currency == currency
                 && matches!(
                     intent.state,
                     TransactionState::FundsReserved
@@ -3223,7 +3252,7 @@ impl Treasury {
                 )
             {
                 snapshot.reserved_amount =
-                    snapshot.reserved_amount.checked_add(&intent.request.amount)?;
+                    snapshot.reserved_amount.checked_add(&intent.request.final_total)?;
             }
         }
         let credits = snapshot
@@ -3246,7 +3275,9 @@ impl Treasury {
             "id": intent.id,
             "agent_id": intent.agent_id,
             "state": intent.state,
-            "amount": intent.request.amount,
+            "requested_amount": intent.request.amount,
+            "final_total": intent.request.final_total,
+            "amount": intent.request.final_total,
             "merchant_domain": intent.request.merchant_domain,
             "category": intent.request.category,
             "fulfillment_profile": intent.request.fulfillment_profile,
@@ -3264,7 +3295,7 @@ impl Treasury {
         Ok(Receipt {
             intent_id: intent.id.clone(),
             merchant_domain: intent.request.merchant_domain.clone(),
-            amount: intent.request.amount.clone(),
+            amount: intent.request.final_total.clone(),
             status: intent.state.clone(),
             provider_reference: intent.provider_reference.clone(),
             issued_at: now(),
@@ -4477,6 +4508,56 @@ mod tests {
                 .iter()
                 .any(|reason| reason == "absolute exposure ceiling exceeded")
         );
+    }
+
+    #[test]
+    fn final_total_is_the_authoritative_budget_and_charge_amount() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(2_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_order_total_drift_minor = 100;
+        policy.max_per_transaction = Money::positive(550, "CAD").unwrap();
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::BoundedAutonomous,
+        );
+        let mut over_limit = request("final-total-limit", 500);
+        over_limit.final_total = Money::positive(600, "CAD").unwrap();
+        let denied =
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: over_limit }).unwrap();
+        assert_eq!(denied["state"], "failed");
+        assert!(
+            denied["decision"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "per-transaction limit exceeded")
+        );
+
+        let agent_id = denied["agent_id"].as_str().unwrap();
+        let policy_id = treasury.state.agents[agent_id].policy_id.clone();
+        treasury.state.policies.get_mut(&policy_id).unwrap().max_per_transaction =
+            Money::positive(700, "CAD").unwrap();
+        let mut purchase = request("final-total-charge", 500);
+        purchase.final_total = Money::positive(600, "CAD").unwrap();
+        let intent =
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).unwrap();
+        assert_eq!(intent["requested_amount"]["minor"], 500);
+        assert_eq!(intent["final_total"]["minor"], 600);
+        let result = treasury
+            .handle(
+                &token,
+                Request::ExecutePurchaseIntent {
+                    intent_id: intent["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(result["receipt"]["amount"]["minor"], 600);
+        assert_eq!(treasury.state.provider.balance.minor, 1_400);
+        assert_eq!(treasury.ledger_snapshot("CAD").unwrap().settled_spending.minor, 600);
     }
 
     #[test]
