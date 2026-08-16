@@ -1102,7 +1102,7 @@ pub struct Bootstrap {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     GetStatus,
     GetCapabilities,
@@ -1146,6 +1146,10 @@ pub enum Request {
     },
     OwnerApproveIntent {
         intent_id: String,
+    },
+    OwnerApproveMerchant {
+        agent_id: String,
+        merchant_domain: String,
     },
     OwnerReconcile {
         intent_id: String,
@@ -1193,7 +1197,65 @@ pub struct RpcRequest {
     pub api_version: String,
     pub request_id: String,
     pub token: String,
+    #[serde(deserialize_with = "deserialize_request_strict")]
     pub operation: Request,
+}
+
+fn deserialize_request_strict<'de, D>(deserializer: D) -> std::result::Result<Request, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| serde::de::Error::custom("operation must be an object with a type field"))?;
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| serde::de::Error::custom("operation must contain a string type field"))?;
+    let fields: &[&str] = match kind {
+        "get_status"
+        | "get_capabilities"
+        | "get_budget"
+        | "get_receive_instructions"
+        | "list_transactions"
+        | "owner_list_audit" => &[],
+        "create_purchase_intent" => &["request"],
+        "get_purchase_intent"
+        | "execute_purchase_intent"
+        | "cancel_purchase_intent"
+        | "get_receipt"
+        | "owner_approve_intent" => &["intent_id"],
+        "owner_create_agent" => &["name", "policy", "mode", "ttl_secs"],
+        "owner_update_policy" => &["agent_id", "policy"],
+        "owner_set_agent_mode" => &["agent_id", "mode"],
+        "owner_revoke_agent" => &["agent_id"],
+        "owner_set_emergency_stop" => &["stopped"],
+        "owner_approve_merchant" => &["agent_id", "merchant_domain"],
+        "owner_reconcile" => &["intent_id", "outcome", "provider_reference"],
+        "owner_record_deposit" => {
+            &["amount", "source", "verified", "agent_id", "external_reference"]
+        }
+        "owner_arm_agent_session" => &["agent_id", "ttl_secs"],
+        "owner_configure_manual_provider" => &[
+            "credential_reference",
+            "provider_kind",
+            "last_four",
+            "balance",
+            "balance_status",
+            "balance_ttl_secs",
+        ],
+        "owner_configure_receive_instructions" => &["method", "address", "memo_template"],
+        _ => &[],
+    };
+    if let Some(field) =
+        object.keys().find(|field| field.as_str() != "type" && !fields.contains(&field.as_str()))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "unknown field {field} for operation {kind}"
+        )));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1482,14 +1544,24 @@ impl Treasury {
     fn provider_available_balance(&self) -> Result<Money> {
         match self.state.provider_mode {
             ProviderMode::Simulated => self.state.provider.available_balance(),
-            ProviderMode::ManualPrepaidCard => self
-                .state
-                .manual_provider
-                .as_ref()
-                .ok_or_else(|| {
-                    TreasuryError::Conflict("manual provider is not configured".to_string())
-                })?
-                .available_balance(),
+            ProviderMode::ManualPrepaidCard => {
+                let reported = self
+                    .state
+                    .manual_provider
+                    .as_ref()
+                    .ok_or_else(|| {
+                        TreasuryError::Conflict("manual provider is not configured".to_string())
+                    })?
+                    .available_balance()?;
+                let reserved = self.ledger_snapshot(&reported.currency)?.reserved_amount;
+                let available = reported.checked_sub(&reserved)?;
+                if available.minor < 0 {
+                    return Err(TreasuryError::Conflict(
+                        "manual provider reservations exceed its reported balance".to_string(),
+                    ));
+                }
+                Ok(available)
+            }
         }
     }
 
@@ -1674,6 +1746,9 @@ impl Treasury {
                 self.owner_emergency_stop(&actor, stopped)
             }
             Request::OwnerApproveIntent { intent_id } => self.owner_approve(&actor, &intent_id),
+            Request::OwnerApproveMerchant { agent_id, merchant_domain } => {
+                self.owner_approve_merchant(&actor, &agent_id, &merchant_domain)
+            }
             Request::OwnerReconcile { intent_id, outcome, provider_reference } => {
                 self.owner_reconcile(&actor, &intent_id, outcome, provider_reference)
             }
@@ -1896,7 +1971,9 @@ impl Treasury {
             now(),
         )?;
         self.enforce_authority(&mut decision, &request, &usage, &policy)?;
-        if self.state.provider_mode == ProviderMode::ManualPrepaidCard {
+        if self.state.provider_mode == ProviderMode::ManualPrepaidCard
+            && (decision.allowed || decision.requires_approval)
+        {
             decision.allowed = false;
             decision.requires_approval = true;
             decision.reasons = vec![
@@ -2227,6 +2304,7 @@ impl Treasury {
         Self::require_owner(actor)?;
         bounded(&name, "agent_name", 128)?;
         policy.validate()?;
+        self.validate_policy_exposure(&policy)?;
         if ttl_secs <= 0 || ttl_secs > 24 * 60 * 60 {
             return Err(TreasuryError::Invalid(
                 "agent TTL must be between 1 second and 24 hours".to_string(),
@@ -2327,6 +2405,7 @@ impl Treasury {
     ) -> Result<Value> {
         Self::require_owner(actor)?;
         policy.validate()?;
+        self.validate_policy_exposure(&policy)?;
         let agent = self.agent(agent_id)?.clone();
         let current = self.policy(&agent.policy_id)?.clone();
         policy.id = agent.policy_id.clone();
@@ -2414,13 +2493,6 @@ impl Treasury {
         if intent.state != TransactionState::ApprovalRequired {
             return Err(TreasuryError::Conflict("intent is not awaiting approval".to_string()));
         }
-        let merchant = canonicalize_domain(&intent.request.merchant_domain)?;
-        self.state
-            .agents
-            .get_mut(&intent.agent_id)
-            .ok_or_else(|| TreasuryError::NotFound(format!("agent {}", intent.agent_id)))?
-            .approved_merchants
-            .insert(merchant.clone());
         intent.transition(TransactionState::Approved)?;
         self.state.intents.insert(intent.id.clone(), intent.clone());
         self.audit(
@@ -2429,9 +2501,34 @@ impl Treasury {
             Some(intent_id),
             Some(intent.policy_version),
             Some("allowed"),
-            json!({ "owner_action": true, "approved_merchant": merchant }),
+            json!({ "owner_action": true, "approval_scope": "intent_only" }),
         )?;
         Ok(self.sanitized_intent(&intent))
+    }
+
+    fn owner_approve_merchant(
+        &mut self,
+        actor: &Actor,
+        agent_id: &str,
+        merchant_domain: &str,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let merchant = canonicalize_domain(merchant_domain)?;
+        self.state
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?
+            .approved_merchants
+            .insert(merchant.clone());
+        self.audit(
+            "owner",
+            "approve_merchant",
+            None,
+            None,
+            Some("allowed"),
+            json!({ "agent_id": agent_id, "merchant_domain": merchant }),
+        )?;
+        Ok(json!({ "agent_id": agent_id, "merchant_domain": merchant, "approved": true }))
     }
 
     fn owner_reconcile(
@@ -2512,6 +2609,12 @@ impl Treasury {
                                 "manual balance snapshot is unavailable".to_string(),
                             )
                         })?;
+                        if snapshot.amount.minor < intent.request.amount.minor {
+                            return Err(TreasuryError::Conflict(
+                                "manual settlement exceeds the reported provider balance"
+                                    .to_string(),
+                            ));
+                        }
                         snapshot.amount = snapshot.amount.checked_sub(&intent.request.amount)?;
                         snapshot.observed_at = now();
                         reference
@@ -2800,6 +2903,11 @@ impl Treasury {
                 "manual balance and freshness TTL are invalid".to_string(),
             ));
         }
+        if balance_status == BalanceStatus::ProviderVerified {
+            return Err(TreasuryError::Invalid(
+                "manual owner configuration cannot claim provider-verified status".to_string(),
+            ));
+        }
         if let Some(last_four) = &last_four
             && (last_four.len() != 4 || !last_four.bytes().all(|byte| byte.is_ascii_digit()))
         {
@@ -2992,12 +3100,22 @@ impl Treasury {
             decision.requires_approval = false;
             decision.reasons.push("provider balance exceeds maximum treasury size".to_string());
         }
-        if usage.reserved_amount.checked_add(&request.amount)?.minor
+        if usage.lifetime_amount.checked_add(&request.amount)?.minor
             > policy.absolute_exposure_ceiling.minor
         {
             decision.allowed = false;
             decision.requires_approval = false;
             decision.reasons.push("absolute exposure ceiling exceeded".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_policy_exposure(&self, policy: &Policy) -> Result<()> {
+        let available = self.ledger_snapshot(&policy.primary_currency)?.available_authority;
+        if available.minor > policy.absolute_exposure_ceiling.minor {
+            return Err(TreasuryError::Forbidden(
+                "policy exposure ceiling is below currently available authority".to_string(),
+            ));
         }
         Ok(())
     }
@@ -4015,6 +4133,41 @@ mod tests {
     }
 
     #[test]
+    fn intent_approval_does_not_grant_durable_merchant_trust() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.allowed_merchants.clear();
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::BoundedAutonomous,
+        );
+        let mut first = request("new-merchant-first", 500);
+        first.merchant_domain = "new.example.test".to_string();
+        first.redirect_chain = vec!["https://new.example.test/checkout".to_string()];
+        let intent =
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: first }).unwrap();
+        treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerApproveIntent {
+                    intent_id: intent["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        let mut second = request("new-merchant-second", 500);
+        second.merchant_domain = "new.example.test".to_string();
+        second.redirect_chain = vec!["https://new.example.test/checkout".to_string()];
+        assert_eq!(
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: second }).unwrap()["state"],
+            "approval_required"
+        );
+    }
+
+    #[test]
     fn unapproved_cross_origin_redirect_is_denied() {
         let bootstrap =
             Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
@@ -4186,6 +4339,155 @@ mod tests {
             .unwrap()
             .expires_at = now() - 1;
         assert!(treasury.provider_available_balance().is_err());
+    }
+
+    #[test]
+    fn manual_provider_rejects_false_verification_and_reserves_reported_balance() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerConfigureManualProvider {
+                        credential_reference: "keychain://agent-treasury/card".to_string(),
+                        provider_kind: "os-credential-store".to_string(),
+                        last_four: Some("1111".to_string()),
+                        balance: Money::positive(1_000, "CAD").unwrap(),
+                        balance_status: BalanceStatus::ProviderVerified,
+                        balance_ttl_secs: 60,
+                    },
+                )
+                .is_err()
+        );
+        treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerConfigureManualProvider {
+                    credential_reference: "keychain://agent-treasury/card".to_string(),
+                    provider_kind: "os-credential-store".to_string(),
+                    last_four: Some("1111".to_string()),
+                    balance: Money::positive(1_000, "CAD").unwrap(),
+                    balance_status: BalanceStatus::OwnerConfirmed,
+                    balance_ttl_secs: 60,
+                },
+            )
+            .unwrap();
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_per_transaction = Money::positive(700, "CAD").unwrap();
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::BoundedAutonomous,
+        );
+        let first = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("manual-reserve-first", 600) },
+            )
+            .unwrap();
+        treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerApproveIntent {
+                    intent_id: first["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        treasury
+            .handle(
+                &token,
+                Request::ExecutePurchaseIntent {
+                    intent_id: first["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        let second = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("manual-reserve-second", 500) },
+            )
+            .unwrap();
+        assert_eq!(second["state"], "failed");
+        assert!(
+            second["decision"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "provider balance is insufficient")
+        );
+    }
+
+    #[test]
+    fn exposure_ceiling_counts_prior_settled_spending() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_per_transaction = Money::positive(1_000, "CAD").unwrap();
+        policy.max_per_session = Money::positive(5_000, "CAD").unwrap();
+        policy.max_rolling_24h = Money::positive(5_000, "CAD").unwrap();
+        policy.max_lifetime = Money::positive(5_000, "CAD").unwrap();
+        policy.absolute_exposure_ceiling = Money::positive(1_000, "CAD").unwrap();
+        policy.max_treasury_size = Money::positive(5_000, "CAD").unwrap();
+        policy.reinvestment_ratio_bps = 10_000;
+        let (agent_id, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::BoundedAutonomous,
+        );
+        let first = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("exposure-first", 600) },
+            )
+            .unwrap();
+        treasury
+            .handle(
+                &token,
+                Request::ExecutePurchaseIntent {
+                    intent_id: first["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        treasury
+            .owner_record_deposit(
+                &Actor::Owner,
+                Money::positive(600, "CAD").unwrap(),
+                "verified-revenue".to_string(),
+                true,
+                Some(agent_id),
+                "exposure-replenishment".to_string(),
+            )
+            .unwrap();
+        let second = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("exposure-second", 500) },
+            )
+            .unwrap();
+        assert_eq!(second["state"], "failed");
+        assert!(
+            second["decision"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "absolute exposure ceiling exceeded")
+        );
+    }
+
+    #[test]
+    fn rpc_operations_reject_unknown_fields() {
+        let encoded = br#"{
+            "api_version":"v1",
+            "request_id":"strict-schema",
+            "token":"redacted",
+            "operation":{"type":"get_status","unexpected":true}
+        }"#;
+        assert!(serde_json::from_slice::<RpcRequest>(encoded).is_err());
     }
 
     #[test]

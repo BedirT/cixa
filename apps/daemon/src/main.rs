@@ -87,6 +87,7 @@ fn run() -> CliResult<()> {
         "demo" => run_demo(),
         "init" => init_command(&rest),
         "create-agent" => create_agent_command(&rest),
+        "update-policy" => update_policy_command(&rest),
         "revoke-agent" => agent_lifecycle_command(&rest, true),
         "set-agent-mode" => agent_lifecycle_command(&rest, false),
         "arm-session" => arm_session_command(&rest),
@@ -101,6 +102,7 @@ fn run() -> CliResult<()> {
         "execute" => intent_id_command(&rest, false),
         "cancel" => intent_id_command(&rest, true),
         "approve" => owner_intent_command(&rest, false),
+        "approve-merchant" => approve_merchant_command(&rest),
         "reconcile" => reconcile_command(&rest),
         "stop" => stop_command(&rest, true),
         "resume" => stop_command(&rest, false),
@@ -112,7 +114,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR               Create a local treasury and owner token\n  create-agent --data-dir DIR --owner-token-file FILE [--agent-token-file FILE]\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status STATUS\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH]\n\nTokens are read from protected files, never accepted as command-line values.\nThe broker binds to a Unix-domain socket by default and does not expose a public listener.",
+        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds to a Unix-domain socket by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -175,6 +177,7 @@ fn print_json(value: &Value) -> CliResult<()> {
 
 fn init_command(args: &[String]) -> CliResult<()> {
     let directory = data_dir(args)?;
+    let token_path = PathBuf::from(required(args, "--owner-token-file")?);
     let _lock = DataDirLock::acquire(&directory)?;
     if directory.join("state.json").exists() {
         return Err("treasury is already initialized".into());
@@ -183,18 +186,14 @@ fn init_command(args: &[String]) -> CliResult<()> {
     let balance =
         value(args, "--balance-minor").unwrap_or_else(|| "10000".to_string()).parse::<i64>()?;
     let bootstrap = Treasury::bootstrap(&owner_name, Money::positive(balance, "CAD")?)?;
-    bootstrap.treasury.save_to(&directory)?;
-    if let Some(path) = value(args, "--owner-token-file") {
-        write_token(Path::new(&path), &bootstrap.owner_token)?;
-        print_json(
-            &json!({ "initialized": true, "data_dir": directory, "owner_token_file": path }),
-        )?;
-    } else {
-        print_json(
-            &json!({ "initialized": true, "data_dir": directory, "owner_token": bootstrap.owner_token, "warning": "Save this token in a protected file. It will not be displayed again." }),
-        )?;
+    write_token(&token_path, &bootstrap.owner_token)?;
+    if let Err(error) = bootstrap.treasury.save_to(&directory) {
+        let _ = fs::remove_file(&token_path);
+        return Err(error.into());
     }
-    Ok(())
+    print_json(
+        &json!({ "initialized": true, "data_dir": directory, "owner_token_file": token_path }),
+    )
 }
 
 fn run_request(args: &[String], token: String, operation: Request) -> CliResult<Value> {
@@ -254,6 +253,10 @@ fn direct_command(args: &[String], operation: Request) -> CliResult<()> {
 
 fn create_agent_command(args: &[String]) -> CliResult<()> {
     let owner = token_file(args, true)?;
+    let token_path = PathBuf::from(required(args, "--agent-token-file")?);
+    if token_path.exists() {
+        return Err("agent token file already exists".into());
+    }
     let policy = if let Some(path) = value(args, "--policy-file") {
         serde_json::from_slice::<Policy>(&fs::read(path)?)?
     } else {
@@ -276,18 +279,22 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
             ttl_secs: value(args, "--ttl-secs").unwrap_or_else(|| "3600".to_string()).parse()?,
         },
     )?;
-    if let Some(path) = value(args, "--agent-token-file") {
-        let token = result["capability_token"]
-            .as_str()
-            .ok_or("broker did not return a capability token")?;
-        write_token(Path::new(&path), token)?;
-        print_json(
-            &json!({ "agent_id": result["agent_id"], "agent_token_file": path, "expires_at": result["expires_at"] }),
-        )?;
-    } else {
-        print_json(&result)?;
-    }
-    Ok(())
+    let token =
+        result["capability_token"].as_str().ok_or("broker did not return a capability token")?;
+    write_token(&token_path, token)?;
+    print_json(
+        &json!({ "agent_id": result["agent_id"], "agent_token_file": token_path, "expires_at": result["expires_at"] }),
+    )
+}
+
+fn update_policy_command(args: &[String]) -> CliResult<()> {
+    let token = token_file(args, true)?;
+    let policy: Policy = serde_json::from_slice(&fs::read(required(args, "--policy-file")?)?)?;
+    print_json(&run_request(
+        args,
+        token,
+        Request::OwnerUpdatePolicy { agent_id: required(args, "--agent-id")?, policy },
+    )?)
 }
 
 fn configure_receive_command(args: &[String]) -> CliResult<()> {
@@ -339,7 +346,6 @@ fn configure_manual_provider_command(args: &[String]) -> CliResult<()> {
     let balance_status = match required(args, "--balance-status")?.as_str() {
         "estimated" => BalanceStatus::Estimated,
         "owner_confirmed" => BalanceStatus::OwnerConfirmed,
-        "provider_verified" => BalanceStatus::ProviderVerified,
         value => return Err(format!("unsupported balance status {value}").into()),
     };
     print_json(&run_request(
@@ -410,6 +416,18 @@ fn owner_intent_command(args: &[String], _unused: bool) -> CliResult<()> {
         args,
         token,
         Request::OwnerApproveIntent { intent_id: required(args, "--intent-id")? },
+    )?)
+}
+
+fn approve_merchant_command(args: &[String]) -> CliResult<()> {
+    let token = token_file(args, true)?;
+    print_json(&run_request(
+        args,
+        token,
+        Request::OwnerApproveMerchant {
+            agent_id: required(args, "--agent-id")?,
+            merchant_domain: required(args, "--merchant-domain")?,
+        },
     )?)
 }
 
