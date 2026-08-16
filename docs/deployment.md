@@ -22,6 +22,8 @@ Create an owner-reviewed `~/Library/LaunchAgents/com.example.agent-treasury.plis
 
 Review the plist before `launchctl bootstrap gui/$UID ...`. Do not put a token or card secret in the plist.
 
+This per-user LaunchAgent is for simulated development only. Manual-provider mode requires a broker daemon and agent process under distinct macOS UIDs, a dedicated shared IPC group, agent token and socket paths outside the broker's private directory, and both `create-agent --agent-gid GID` and `serve --agent-gid GID`. The broker rejects a same-UID agent connection, so a second LaunchAgent under the owner's login is not a production substitute.
+
 ## Linux systemd
 
 Use a dedicated service account and a private directory. An owner-reviewed unit can use:
@@ -40,6 +42,20 @@ ReadWritePaths=/var/lib/agent-treasury
 ```
 
 The agent should connect through only the bounded `treasury.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/agent-treasury`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
+
+For manual-provider mode, create a dedicated `treasury-agent-ipc` group and an agent service account. The broker owner must be permitted to assign that group, but the agent account must be a distinct UID. Put the shared socket and agent token outside the `0700` broker data directory, then run:
+
+```bash
+treasury create-agent --data-dir /var/lib/agent-treasury \
+  --owner-token-file /var/lib/agent-treasury/owner.token \
+  --agent-token-file /run/agent-treasury-agent/agent.token \
+  --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
+treasury serve --data-dir /var/lib/agent-treasury \
+  --socket /run/agent-treasury-agent/treasury.sock \
+  --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
+```
+
+The broker changes only the agent token and agent socket to that group. `owner.sock`, `owner.token`, `audit.key`, and state remain private. Manual-provider startup rejects a missing or primary `--agent-gid`, and the socket rejects peers using the broker UID even if they can reach it.
 
 ## Windows
 

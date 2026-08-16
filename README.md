@@ -23,7 +23,7 @@ The first real-world configuration is a manual adapter for a user-owned Canadian
 
 ## Quickstart
 
-Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer with `build` 1.4.2, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the pinned packaging and advisory tools with `python3 -m pip install build==1.4.2` and `cargo install cargo-audit --version 0.22.2 --locked`; install the pinned source scanner from its official release. The simulated demo needs no account, paid service, or API key.
+Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, `pip-audit` 2.9.0, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the hashed Python build graph with `python3 -m pip install --require-hashes -r requirements-build.lock`, install `pip-audit==2.9.0`, and install the Rust scanner with `cargo install cargo-audit --version 0.22.2 --locked`; install the pinned source scanner from its official release. The simulated demo needs no account, paid service, or API key.
 
 ```bash
 cargo build --locked
@@ -57,7 +57,9 @@ target/debug/treasury configure-receive --data-dir .local \
 target/debug/treasury serve --data-dir .local
 ```
 
-Run the agent-facing MCP server in a separate process with:
+The same-identity commands above are simulated-mode developer setup only. Manual-provider operation refuses same-UID agent connections and requires the group-isolated deployment in [docs/deployment.md](docs/deployment.md).
+
+Run the agent-facing MCP server in a separate, untrusted process with:
 
 ```bash
 TREASURY_SOCKET_PATH="$PWD/.local/treasury.sock" \

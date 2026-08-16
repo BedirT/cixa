@@ -83,6 +83,10 @@ fn run() -> CliResult<()> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "help".to_string());
     let rest: Vec<String> = args.collect();
+    #[cfg(not(unix))]
+    if !matches!(command.as_str(), "help" | "--help" | "-h" | "demo") {
+        return Err("stateful treasury commands require the documented Windows named-pipe and DACL adapter; this build fails closed".into());
+    }
     match command.as_str() {
         "help" | "--help" | "-h" => print_help(),
         "demo" => run_demo(),
@@ -115,7 +119,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -168,6 +172,20 @@ fn write_token(path: &Path, token: &str) -> CliResult<()> {
     let mut file = options.open(path)?;
     file.write_all(format!("{token}\n").as_bytes())?;
     file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn share_with_agent_group(path: &Path, gid: u32, mode: u32) -> CliResult<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let encoded = CString::new(path.as_os_str().as_bytes())?;
+    if unsafe { libc::chown(encoded.as_ptr(), !0 as libc::uid_t, gid as libc::gid_t) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
@@ -261,6 +279,14 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
     if token_path.exists() {
         return Err("agent token file already exists".into());
     }
+    #[cfg(unix)]
+    let agent_gid = value(args, "--agent-gid").map(|value| value.parse::<u32>()).transpose()?;
+    #[cfg(unix)]
+    if agent_gid == Some(unsafe { libc::getegid() }) {
+        return Err(
+            "--agent-gid must identify a group distinct from the broker primary group".into()
+        );
+    }
     let policy = if let Some(path) = value(args, "--policy-file") {
         serde_json::from_slice::<Policy>(&fs::read(path)?)?
     } else {
@@ -286,6 +312,13 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
     let token =
         result["capability_token"].as_str().ok_or("broker did not return a capability token")?;
     write_token(&token_path, token)?;
+    #[cfg(unix)]
+    if let Some(gid) = agent_gid {
+        if let Some(parent) = token_path.parent() {
+            share_with_agent_group(parent, gid, 0o750)?;
+        }
+        share_with_agent_group(&token_path, gid, 0o640)?;
+    }
     print_json(
         &json!({ "agent_id": result["agent_id"], "agent_token_file": token_path, "expires_at": result["expires_at"] }),
     )
@@ -469,24 +502,60 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     let owner_socket = value(args, "--owner-socket")
         .map(PathBuf::from)
         .unwrap_or_else(|| directory.join("owner.sock"));
+    let agent_gid = value(args, "--agent-gid").map(|value| value.parse::<u32>()).transpose()?;
     if agent_socket == owner_socket {
         return Err("agent and owner sockets must use different paths".into());
     }
     let mut treasury = Treasury::load_from(&directory)?;
+    let require_separate_agent =
+        treasury.state.provider_mode == agent_treasury_domain::ProviderMode::ManualPrepaidCard;
+    if require_separate_agent && agent_gid.is_none() {
+        return Err(
+            "manual provider mode requires --agent-gid and a separate agent OS identity".into()
+        );
+    }
+    if agent_gid == Some(unsafe { libc::getegid() }) {
+        return Err("--agent-gid must differ from the broker primary group".into());
+    }
+    if agent_gid.is_some() && agent_socket.parent() == Some(directory.as_path()) {
+        return Err(
+            "group-shared agent socket must be outside the private broker data directory".into()
+        );
+    }
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
     }
     let state = Arc::new(Mutex::new(treasury));
     let agent_listener = bind_private_socket(&agent_socket)?;
     let owner_listener = bind_private_socket(&owner_socket)?;
+    if let Some(gid) = agent_gid {
+        if let Some(parent) = agent_socket.parent() {
+            share_with_agent_group(parent, gid, 0o750)?;
+        }
+        share_with_agent_group(&agent_socket, gid, 0o660)?;
+    }
     eprintln!("agent-treasury agent broker listening on {}", agent_socket.display());
     eprintln!("agent-treasury owner control listening on {}", owner_socket.display());
     let owner_state = Arc::clone(&state);
     let owner_directory = directory.clone();
     std::thread::spawn(move || {
-        serve_listener(owner_listener, owner_state, owner_directory, true, MAX_OWNER_CONNECTIONS)
+        serve_listener(
+            owner_listener,
+            owner_state,
+            owner_directory,
+            true,
+            MAX_OWNER_CONNECTIONS,
+            false,
+        )
     });
-    serve_listener(agent_listener, state, directory, false, MAX_CONNECTIONS);
+    serve_listener(
+        agent_listener,
+        state,
+        directory,
+        false,
+        MAX_CONNECTIONS,
+        require_separate_agent,
+    );
     Ok(())
 }
 
@@ -517,11 +586,21 @@ fn serve_listener(
     directory: PathBuf,
     owner_channel: bool,
     connection_limit: usize,
+    reject_broker_uid: bool,
 ) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
+                if reject_broker_uid
+                    && !matches!(
+                        peer_effective_uid(&stream),
+                        Ok(uid) if uid != unsafe { libc::geteuid() }
+                    )
+                {
+                    let _ = stream.write_all(b"{\"api_version\":\"v1\",\"request_id\":\"identity\",\"ok\":false,\"data\":null,\"error\":\"manual provider requires a separate agent OS identity\"}\n");
+                    continue;
+                }
                 if active_connections.fetch_add(1, Ordering::AcqRel) >= connection_limit {
                     active_connections.fetch_sub(1, Ordering::AcqRel);
                     let _ = stream.write_all(b"{\"api_version\":\"v1\",\"request_id\":\"busy\",\"ok\":false,\"data\":null,\"error\":\"broker is busy\"}\n");
@@ -540,6 +619,42 @@ fn serve_listener(
             Err(error) => eprintln!("accept error: {}", error),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_effective_uid(stream: &std::os::unix::net::UnixStream) -> CliResult<u32> {
+    use std::os::fd::AsRawFd;
+    let mut uid = 0;
+    let mut gid = 0;
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(uid)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_effective_uid(stream: &std::os::unix::net::UnixStream) -> CliResult<u32> {
+    use std::os::fd::AsRawFd;
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut _ as *mut libc::c_void,
+            &mut length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(credentials.uid)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn peer_effective_uid(_stream: &std::os::unix::net::UnixStream) -> CliResult<u32> {
+    Err("peer identity checks are unsupported on this Unix platform".into())
 }
 
 #[cfg(not(unix))]
