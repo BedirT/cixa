@@ -19,6 +19,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use wait_timeout::ChildExt;
+use zeroize::{Zeroize, Zeroizing};
 
 type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
@@ -228,10 +230,21 @@ fn require_absolute_regular_file(path: &Path, label: &str) -> CliResult<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn require_owner_executable(path: &Path, label: &str) -> CliResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    require_absolute_regular_file(path, label)?;
+    if fs::symlink_metadata(path)?.permissions().mode() & 0o111 == 0 {
+        return Err(format!("{label} is not executable").into());
+    }
+    Ok(())
+}
+
 struct PlaywrightCheckoutTransport {
     node_path: PathBuf,
     adapter_script: PathBuf,
     adapter_config: PathBuf,
+    hard_timeout: Duration,
 }
 
 impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
@@ -244,41 +257,85 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         request: &PurchaseRequest,
         secret: &VolatileSecret,
     ) -> agent_treasury_domain::Result<ProviderOutcome> {
-        let secret: Value = serde_json::from_slice(secret.as_bytes()).map_err(|_| {
-            agent_treasury_domain::TreasuryError::Invalid(
+        let trimmed = secret.as_bytes().iter().copied().skip_while(u8::is_ascii_whitespace);
+        if trimmed.clone().next() != Some(b'{')
+            || trimmed.filter(|byte| !byte.is_ascii_whitespace()).last() != Some(b'}')
+        {
+            return Err(agent_treasury_domain::TreasuryError::Invalid(
                 "owner secret must be a JSON object for the controlled checkout adapter"
                     .to_string(),
-            )
-        })?;
-        let mut child = Command::new(&self.node_path)
-            .arg(&self.adapter_script)
-            .arg(&self.adapter_config)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let encoded = serde_json::to_vec(&json!({ "request": request, "secret": secret }))?;
+            ));
+        }
+        let request = serde_json::to_vec(request)?;
+        let mut encoded =
+            Zeroizing::new(Vec::with_capacity(request.len() + secret.as_bytes().len() + 25));
+        encoded.extend_from_slice(b"{\"request\":");
+        encoded.extend_from_slice(&request);
+        encoded.extend_from_slice(b",\"secret\":");
+        encoded.extend_from_slice(secret.as_bytes());
+        encoded.extend_from_slice(b"}\n");
         if encoded.len() > 16 * 1024 {
-            let _ = child.kill();
             return Err(agent_treasury_domain::TreasuryError::Invalid(
                 "checkout adapter request is too large".to_string(),
             ));
         }
+        let mut command = Command::new(&self.node_path);
+        command
+            .arg(&self.adapter_script)
+            .arg(&self.adapter_config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn()?;
         let mut stdin = child.stdin.take().ok_or_else(|| {
             agent_treasury_domain::TreasuryError::Conflict(
                 "checkout adapter stdin is unavailable".to_string(),
             )
         })?;
         stdin.write_all(&encoded)?;
-        stdin.write_all(b"\n")?;
+        encoded.zeroize();
         drop(stdin);
-        let output = child.wait_with_output()?;
-        if !output.status.success() || output.stdout.len() > 16 * 1024 {
+        let stdout = child.stdout.take().ok_or_else(|| {
+            agent_treasury_domain::TreasuryError::Conflict(
+                "checkout adapter stdout is unavailable".to_string(),
+            )
+        })?;
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            stdout.take(16 * 1024 + 1).read_to_end(&mut output).map(|_| output)
+        });
+        let status = match child.wait_timeout(self.hard_timeout)? {
+            Some(status) => status,
+            None => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                    "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
+                        .to_string(),
+                ));
+            }
+        };
+        let output = reader.join().map_err(|_| {
+            agent_treasury_domain::TreasuryError::Conflict(
+                "checkout adapter output reader failed".to_string(),
+            )
+        })??;
+        if !status.success() || output.len() > 16 * 1024 {
             return Err(agent_treasury_domain::TreasuryError::Conflict(
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
             ));
         }
-        serde_json::from_slice(&output.stdout).map_err(|_| {
+        serde_json::from_slice(&output).map_err(|_| {
             agent_treasury_domain::TreasuryError::Conflict(
                 "controlled checkout adapter returned an invalid sanitized outcome".to_string(),
             )
@@ -713,9 +770,26 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
     let node_path = PathBuf::from(required(args, "--node-path")?);
     let adapter_script = PathBuf::from(required(args, "--adapter-script")?);
     let adapter_config = PathBuf::from(required(args, "--adapter-config")?);
-    require_absolute_regular_file(&node_path, "Node executable")?;
+    require_owner_executable(&node_path, "Node executable")?;
     require_absolute_regular_file(&adapter_script, "checkout adapter script")?;
     require_absolute_regular_file(&adapter_config, "checkout adapter config")?;
+    let config: Value = serde_json::from_slice(&fs::read(&adapter_config)?)?;
+    let browser_path = PathBuf::from(
+        config
+            .get("browserExecutable")
+            .and_then(Value::as_str)
+            .ok_or("checkout adapter config requires browserExecutable")?,
+    );
+    require_owner_executable(&browser_path, "browser executable")?;
+    let timeout_ms = config
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .ok_or("checkout adapter config requires an integer timeoutMs")?;
+    if !(1_000..=120_000).contains(&timeout_ms) {
+        return Err("checkout adapter timeoutMs must be within 1000..120000".into());
+    }
+    let hard_timeout =
+        Duration::from_millis(timeout_ms.saturating_mul(2).saturating_add(1_000).min(180_000));
     let mut treasury = Treasury::load_from(&directory)?;
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
@@ -744,7 +818,8 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
         .clone();
     let provider =
         OwnerControlledSecretHelperProvider::new(helper_socket, &reference, operation.clone())?;
-    let transport = PlaywrightCheckoutTransport { node_path, adapter_script, adapter_config };
+    let transport =
+        PlaywrightCheckoutTransport { node_path, adapter_script, adapter_config, hard_timeout };
     let mut executor = agent_treasury_domain::SecureOwnerHandoffExecutor::new(
         operation,
         expected_request,

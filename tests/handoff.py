@@ -71,7 +71,10 @@ for await (const line of lines) {
   break;
 }
 """.strip() + "\n", encoding="utf-8")
-    adapter_config.write_text("{}\n", encoding="utf-8")
+    adapter_config.write_text(
+        json.dumps({"browserExecutable": str(NODE), "timeoutMs": 1000}) + "\n",
+        encoding="utf-8",
+    )
     os.chmod(adapter, 0o600)
     os.chmod(adapter_config, 0o600)
     helper = subprocess.Popen([
@@ -99,4 +102,47 @@ for await (const line of lines) {
     assert helper.wait(timeout=5) == 0
     assert any(redemption_dir.iterdir()), "helper did not durably redeem the grant"
     assert "synthetic-pan" not in (directory / "state.json").read_text(encoding="utf-8")
+
+    timeout_request = json.loads(request_file.read_text(encoding="utf-8"))
+    timeout_request["idempotency_key"] = "automated-handoff-timeout"
+    timeout_request["amount"]["minor"] = 501
+    timeout_request["final_total"]["minor"] = 501
+    timeout_request["items"][0]["unit_price_minor"] = 501
+    request_file.write_text(json.dumps(timeout_request), encoding="utf-8")
+    timeout_intent = run(
+        "intent", "--data-dir", str(directory), "--token-file", str(agent_file),
+        "--request-file", str(request_file),
+    )
+    run(
+        "approve", "--data-dir", str(directory), "--owner-token-file", str(owner_file),
+        "--intent-id", timeout_intent["id"],
+    )
+    adapter.write_text("setInterval(() => {}, 1000);\n", encoding="utf-8")
+    helper = subprocess.Popen([
+        str(BINARY), "secret-helper", "--socket", str(helper_socket),
+        "--helper-key-file", str(helper_dir / "helper.key"),
+        "--helper-id-file", str(helper_dir / "helper.id"),
+        "--redemption-dir", str(redemption_dir),
+    ], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert helper.stdin is not None
+    helper.stdin.write(b'{"pan":"timeout-canary","expiry":"12/99","cvv":"999"}\n')
+    helper.stdin.close()
+    for _ in range(100):
+        if helper_socket.exists():
+            break
+        time.sleep(0.02)
+    started = time.monotonic()
+    timed_out = subprocess.run([
+        str(BINARY), "execute-handoff", "--data-dir", str(directory),
+        "--owner-token-file", str(owner_file), "--intent-id", timeout_intent["id"],
+        "--helper-socket", str(helper_socket), "--helper-key-file", str(helper_dir / "helper.key"),
+        "--helper-id-file", str(helper_dir / "helper.id"), "--node-path", str(NODE),
+        "--adapter-script", str(adapter), "--adapter-config", str(adapter_config),
+    ], cwd=ROOT, capture_output=True, text=True, timeout=8)
+    assert timed_out.returncode != 0
+    assert time.monotonic() - started < 7
+    assert helper.wait(timeout=5) == 0
+    persisted = json.loads((directory / "state.json").read_text(encoding="utf-8"))
+    assert persisted["state"]["intents"][timeout_intent["id"]]["state"] == "unknown"
+    assert "timeout-canary" not in json.dumps(persisted)
     print("owner helper and automated handoff assertions passed")
