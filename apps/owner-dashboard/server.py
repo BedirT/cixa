@@ -12,6 +12,7 @@ import argparse
 import base64
 import http.server
 import json
+import os
 import secrets
 import socket
 import stat
@@ -36,7 +37,14 @@ def read_private_token(path_value: str) -> str:
 
 
 class DashboardState:
-    def __init__(self, socket_path: str, owner_token_file: str, access_token_file: str, port: int) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        owner_token_file: str,
+        access_token_file: str,
+        port: int,
+        agent_token_directory: str | None = None,
+    ) -> None:
         self.socket_path = socket_path
         self.owner_token = read_private_token(owner_token_file)
         self.access_token = read_private_token(access_token_file)
@@ -45,6 +53,46 @@ class DashboardState:
         self.csrf = secrets.token_urlsafe(32)
         self.session = secrets.token_urlsafe(32)
         self.port = port
+        self.agent_token_directory = Path(
+            agent_token_directory or Path(owner_token_file).parent / "agent-tokens"
+        )
+        self._prepare_agent_token_directory()
+
+    def _prepare_agent_token_directory(self) -> None:
+        self.agent_token_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = self.agent_token_directory.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("agent token directory must be a directory, not a symlink")
+        if metadata.st_mode & 0o077:
+            raise ValueError("agent token directory permissions are too broad")
+
+    def create_agent(self, operation: dict[str, Any], token_filename: Any) -> Any:
+        if not isinstance(token_filename, str) or not 1 <= len(token_filename) <= 64:
+            raise ValueError("token_filename must be a short string")
+        if token_filename in {".", ".."} or not all(
+            character.isalnum() or character in "._-" for character in token_filename
+        ):
+            raise ValueError("token_filename contains unsupported characters")
+        self._prepare_agent_token_directory()
+        token_path = self.agent_token_directory / token_filename
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(token_path, flags, 0o600)
+        try:
+            value = self.call(operation)
+            token = value.pop("capability_token", None)
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("broker did not return an agent capability")
+            os.write(descriptor, (token + "\n").encode("utf-8"))
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            token_path.unlink(missing_ok=True)
+            raise
+        os.close(descriptor)
+        value["agent_token_file"] = str(token_path)
+        return value
 
     def call(self, operation: dict[str, Any]) -> Any:
         request = {
@@ -150,7 +198,10 @@ def make_handler(state: DashboardState):
         def _owner_operation(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
             schemas: dict[str, tuple[str, set[str]]] = {
                 "/api/emergency-stop": ("owner_set_emergency_stop", {"stopped"}),
-                "/api/agents/create": ("owner_create_agent", {"name", "policy", "mode", "ttl_secs"}),
+                "/api/agents/create": (
+                    "owner_create_agent",
+                    {"name", "policy", "mode", "ttl_secs", "token_filename"},
+                ),
                 "/api/agents/revoke": ("owner_revoke_agent", {"agent_id"}),
                 "/api/agents/mode": ("owner_set_agent_mode", {"agent_id", "mode"}),
                 "/api/agents/arm-session": ("owner_arm_agent_session", {"agent_id", "ttl_secs"}),
@@ -253,7 +304,11 @@ def make_handler(state: DashboardState):
                     operation["stopped"], bool
                 ):
                     raise ValueError("stopped must be boolean")
-                value = state.call(operation)
+                if operation["type"] == "owner_create_agent":
+                    token_filename = operation.pop("token_filename")
+                    value = state.create_agent(operation, token_filename)
+                else:
+                    value = state.call(operation)
                 self._send_json(200, value)
             except KeyError:
                 self._send_json(404, {"error": "not found"})
@@ -268,6 +323,7 @@ def main() -> None:
     parser.add_argument("--socket-path", required=True)
     parser.add_argument("--owner-token-file", required=True)
     parser.add_argument("--access-token-file", required=True)
+    parser.add_argument("--agent-token-directory")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
@@ -277,6 +333,7 @@ def main() -> None:
         args.owner_token_file,
         args.access_token_file,
         args.port,
+        args.agent_token_directory,
     )
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     print(f"owner dashboard listening on http://127.0.0.1:{args.port}")

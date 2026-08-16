@@ -22,7 +22,7 @@
 
   <h2>Agent Management</h2>
   <form data-endpoint="/api/agents/create">
-    <label>Create agent JSON<textarea>{"name":"dashboard-agent","policy":{},"mode":"approval_required","ttl_secs":3600}</textarea></label>
+    <label>Create agent JSON<textarea>{"name":"dashboard-agent","token_filename":"dashboard-agent.token","policy":{},"mode":"approval_required","ttl_secs":3600}</textarea></label>
     <button type="submit">Create agent</button>
   </form>
   <form data-endpoint="/api/agents/revoke">

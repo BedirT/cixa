@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -212,10 +213,20 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
         policy = next(iter(overview["policies"].values()))
         created = owner_post(
             "/api/agents/create",
-            {"name": "dashboard-agent", "policy": policy, "mode": "bounded_autonomous", "ttl_secs": 3600},
+            {
+                "name": "dashboard-agent",
+                "token_filename": "dashboard-agent.token",
+                "policy": policy,
+                "mode": "bounded_autonomous",
+                "ttl_secs": 3600,
+            },
         )
         agent_id = created["agent_id"]
-        agent_token = created["capability_token"]
+        assert "capability_token" not in created
+        token_path = directory / "agent-tokens" / "dashboard-agent.token"
+        assert created["agent_token_file"] == str(token_path)
+        assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+        agent_token = token_path.read_text(encoding="utf-8").strip()
         assert agent_token not in json.dumps(json.loads(request(port, "GET", "/api/overview", authenticated)[2]))
         policy["max_per_transaction"] = {"minor": 2000, "currency": "CAD"}
         assert owner_post("/api/policies/update", {"agent_id": agent_id, "policy": policy})["policy"]["version"] == 2
@@ -267,6 +278,17 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
         assert intent["state"] == "approval_required"
         pending = json.loads(request(port, "GET", "/api/overview", authenticated)[2])
         assert pending["pending_approvals"][0]["id"] == intent["id"]
+        assert pending["pending_approvals"][0]["checkout_facts"] == {
+            "payment_form": "hosted_fields",
+            "redirect_chain": ["https://merchant.example.test/checkout"],
+            "recurring": False,
+            "trial_auto_renew": False,
+            "stored_card": False,
+            "tip_minor": 0,
+            "preauthorization": False,
+            "installments": False,
+            "scenario": "normal",
+        }
         owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
         execution = rpc(
             socket_path,
