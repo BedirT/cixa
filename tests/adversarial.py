@@ -30,12 +30,45 @@ assert report["audit_chain"] == "valid"
 assert report["secret_canary"]["full_pan_or_cvv_emitted"] is False
 assert report["secret_canary"]["injected_through_secret_provider"] is True
 assert report["secret_canary"]["scan"] == "passed"
+hostile = report["hostile_checkout"]
+for name in ("amount_increase", "redirect_localhost"):
+    assert hostile[name]["broker_rejected"] is True, (name, hostile[name])
+for name in (
+    "hidden_recurring",
+    "trial_auto_renew",
+    "card_saving",
+    "tip",
+    "preauthorization",
+    "installments",
+    "cross_origin_fields",
+    "redirect_other_domain",
+):
+    assert hostile[name]["state"] == "failed", (name, hostile[name])
+for name in (
+    "dns_rebinding",
+    "prompt_injection",
+    "malicious_field_inspection",
+    "screenshot_trace_attempt",
+):
+    assert hostile[name]["state"] == "approval_required", (name, hostile[name])
+assert hostile["delayed_settlement"]["execution"]["status"] == "provider_pending"
+assert hostile["decline"]["execution"]["status"] == "declined"
+for name in ("timeout_before_submit", "timeout_after_submit", "browser_crash"):
+    assert hostile[name]["execution"]["status"] == "unknown", (name, hostile[name])
+    assert hostile[name]["retry_rejected"] is True
+for name in ("misleading_success", "duplicate_form_submission"):
+    assert hostile[name]["execution"]["status"] == "settled", (name, hostile[name])
+    assert hostile[name]["retry_rejected"] is True
+assert hostile["delayed_settlement"]["retry_rejected"] is True
+assert hostile["forged_deposit"]["rejected"] is True
+assert hostile["spoofed_receipt"]["rejected"] is True
 for leaked_value in (
     "checkout error: cvv=737\n",
     "checkout error: CVV 737\n",
     '{"cvv":"737"}\n',
     '{\n  "cvc": "737"\n}\n',
     '{"security_code":"737"}\n',
+    '{"card_verification_value":"737"}\n',
 ):
     with tempfile.TemporaryDirectory(prefix="agent-treasury-cvv-regression-") as directory:
         Path(directory, "controlled.log").write_text(leaked_value, encoding="utf-8")

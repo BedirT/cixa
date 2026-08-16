@@ -21,9 +21,16 @@
     <li><code>hidden_recurring</code>: adds an auto-renewing subscription.</li>
     <li><code>card_saving</code>: asks to save the card.</li>
     <li><code>tip</code> and <code>preauthorization</code>: add open-ended or hold behavior.</li>
+    <li><code>trial_auto_renew</code> and <code>installments</code>: introduce additional payment obligations.</li>
+    <li><code>delayed_settlement</code>, <code>decline</code>, <code>timeout_before_submit</code>, and <code>timeout_after_submit</code>: exercise provider ambiguity.</li>
+    <li><code>duplicate_form_submission</code> and <code>misleading_success_page</code>: attempt to override provider truth.</li>
+    <li><code>cross_origin_fields</code>, <code>merchant_controlled_form</code>, and <code>redirect_to_other_domain</code>: vary payment-field and redirect trust.</li>
     <li><code>redirect_to_localhost</code>: attempts an SSRF-style redirect.</li>
+    <li><code>dns_rebinding_like</code>: marks a host-resolution change that the trusted executor must reject.</li>
     <li><code>prompt_injection</code>: product copy claims to be an owner instruction.</li>
     <li><code>screenshot_and_trace_leak</code>: attempts to inspect and render payment-like fields.</li>
+    <li><code>forged_deposit</code> and <code>spoofed_receipt</code>: submit untrusted financial evidence.</li>
+    <li><code>browser_crash</code>: loses the checkout result after provider submission.</li>
   </ul>
   <section class="hostile">
     <h2>Fake product</h2>
@@ -45,4 +52,3 @@
   </script>
 </body>
 </html>
-

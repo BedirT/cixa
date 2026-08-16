@@ -51,6 +51,36 @@ def http_status(port: int, authorization: str | None = None) -> int:
     return status
 
 
+def http_body(port: int) -> str:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection.request("GET", "/")
+    response = connection.getresponse()
+    body = response.read().decode("utf-8")
+    connection.close()
+    if response.status != 200:
+        raise RuntimeError("test merchant did not return HTTP 200")
+    return body
+
+
+def owner_rpc(socket_path: Path, token: str, operation: dict) -> dict:
+    envelope = {
+        "api_version": "v1",
+        "request_id": f"demo-owner-{time.time_ns()}",
+        "token": token,
+        "operation": operation,
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+        channel.connect(str(socket_path))
+        channel.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        response = b""
+        while b"\n" not in response:
+            response += channel.recv(64 * 1024)
+    decoded = json.loads(response.split(b"\n", 1)[0])
+    if not decoded["ok"]:
+        raise RuntimeError(decoded["error"])
+    return decoded["data"]
+
+
 def purchase(key: str, amount: int = 500) -> dict:
     return {
         "idempotency_key": key,
@@ -130,6 +160,15 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         )
         wait_path(socket_path)
         wait_path(owner_socket)
+        owner_token = owner_file.read_text(encoding="utf-8").strip()
+        overview = owner_rpc(owner_socket, owner_token, {"type": "owner_get_dashboard"})
+        policy = next(iter(overview["policies"].values()))
+        policy["max_transactions_per_minute"] = 100
+        owner_rpc(
+            owner_socket,
+            owner_token,
+            {"type": "owner_update_policy", "agent_id": created["agent_id"], "policy": policy},
+        )
         start_process(
             "merchant",
             [
@@ -159,7 +198,33 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             ],
         )
         time.sleep(0.2)
-        assert http_status(merchant_port) == 200
+        merchant_fixture = http_body(merchant_port)
+        for scenario_name in (
+            "amount_changed",
+            "currency_changed",
+            "hidden_recurring",
+            "card_saving",
+            "trial_auto_renew",
+            "preauthorization",
+            "delayed_settlement",
+            "decline",
+            "timeout_before_submit",
+            "timeout_after_submit",
+            "duplicate_form_submission",
+            "misleading_success_page",
+            "cross_origin_fields",
+            "merchant_controlled_form",
+            "redirect_to_other_domain",
+            "redirect_to_localhost",
+            "dns_rebinding_like",
+            "prompt_injection",
+            "screenshot_and_trace_leak",
+            "forged_deposit",
+            "spoofed_receipt",
+            "browser_crash",
+        ):
+            if scenario_name not in merchant_fixture:
+                raise RuntimeError(f"test merchant is missing scenario {scenario_name}")
         auth = base64.b64encode(f"owner:{access_token}".encode()).decode()
         assert http_status(dashboard_port, f"Basic {auth}") == 200
 
@@ -206,6 +271,116 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         hostile_request = purchase("demo-hostile-form")
         hostile_request["payment_form"] = "merchant_controlled"
         hostile = client.create_purchase_intent(hostile_request)
+
+        hostile_checkout: dict[str, dict] = {}
+
+        def proposed_case(name: str, **changes: object) -> dict:
+            request = purchase(f"hostile-{name}", 100)
+            request.update(changes)
+            try:
+                return client.create_purchase_intent(request)
+            except BrokerError as error:
+                return {"broker_rejected": True, "reason": str(error)}
+
+        hostile_checkout["amount_increase"] = proposed_case(
+            "amount-increase",
+            final_total={"minor": 200, "currency": "CAD"},
+            scenario="amount_changed",
+        )
+        hostile_checkout["hidden_recurring"] = proposed_case(
+            "hidden-recurring", recurring=True, scenario="hidden_recurring"
+        )
+        hostile_checkout["trial_auto_renew"] = proposed_case(
+            "trial-auto-renew", trial_auto_renew=True
+        )
+        hostile_checkout["card_saving"] = proposed_case(
+            "card-saving", stored_card=True, scenario="card_saving"
+        )
+        hostile_checkout["tip"] = proposed_case("tip", tip_minor=25, scenario="tip")
+        hostile_checkout["preauthorization"] = proposed_case(
+            "preauthorization", preauthorization=True, scenario="preauthorization"
+        )
+        hostile_checkout["installments"] = proposed_case("installments", installments=True)
+        hostile_checkout["cross_origin_fields"] = proposed_case(
+            "cross-origin-fields",
+            redirect_chain=["https://processor.example.test/hosted"],
+        )
+        hostile_checkout["redirect_other_domain"] = proposed_case(
+            "redirect-other-domain",
+            redirect_chain=["https://attacker.example.test/pay"],
+            scenario="redirect_to_other_domain",
+        )
+        hostile_checkout["redirect_localhost"] = proposed_case(
+            "redirect-localhost",
+            redirect_chain=["https://127.0.0.1/pay"],
+            scenario="redirect_to_localhost",
+        )
+        hostile_checkout["dns_rebinding"] = proposed_case(
+            "dns-rebinding", scenario="dns_rebinding_like"
+        )
+        hostile_checkout["prompt_injection"] = proposed_case(
+            "prompt-injection", scenario="prompt_injection"
+        )
+        hostile_checkout["malicious_field_inspection"] = proposed_case(
+            "malicious-fields",
+            payment_form="merchant_controlled",
+            scenario="merchant_controlled_form",
+        )
+        hostile_checkout["screenshot_trace_attempt"] = proposed_case(
+            "capture-attempt",
+            payment_form="merchant_controlled",
+            scenario="merchant_controlled_form",
+        )
+
+        for name, scenario in (
+            ("delayed_settlement", "delayed_settlement"),
+            ("decline", "decline"),
+            ("timeout_before_submit", "timeout_before_submit"),
+            ("timeout_after_submit", "timeout_after_submit"),
+            ("misleading_success", "misleading_success_page"),
+            ("browser_crash", "browser_crash"),
+            ("duplicate_form_submission", "duplicate_form_submission"),
+        ):
+            intent = proposed_case(name, scenario=scenario)
+            hostile_checkout[name] = {
+                "intent": intent,
+                "execution": (
+                    client.execute_purchase_intent(intent["id"])
+                    if intent.get("state") == "policy_validated"
+                    else {"not_executable_state": intent.get("state", "broker_rejected")}
+                ),
+            }
+            execution = hostile_checkout[name]["execution"]
+            if execution.get("status") in {"provider_pending", "unknown", "settled"}:
+                try:
+                    client.execute_purchase_intent(intent["id"])
+                    hostile_checkout[name]["retry_rejected"] = False
+                except BrokerError as error:
+                    hostile_checkout[name]["retry_rejected"] = str(error).startswith("conflict:")
+
+        try:
+            client.request(
+                {
+                    "type": "owner_record_deposit",
+                    "amount": {"minor": 9999, "currency": "CAD"},
+                    "source": "forged-agent-notification",
+                    "verified": True,
+                    "agent_id": created["agent_id"],
+                    "external_reference": "forged-agent-deposit",
+                }
+            )
+            hostile_checkout["forged_deposit"] = {"rejected": False}
+        except BrokerError as error:
+            hostile_checkout["forged_deposit"] = {
+                "rejected": str(error) == "owner operations require the owner control socket"
+            }
+        try:
+            client.get_receipt("spoofed-receipt-id")
+            hostile_checkout["spoofed_receipt"] = {"rejected": False}
+        except BrokerError as error:
+            hostile_checkout["spoofed_receipt"] = {
+                "rejected": str(error).startswith("not found:")
+            }
         run("stop", "--data-dir", str(directory), "--owner-token-file", str(owner_file))
         stopped = client.create_purchase_intent(purchase("demo-stopped"))
         audit = run("audit", "--data-dir", str(directory), "--owner-token-file", str(owner_file))
@@ -229,6 +404,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 "duplicate_execution": duplicate_execution,
                 "after_duplicate": after_duplicate,
                 "adversarial_results": [over_budget, recurring, currency, hostile, stopped],
+                "hostile_checkout": hostile_checkout,
                 "audit": audit,
             },
         )
@@ -290,6 +466,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             "recurring": recurring,
             "currency_substitution": currency,
             "merchant_controlled_form": hostile,
+            "hostile_checkout": hostile_checkout,
             "emergency_stop": stopped,
             "audit_chain": "valid" if audit["chain_valid"] else "invalid",
             "secret_canary": {
