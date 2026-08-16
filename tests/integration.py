@@ -26,8 +26,53 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
     agent_file = directory / "agent.token"
+    unsafe_init = subprocess.run(
+        [str(BINARY), "init", "--data-dir", str(directory / "unsafe-init")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert unsafe_init.returncode != 0
+    assert not (directory / "unsafe-init" / "state.json").exists()
     run("init", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--balance-minor", "10000")
-    run("create-agent", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--agent-token-file", str(agent_file), "--mode", "bounded_autonomous")
+    created = run("create-agent", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--agent-token-file", str(agent_file), "--mode", "bounded_autonomous")
+    policy = {
+        "id": "ignored-by-update",
+        "version": 0,
+        "primary_currency": "CAD",
+        "max_per_transaction": {"minor": 2000, "currency": "CAD"},
+        "max_per_session": {"minor": 5000, "currency": "CAD"},
+        "max_rolling_24h": {"minor": 10000, "currency": "CAD"},
+        "max_lifetime": {"minor": 25000, "currency": "CAD"},
+        "absolute_exposure_ceiling": {"minor": 10000, "currency": "CAD"},
+        "max_treasury_size": {"minor": 100000, "currency": "CAD"},
+        "reinvestment_ratio_bps": 0,
+        "allowed_currencies": ["CAD"],
+        "allowed_merchants": ["merchant.example.test"],
+        "denied_merchants": [],
+        "approved_redirect_domains": [],
+        "require_approval_for_new_merchants": True,
+        "approved_fulfillment_profiles": ["digital-email"],
+        "allow_recurring": False,
+        "allow_trials": False,
+        "allow_stored_card": False,
+        "allow_tips": False,
+        "allow_preauthorization": False,
+        "allow_installments": False,
+        "denied_categories": ["gambling", "crypto", "financial_transfer", "cash_withdrawal", "gift_card", "cash_equivalent"],
+        "max_order_total_drift_minor": 0,
+        "max_attempts": 1,
+        "max_transactions_per_minute": 10,
+        "max_redirects": 2,
+        "intent_ttl_secs": 900,
+        "card_session_ttl_secs": 600,
+    }
+    policy_file = directory / "policy.json"
+    policy_file.write_text(json.dumps(policy), encoding="utf-8")
+    updated = run("update-policy", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--agent-id", created["agent_id"], "--policy-file", str(policy_file))
+    assert updated["policy"]["version"] == 2
+    approved = run("approve-merchant", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--agent-id", created["agent_id"], "--merchant-domain", "Second.Example.Test")
+    assert approved["merchant_domain"] == "second.example.test"
     run("configure-receive", "--data-dir", str(directory), "--owner-token-file", str(owner_file), "--address", "public-inbox@example.invalid")
     for protected in (
         owner_file,
@@ -48,6 +93,12 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
             raise SystemExit("daemon did not create its Unix socket")
         client = TreasuryClient(str(socket_path), str(agent_file))
         assert client.get_status()["principal"] == "agent"
+        try:
+            client.request({"type": "get_status", "unexpected": True})
+        except BrokerError:
+            pass
+        else:
+            raise SystemExit("strict RPC schema accepted an unknown operation field")
         assert client.get_receive_instructions()["outgoing_transfers_supported"] is False
         request = {
             "idempotency_key": "integration-purchase",

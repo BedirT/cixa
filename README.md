@@ -45,6 +45,11 @@ target/debug/treasury create-agent --data-dir .local --owner-token-file .local/o
   --agent-token-file .local/agent.token --mode bounded_autonomous
 target/debug/treasury arm-session --data-dir .local --owner-token-file .local/owner.token \
   --agent-id AGENT_ID --ttl-secs 600
+target/debug/treasury update-policy --data-dir .local --owner-token-file .local/owner.token \
+  --agent-id AGENT_ID --policy-file policy.json
+target/debug/treasury approve-merchant --data-dir .local \
+  --owner-token-file .local/owner.token --agent-id AGENT_ID \
+  --merchant-domain merchant.example.test
 target/debug/treasury configure-receive --data-dir .local \
   --owner-token-file .local/owner.token --address public-inbox@example.invalid
 target/debug/treasury serve --data-dir .local
@@ -82,6 +87,8 @@ target/debug/treasury configure-manual-provider --data-dir .local \
 ```
 
 The credential reference identifies an owner-controlled helper entry. It is not a PAN or CVV. Manual-provider purchases always require owner approval and finish in an ambiguous reconciliation state because the project does not submit a real card payment.
+
+Owner and agent credentials must be written to their required protected token files. The CLI never prints either credential. Intent approval is scoped to that immutable intent; durable merchant trust requires the separate owner-authenticated `approve-merchant` command.
 
 ## Architecture
 

@@ -26,7 +26,7 @@ It is not a production payment processor and never reaches the network.
 
 ## Manual Prepaid Card
 
-`ManualPrepaidCardProvider` is the first real-world adapter shape. It carries a `SecretReference` and an owner-confirmed balance snapshot with `estimated`, `owner_confirmed`, or `provider_verified` status plus freshness metadata. It reports manual checkout as an ambiguous boundary rather than pretending the broker submitted a real charge.
+`ManualPrepaidCardProvider` is the first real-world adapter shape. It carries a `SecretReference` and a balance snapshot labeled `estimated` or `owner_confirmed` with freshness metadata. Manual owner input cannot claim `provider_verified`; that status is reserved for a future authenticated official or signed import path. It reports manual checkout as an ambiguous boundary rather than pretending the broker submitted a real charge.
 
 For a KOHO card, the owner performs the checkout or uses a separately reviewed handoff, confirms the issuer result in the official app, and then reconciles the intent. The adapter does not log in, scrape, call private endpoints, alter card locks, approve fraud alerts, or replace a card.
 
