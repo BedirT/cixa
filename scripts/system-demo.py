@@ -332,7 +332,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             scenario="merchant_controlled_form",
         )
 
-        for name, scenario in (
+        for index, (name, scenario) in enumerate((
             ("delayed_settlement", "delayed_settlement"),
             ("decline", "decline"),
             ("timeout_before_submit", "timeout_before_submit"),
@@ -340,8 +340,14 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             ("misleading_success", "misleading_success_page"),
             ("browser_crash", "browser_crash"),
             ("duplicate_form_submission", "duplicate_form_submission"),
-        ):
-            intent = proposed_case(name, scenario=scenario)
+        )):
+            case_amount = 120 + index
+            intent = proposed_case(
+                name,
+                scenario=scenario,
+                amount={"minor": case_amount, "currency": "CAD"},
+                final_total={"minor": case_amount, "currency": "CAD"},
+            )
             hostile_checkout[name] = {
                 "intent": intent,
                 "execution": (

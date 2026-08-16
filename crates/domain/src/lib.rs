@@ -2171,6 +2171,27 @@ impl Treasury {
             now(),
         )?;
         self.enforce_authority(&mut decision, &request, &usage, &policy)?;
+        let duplicate_window_start = now() - 15 * 60;
+        let potential_duplicate = self.state.intents.values().any(|intent| {
+            intent.agent_id == agent_id
+                && intent.updated_at >= duplicate_window_start
+                && !matches!(
+                    intent.state,
+                    TransactionState::Failed
+                        | TransactionState::Declined
+                        | TransactionState::Cancelled
+                        | TransactionState::Refunded
+                )
+                && same_checkout_facts(&intent.request, &request)
+        });
+        if potential_duplicate && decision.allowed {
+            decision.allowed = false;
+            decision.requires_approval = true;
+            decision.reasons = vec![
+                "potential duplicate checkout within 15 minutes requires owner approval"
+                    .to_string(),
+            ];
+        }
         if self.state.provider_mode == ProviderMode::ManualPrepaidCard
             && (decision.allowed || decision.requires_approval)
         {
@@ -3824,6 +3845,22 @@ fn validate_secret_reference(reference: &str, provider_kind: &str) -> Result<()>
     Ok(())
 }
 
+fn same_checkout_facts(left: &PurchaseRequest, right: &PurchaseRequest) -> bool {
+    left.amount == right.amount
+        && left.final_total == right.final_total
+        && left.merchant_domain == right.merchant_domain
+        && left.category == right.category
+        && left.recurring == right.recurring
+        && left.trial_auto_renew == right.trial_auto_renew
+        && left.stored_card == right.stored_card
+        && left.tip_minor == right.tip_minor
+        && left.preauthorization == right.preauthorization
+        && left.installments == right.installments
+        && left.fulfillment_profile == right.fulfillment_profile
+        && left.payment_form == right.payment_form
+        && left.redirect_chain == right.redirect_chain
+}
+
 fn sanitize_provider_reference(input: &str) -> String {
     validate_provider_reference(input).unwrap_or_else(|_| {
         let mut digest = Sha256::new();
@@ -3892,9 +3929,15 @@ pub struct SecretReference {
     pub persisted_secret: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct VolatileSecret {
     bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for VolatileSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VolatileSecret([REDACTED])")
+    }
 }
 
 impl VolatileSecret {
@@ -4032,6 +4075,7 @@ pub struct OwnerControlledSecretHelperProvider {
     socket_path: PathBuf,
     reference: String,
     operation: ApprovedSecretOperation,
+    consumed: bool,
 }
 
 #[cfg(unix)]
@@ -4046,7 +4090,7 @@ impl OwnerControlledSecretHelperProvider {
                 "helper reference does not match the approved operation".to_string(),
             ));
         }
-        Ok(Self { socket_path, reference: reference.to_string(), operation })
+        Ok(Self { socket_path, reference: reference.to_string(), operation, consumed: false })
     }
 }
 
@@ -4066,6 +4110,12 @@ impl SecretProvider for OwnerControlledSecretHelperProvider {
         operation: &ApprovedSecretOperation,
     ) -> Result<VolatileSecret> {
         require_secret_binding(&self.operation, operation, &self.reference)?;
+        if self.consumed {
+            return Err(TreasuryError::Conflict(
+                "owner secret-helper operation was already consumed".to_string(),
+            ));
+        }
+        self.consumed = true;
         let metadata = fs::symlink_metadata(&self.socket_path)?;
         if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
             return Err(TreasuryError::Forbidden(
@@ -4324,6 +4374,44 @@ mod tests {
             .unwrap();
         assert_eq!(first["id"], second["id"]);
         assert_eq!(treasury.state.intents.len(), 1);
+    }
+
+    #[test]
+    fn fresh_idempotency_key_does_not_bypass_duplicate_detection() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let first = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("fingerprint-first", 500) },
+            )
+            .unwrap();
+        treasury
+            .handle(
+                &token,
+                Request::ExecutePurchaseIntent {
+                    intent_id: first["id"].as_str().unwrap().to_string(),
+                },
+            )
+            .unwrap();
+        let second = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("fingerprint-second", 500) },
+            )
+            .unwrap();
+        assert_eq!(second["state"], "approval_required");
+        assert_eq!(
+            second["decision"]["reasons"][0],
+            "potential duplicate checkout within 15 minutes requires owner approval"
+        );
     }
 
     #[test]
@@ -5209,6 +5297,9 @@ mod tests {
         assert!(session.fetch_for_owner_operation(&wrong_operation).is_err());
         assert!(!session.fetch_for_owner_operation(&operation).unwrap().is_empty());
         assert!(session.fetch_for_owner_operation(&operation).is_err());
+        let formatted = format!("{:?}", VolatileSecret::new(b"never-print-this-value".to_vec()));
+        assert_eq!(formatted, "VolatileSecret([REDACTED])");
+        assert!(!formatted.contains("never-print-this-value"));
     }
 
     #[cfg(unix)]
@@ -5242,6 +5333,7 @@ mod tests {
             OwnerControlledSecretHelperProvider::new(socket_path, "card-ref-1", operation.clone())
                 .unwrap();
         assert!(!provider.fetch_for_owner_operation(&operation).unwrap().is_empty());
+        assert!(provider.fetch_for_owner_operation(&operation).is_err());
         server.join().unwrap();
     }
 
