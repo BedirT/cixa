@@ -1102,16 +1102,34 @@ struct PersistedEnvelope {
     state_mac: String,
 }
 
-#[derive(Clone, Debug)]
 pub struct Treasury {
     pub state: TreasuryState,
     audit_key: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
 pub struct Bootstrap {
     pub treasury: Treasury,
     pub owner_token: String,
+}
+
+impl std::fmt::Debug for Treasury {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Treasury")
+            .field("state", &self.state)
+            .field("audit_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Bootstrap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Bootstrap")
+            .field("treasury", &self.treasury)
+            .field("owner_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2139,9 +2157,15 @@ impl Treasury {
         }))
     }
 
-    fn create_intent(&mut self, actor: &Actor, request: PurchaseRequest) -> Result<Value> {
+    fn create_intent(&mut self, actor: &Actor, mut request: PurchaseRequest) -> Result<Value> {
         let agent_id = self.require_agent_scope(actor, "purchase_intents:create")?.to_string();
         let agent = self.agent(&agent_id)?.clone();
+        request.merchant_domain = canonicalize_domain(&request.merchant_domain)?;
+        request.redirect_chain = request
+            .redirect_chain
+            .iter()
+            .map(|redirect| normalize_https_url(redirect))
+            .collect::<Result<Vec<_>>>()?;
         if let Some(existing) = self.state.intents.values().find(|intent| {
             intent.agent_id == agent_id && intent.request.idempotency_key == request.idempotency_key
         }) {
@@ -3777,6 +3801,15 @@ pub fn validate_https_url(input: &str) -> Result<String> {
     Ok(canonical)
 }
 
+fn normalize_https_url(input: &str) -> Result<String> {
+    let canonical_host = validate_https_url(input)?;
+    let mut url = Url::parse(input)
+        .map_err(|_| TreasuryError::Invalid("malformed redirect URL".to_string()))?;
+    url.set_host(Some(&canonical_host))
+        .map_err(|_| TreasuryError::Invalid("redirect host cannot be normalized".to_string()))?;
+    Ok(url.to_string())
+}
+
 static PAN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:[0-9][ -]?){12,18}[0-9]\b").expect("PAN redaction regex is valid")
 });
@@ -4404,7 +4437,15 @@ mod tests {
         let second = treasury
             .handle(
                 &token,
-                Request::CreatePurchaseIntent { request: request("fingerprint-second", 500) },
+                Request::CreatePurchaseIntent {
+                    request: {
+                        let mut request = request("fingerprint-second", 500);
+                        request.merchant_domain = "MERCHANT.EXAMPLE.TEST".to_string();
+                        request.redirect_chain =
+                            vec!["https://MERCHANT.EXAMPLE.TEST/checkout".to_string()];
+                        request
+                    },
+                },
             )
             .unwrap();
         assert_eq!(second["state"], "approval_required");
@@ -5300,6 +5341,18 @@ mod tests {
         let formatted = format!("{:?}", VolatileSecret::new(b"never-print-this-value".to_vec()));
         assert_eq!(formatted, "VolatileSecret([REDACTED])");
         assert!(!formatted.contains("never-print-this-value"));
+    }
+
+    #[test]
+    fn treasury_and_bootstrap_debug_output_redacts_root_secrets() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
+        let owner_token = bootstrap.owner_token.clone();
+        let audit_key = hex::encode(&bootstrap.treasury.audit_key);
+        let formatted = format!("{bootstrap:?}");
+        assert!(!formatted.contains(&owner_token));
+        assert!(!formatted.contains(&audit_key));
+        assert!(formatted.contains("[REDACTED]"));
     }
 
     #[cfg(unix)]
