@@ -62,6 +62,18 @@ def http_body(port: int) -> str:
     return body
 
 
+def wait_http(port: int, authorization: str | None = None) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            if http_status(port, authorization) == 200:
+                return
+        except OSError:
+            pass
+        time.sleep(0.05)
+    raise RuntimeError(f"HTTP service did not become ready on port {port}")
+
+
 def owner_rpc(socket_path: Path, token: str, operation: dict) -> dict:
     envelope = {
         "api_version": "v1",
@@ -198,7 +210,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
                 str(dashboard_port),
             ],
         )
-        time.sleep(0.2)
+        wait_http(merchant_port)
         merchant_fixture = http_body(merchant_port)
         for scenario_name in (
             "amount_changed",
@@ -227,7 +239,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
             if scenario_name not in merchant_fixture:
                 raise RuntimeError(f"test merchant is missing scenario {scenario_name}")
         auth = base64.b64encode(f"owner:{access_token}".encode()).decode()
-        assert http_status(dashboard_port, f"Basic {auth}") == 200
+        wait_http(dashboard_port, f"Basic {auth}")
 
         mcp_result = subprocess.run(
             ["node", str(ROOT / "scripts" / "demo-mcp.mjs"),
