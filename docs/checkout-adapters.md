@@ -37,7 +37,7 @@ The Rust broker owns a hard wall-clock deadline in addition to Playwright operat
 
 ## Hosted Fields and Merchant Trust
 
-The policy distinguishes recognized hosted fields, an explicitly owner-approved merchant integration, and an unknown merchant-controlled payment form. The latter is approval-required in the default policy. In the simulator, these values are synthetic adversarial fixtures. For a manual card, every checkout requires owner approval, so agent-asserted origin, amount, or form trust can never cause autonomous real spending. The controlled adapter independently validates HTTPS origin, public network destination, redirect chain, visible total, currency, fulfillment and consent facts, and cross-origin form ownership before submission.
+The policy distinguishes recognized hosted fields, an explicitly owner-approved merchant integration, and an unknown merchant-controlled payment form. The latter is approval-required in the default policy. In the simulator, these values are synthetic adversarial fixtures. For a manual card, every checkout requires owner approval, so agent-asserted origin, amount, or form trust can never cause autonomous real spending. The controlled adapter independently validates HTTPS origin, public network destination, redirect chain, visible total, currency, line items, fulfillment, tip, preauthorization, installments, consent facts, and cross-origin form ownership before submission. Each evidence selector must resolve to exactly one visible element.
 
 ## Browser Reference Boundary
 
@@ -45,4 +45,4 @@ The agent never receives Playwright, CDP, DOM, autofill, clipboard, screenshot, 
 
 ## Failure Behavior
 
-No blind refresh, form resubmission, or automatic retry follows a timeout. `provider_pending`, `unknown`, and `reconciliation_required` are owner workflows. A misleading success page is not provider evidence. A provider reference or owner-authenticated reconciliation is required before a settled ledger event is recorded.
+No blind refresh, form resubmission, or automatic retry follows a timeout. Browser and merchant DOM output always maps to `unknown`, even if the page displays success, pending, decline, or a reference. Only owner-authenticated reconciliation using independent issuer or processor evidence can settle or definitively decline the intent.

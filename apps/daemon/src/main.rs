@@ -335,10 +335,14 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
             ));
         }
-        serde_json::from_slice(&output).map_err(|_| {
+        let _: ProviderOutcome = serde_json::from_slice(&output).map_err(|_| {
             agent_treasury_domain::TreasuryError::Conflict(
                 "controlled checkout adapter returned an invalid sanitized outcome".to_string(),
             )
+        })?;
+        Ok(ProviderOutcome::Unknown {
+            reason: "browser output is not authenticated provider evidence; owner reconciliation required"
+                .to_string(),
         })
     }
 

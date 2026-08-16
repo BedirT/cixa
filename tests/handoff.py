@@ -98,7 +98,7 @@ for await (const line of lines) {
         "--helper-id-file", str(helper_dir / "helper.id"), "--node-path", str(NODE),
         "--adapter-script", str(adapter), "--adapter-config", str(adapter_config),
     )
-    assert executed["status"] == "settled"
+    assert executed["status"] == "unknown"
     assert helper.wait(timeout=5) == 0
     assert any(redemption_dir.iterdir()), "helper did not durably redeem the grant"
     assert "synthetic-pan" not in (directory / "state.json").read_text(encoding="utf-8")

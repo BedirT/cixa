@@ -13,6 +13,9 @@ type PurchaseRequest = {
   recurring: boolean;
   trial_auto_renew: boolean;
   stored_card: boolean;
+  tip_minor: number;
+  preauthorization: boolean;
+  installments: boolean;
   fulfillment_profile: string;
   payment_form: string;
   redirect_chain: string[];
@@ -27,16 +30,15 @@ type SelectorConfig = {
   recurring: string;
   trialAutoRenew: string;
   storedCard: string;
+  tipMinor: string;
+  preauthorization: string;
+  installments: string;
   paymentFrame: string;
   pan: string;
   expiry: string;
   cvv: string;
   cardholder?: string;
   submit: string;
-  approved: string;
-  pending: string;
-  declined: string;
-  providerReference?: string;
 };
 export type AdapterConfig = {
   browserExecutable: string;
@@ -121,7 +123,15 @@ export function validateConfiguration(config: AdapterConfig, request: PurchaseRe
 }
 
 async function text(page: Page, selector: string): Promise<string> {
-  return (await page.locator(selector).textContent())?.trim() ?? fail("checkout evidence is missing");
+  const matches = page.locator(selector);
+  const count = await matches.count();
+  const visible = [];
+  for (let index = 0; index < count; index += 1) {
+    const candidate = matches.nth(index);
+    if (await candidate.isVisible()) visible.push(candidate);
+  }
+  if (visible.length !== 1) fail("checkout evidence must have exactly one visible match");
+  return (await visible[0].textContent())?.trim() ?? fail("checkout evidence is missing");
 }
 
 export async function observeAndValidate(page: Page, config: AdapterConfig, request: PurchaseRequest): Promise<void> {
@@ -152,6 +162,23 @@ export async function observeAndValidate(page: Page, config: AdapterConfig, requ
   ] as const) {
     if (parseBoolean(await text(page, selector)) !== expected) fail("checkout consent facts changed");
   }
+  if (parseMinorUnitsAllowZero(await text(page, selectors.tipMinor)) !== request.tip_minor) {
+    fail("visible tip differs from the approved tip");
+  }
+  if (parseBoolean(await text(page, selectors.preauthorization)) !== request.preauthorization) {
+    fail("checkout preauthorization fact changed");
+  }
+  if (parseBoolean(await text(page, selectors.installments)) !== request.installments) {
+    fail("checkout installment fact changed");
+  }
+}
+
+function parseMinorUnitsAllowZero(value: string): number {
+  if (!/^[0-9]+(?:\.[0-9]{2})$/.test(value)) fail("checkout amount is not canonical");
+  const [major, minor] = value.split(".");
+  const result = Number(major) * 100 + Number(minor);
+  if (!Number.isSafeInteger(result) || result < 0) fail("checkout amount is invalid");
+  return result;
 }
 
 async function requireProcessorFrame(
@@ -250,20 +277,10 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
       fail("checkout navigation changed during the payment critical section");
     }
     await page.locator(config.selectors.submit).click({ noWaitAfter: true });
-    const outcome = await Promise.any([
-      page.locator(config.selectors.approved).waitFor({ state: "visible", timeout: config.timeoutMs }).then(() => "approved"),
-      page.locator(config.selectors.pending).waitFor({ state: "visible", timeout: config.timeoutMs }).then(() => "pending"),
-      page.locator(config.selectors.declined).waitFor({ state: "visible", timeout: config.timeoutMs }).then(() => "declined"),
-    ]).catch(() => "unknown");
-    const reference = config.selectors.providerReference
-      ? await text(page, config.selectors.providerReference).catch(() => "") : "";
-    if ((outcome === "approved" || outcome === "pending") && !/^[A-Za-z0-9_.-]{1,128}$/.test(reference)) {
-      return { outcome: "unknown", reason: "provider reference was unavailable" };
-    }
-    return outcome === "approved" ? { outcome, reference }
-      : outcome === "pending" ? { outcome, reference }
-      : outcome === "declined" ? { outcome, reason: "provider declined" }
-      : { outcome, reason: "checkout result was not independently observable" };
+    return {
+      outcome: "unknown",
+      reason: "merchant DOM is not authenticated provider evidence; owner reconciliation required",
+    };
   } finally {
     input.secret.pan = "";
     input.secret.expiry = "";
