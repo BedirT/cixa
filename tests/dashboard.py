@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -61,7 +62,25 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
         "--balance-minor",
         "10000",
     )
+    same_credential = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "apps" / "owner-dashboard" / "server.py"),
+            "--socket-path",
+            str(directory / "unused.sock"),
+            "--owner-token-file",
+            str(owner_file),
+            "--access-token-file",
+            str(owner_file),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert same_credential.returncode != 0
+    assert "must differ" in same_credential.stderr
     socket_path = directory / "treasury.sock"
+    owner_socket_path = directory / "owner.sock"
     daemon = subprocess.Popen(
         [str(BINARY), "serve", "--data-dir", str(directory), "--socket", str(socket_path)],
         cwd=ROOT,
@@ -72,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
     dashboard: subprocess.Popen[str] | None = None
     try:
         for _ in range(100):
-            if socket_path.exists():
+            if socket_path.exists() and owner_socket_path.exists():
                 break
             time.sleep(0.05)
         with socket.socket() as probe:
@@ -83,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
                 "python3",
                 str(ROOT / "apps" / "owner-dashboard" / "server.py"),
                 "--socket-path",
-                str(socket_path),
+                str(owner_socket_path),
                 "--owner-token-file",
                 str(owner_file),
                 "--access-token-file",

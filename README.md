@@ -69,12 +69,12 @@ The owner dashboard is an optional loopback-only bridge:
 umask 077
 openssl rand -hex 32 > .local/dashboard.token
 python3 apps/owner-dashboard/server.py \
-  --socket-path "$PWD/.local/treasury.sock" \
+  --socket-path "$PWD/.local/owner.sock" \
   --owner-token-file "$PWD/.local/owner.token" \
   --access-token-file "$PWD/.local/dashboard.token"
 ```
 
-The browser prompts for HTTP Basic authentication. Use username `owner` and the separate dashboard access token as the password. CSRF, origin, host, and authenticated session checks remain additional controls. It has no CDN, analytics, third-party script, public bind, or agent endpoint. Stop the daemon and manually lock or replace a real card after a risky run.
+The browser prompts for HTTP Basic authentication. Use username `owner` and the separate dashboard access token as the password. Startup rejects reuse of the broker owner credential as the dashboard credential. CSRF, origin, host, and authenticated session checks remain additional controls. The daemon reserves a distinct `owner.sock` control channel that is not shared with the agent connection pool; give agents only `treasury.sock`. The dashboard has no CDN, analytics, third-party script, public bind, or agent endpoint. Stop the daemon and manually lock or replace a real card after a risky run.
 
 Configure a reference-only manual prepaid card without supplying card data:
 

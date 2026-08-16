@@ -40,6 +40,8 @@ class DashboardState:
         self.socket_path = socket_path
         self.owner_token = read_private_token(owner_token_file)
         self.access_token = read_private_token(access_token_file)
+        if secrets.compare_digest(self.owner_token, self.access_token):
+            raise ValueError("dashboard access credential must differ from the broker owner credential")
         self.csrf = secrets.token_urlsafe(32)
         self.session = secrets.token_urlsafe(32)
         self.port = port
