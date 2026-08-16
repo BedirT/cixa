@@ -4,19 +4,24 @@
 
 The local simulator is the canonical supported executor. It uses the same policy and state machine as the daemon, returns deterministic provider outcomes, and never loads a real card or contacts a merchant.
 
-## Secure Handoff
+## Supported Owner-Manual Handoff
 
-The intended handoff sequence is:
+The shipped real-card handoff sequence is:
 
 1. The agent prepares an intent without payment secrets.
-2. The broker acquires exclusive checkout control and pauses agent browser access.
-3. The broker validates final origin, redirect chain, amount, currency, fulfillment, recurring indicators, stored-card consent, and form trust.
-4. The broker revalidates policy and reserves funds transactionally.
-5. A just-in-time owner-controlled secret provider supplies volatile payment material.
-6. The trusted executor submits exactly once and observes the result.
-7. The broker clears secret material, sanitizes or destroys the context, appends the ledger and audit entries, and returns only a sanitized result.
+2. The owner runs `begin-handoff`; the broker revalidates policy, reserves funds, and durably records `executing` before returning the complete sanitized checkout facts.
+3. The owner suspends the separately identified agent and independently verifies origin, redirect chain, amount, currency, items, fulfillment, recurring indicators, stored-card consent, and form trust in an owner-only browser.
+4. The owner enters payment material directly into that browser and submits at most once. The broker and agent never receive it.
+5. The owner runs `complete-handoff`, which records `unknown` with retry disabled even when the merchant page claims success.
+6. The owner verifies the provider transaction and uses `reconcile`; only then can the broker settle and issue a sanitized receipt.
 
-This sequence is the contract for a future trusted executor, not a claim that the current repository observes a real merchant DOM. If any property is unknown, the broker requires owner approval or denies. It never relies on the agent's natural-language summary of a page.
+The split commands are crash-safe: a restart after `begin-handoff` recovers durable `executing` state as `unknown`, so the operation cannot return to an executable approval. If any property is unknown, the owner must not submit. The broker never relies on the agent's natural-language summary of a page.
+
+## Embedded Automated Handoff Boundary
+
+The Rust domain also exposes `owner_execute_approved_handoff_persisted` for a separately reviewed trusted adapter. It persists `executing` before invoking external submission, consumes a bound secret once, runs cleanup on secret-fetch and submission failures, sanitizes the outcome, and persists terminal or quarantined state before returning. It is not exposed to agent RPC and is not a claim that this repository independently observes an arbitrary merchant DOM. An adapter that cannot enforce the full critical-section contract below must not call it.
+
+Signed helper grants are bound to a helper instance and broker UID, expire after five minutes, and require `DurableNonceRedemptionStore` for atomic create-once redemption across workers and restarts. A helper must obtain the broker UID from Unix peer credentials rather than trusting request data.
 
 ## Hosted Fields and Merchant Trust
 

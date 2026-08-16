@@ -90,7 +90,20 @@ target/debug/treasury configure-manual-provider --data-dir .local \
   --balance-minor 5000 --balance-status owner_confirmed
 ```
 
-The credential reference identifies an owner-controlled helper entry. It is not a PAN or CVV. Manual-provider purchases always require owner approval and finish in an ambiguous reconciliation state because the project does not submit a real card payment.
+The credential reference identifies an owner-controlled helper entry. It is not a PAN or CVV. After `approve`, the real-world manual path is deliberately two phase:
+
+```bash
+target/debug/treasury begin-handoff --data-dir .local \
+  --owner-token-file .local/owner.token --intent-id INTENT_ID
+# Suspend the agent. In an owner-only browser, verify the returned facts and submit at most once.
+target/debug/treasury complete-handoff --data-dir .local \
+  --owner-token-file .local/owner.token --intent-id INTENT_ID
+target/debug/treasury reconcile --data-dir .local \
+  --owner-token-file .local/owner.token --intent-id INTENT_ID \
+  --outcome settled --provider-reference OWNER_VERIFIED_REFERENCE
+```
+
+`begin-handoff` durably records `executing` before the owner can submit. `complete-handoff` records an ambiguous, non-retryable outcome, and only owner reconciliation can settle it. The project never receives card data or automates the KOHO login or payment form in this supported path.
 
 Owner and agent credentials must be written to their required protected token files. The CLI never prints either credential. Intent approval is scoped to that immutable intent; durable merchant trust requires the separate owner-authenticated `approve-merchant` command.
 

@@ -107,6 +107,8 @@ fn run() -> CliResult<()> {
         "execute" => intent_id_command(&rest, false),
         "cancel" => intent_id_command(&rest, true),
         "approve" => owner_intent_command(&rest, false),
+        "begin-handoff" => owner_handoff_command(&rest, false),
+        "complete-handoff" => owner_handoff_command(&rest, true),
         "approve-merchant" => approve_merchant_command(&rest),
         "reconcile" => reconcile_command(&rest),
         "stop" => stop_command(&rest, true),
@@ -119,7 +121,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens are read from protected files, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -454,6 +456,17 @@ fn owner_intent_command(args: &[String], _unused: bool) -> CliResult<()> {
         token,
         Request::OwnerApproveIntent { intent_id: required(args, "--intent-id")? },
     )?)
+}
+
+fn owner_handoff_command(args: &[String], complete: bool) -> CliResult<()> {
+    let token = token_file(args, true)?;
+    let intent_id = required(args, "--intent-id")?;
+    let operation = if complete {
+        Request::OwnerCompleteManualHandoff { intent_id }
+    } else {
+        Request::OwnerBeginManualHandoff { intent_id }
+    };
+    print_json(&run_request(args, token, operation)?)
 }
 
 fn approve_merchant_command(args: &[String]) -> CliResult<()> {
