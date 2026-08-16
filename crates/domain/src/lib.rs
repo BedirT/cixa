@@ -530,6 +530,9 @@ impl PurchaseRequest {
         if self.amount.minor <= 0 || self.final_total.minor <= 0 {
             return Err(TreasuryError::Invalid("purchase amount must be positive".to_string()));
         }
+        if self.tip_minor < 0 {
+            return Err(TreasuryError::Invalid("tip amount cannot be negative".to_string()));
+        }
         if self.amount.currency != self.final_total.currency {
             return Err(TreasuryError::Invalid(
                 "final total currency must match intent currency".to_string(),
@@ -656,6 +659,8 @@ pub struct PurchaseIntent {
     pub updated_at: i64,
     pub provider_reference: Option<String>,
     pub receipt_hash: Option<String>,
+    #[serde(default)]
+    pub receipt: Option<Receipt>,
     pub last_error: Option<String>,
 }
 
@@ -1521,6 +1526,30 @@ impl Treasury {
                 intent.request.final_total.minor,
                 &intent.request.final_total.currency,
             )?;
+            match (&intent.receipt, &intent.receipt_hash) {
+                (Some(receipt), Some(hash)) => {
+                    if receipt.intent_id != intent.id || Self::receipt_hash(receipt)? != *hash {
+                        return Err(TreasuryError::Invalid(
+                            "persisted receipt integrity check failed".to_string(),
+                        ));
+                    }
+                }
+                (None, None) => {
+                    if matches!(
+                        intent.state,
+                        TransactionState::Settled | TransactionState::Refunded
+                    ) {
+                        return Err(TreasuryError::Invalid(
+                            "settled intent is missing its immutable receipt".to_string(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(TreasuryError::Invalid(
+                        "persisted receipt and hash must be present together".to_string(),
+                    ));
+                }
+            }
         }
         for event in &self.state.ledger {
             Money::new(event.amount.minor, &event.amount.currency)?;
@@ -1626,6 +1655,30 @@ impl Treasury {
                 Some(BalanceStatus::ProviderVerified) => "provider_verified",
                 None => "unavailable",
             },
+        }
+    }
+
+    fn provider_balance_evidence(&self) -> Value {
+        match self.state.provider_mode {
+            ProviderMode::Simulated => json!({
+                "status": self.provider_balance_status(),
+                "observed_at": null,
+                "expires_at": null,
+                "stale": false,
+            }),
+            ProviderMode::ManualPrepaidCard => {
+                let snapshot = self
+                    .state
+                    .manual_provider
+                    .as_ref()
+                    .and_then(|provider| provider.balance_snapshot.as_ref());
+                json!({
+                    "status": self.provider_balance_status(),
+                    "observed_at": snapshot.map(|value| value.observed_at),
+                    "expires_at": snapshot.map(|value| value.expires_at),
+                    "stale": snapshot.is_none_or(|value| value.expires_at <= now()),
+                })
+            }
         }
     }
 
@@ -1917,13 +1970,13 @@ impl Treasury {
             })
             .collect();
         let transactions: Vec<Value> =
-            self.state.intents.values().map(|intent| self.sanitized_intent(intent)).collect();
+            self.state.intents.values().map(|intent| self.owner_intent(intent)).collect();
         let pending_approvals: Vec<Value> = self
             .state
             .intents
             .values()
             .filter(|intent| intent.state == TransactionState::ApprovalRequired)
-            .map(|intent| self.sanitized_intent(intent))
+            .map(|intent| self.owner_intent(intent))
             .collect();
         let reconciliation_required: Vec<Value> = self
             .state
@@ -1937,7 +1990,7 @@ impl Treasury {
                         | TransactionState::ReconciliationRequired
                 )
             })
-            .map(|intent| self.sanitized_intent(intent))
+            .map(|intent| self.owner_intent(intent))
             .collect();
         let manual_card = self.state.manual_provider.as_ref().map(|provider| {
             json!({
@@ -1958,6 +2011,7 @@ impl Treasury {
                 "mode": self.state.provider_mode,
                 "balance": self.provider_reported_balance().ok(),
                 "balance_status": self.provider_balance_status(),
+                "balance_evidence": self.provider_balance_evidence(),
                 "manual_card": manual_card,
             },
             "agents": agents,
@@ -2025,6 +2079,7 @@ impl Treasury {
             "provider_balance": {
                 "amount": provider_balance,
                 "status": self.provider_balance_status(),
+                "evidence": self.provider_balance_evidence(),
             },
             "ledger": ledger,
             "estimated_balance_is_not_provider_verified": true,
@@ -2102,6 +2157,7 @@ impl Treasury {
             updated_at: at,
             provider_reference: None,
             receipt_hash: None,
+            receipt: None,
             last_error: None,
         };
         intent.transition(TransactionState::Proposed)?;
@@ -2254,10 +2310,9 @@ impl Treasury {
             ProviderOutcome::Approved { reference } => {
                 intent.provider_reference = Some(sanitize_provider_reference(&reference));
                 intent.transition(TransactionState::Settled)?;
-                let receipt = self.receipt(&intent)?;
-                intent.receipt_hash = Some(Self::receipt_hash(&receipt)?);
+                Self::issue_receipt(&mut intent)?;
                 self.record_settled(&intent)?;
-                json!({ "status": "settled", "intent": self.sanitized_intent(&intent), "receipt": receipt })
+                json!({ "status": "settled", "intent": self.sanitized_intent(&intent), "receipt": intent.receipt })
             }
             ProviderOutcome::Declined { reason: _ } => {
                 intent.last_error = Some("provider_declined".to_string());
@@ -2364,7 +2419,10 @@ impl Treasury {
         {
             return Err(TreasuryError::Forbidden("intent belongs to another agent".to_string()));
         }
-        Ok(self.sanitized_intent(intent))
+        Ok(match actor {
+            Actor::Owner => self.owner_intent(intent),
+            Actor::Agent(_) => self.sanitized_intent(intent),
+        })
     }
 
     fn list_transactions(&self, actor: &Actor) -> Result<Value> {
@@ -2379,7 +2437,10 @@ impl Treasury {
                 Actor::Owner => true,
                 Actor::Agent(agent_id) => intent.agent_id == *agent_id,
             })
-            .map(|intent| self.sanitized_intent(intent))
+            .map(|intent| match actor {
+                Actor::Owner => self.owner_intent(intent),
+                Actor::Agent(_) => self.sanitized_intent(intent),
+            })
             .collect();
         Ok(json!({ "transactions": values }))
     }
@@ -2398,7 +2459,15 @@ impl Treasury {
         {
             return Err(TreasuryError::Forbidden("intent belongs to another agent".to_string()));
         }
-        self.receipt(intent).map(|value| json!(value))
+        let receipt = intent.receipt.as_ref().ok_or_else(|| {
+            TreasuryError::Conflict("receipt is unavailable until settlement".to_string())
+        })?;
+        if intent.receipt_hash.as_deref() != Some(&Self::receipt_hash(receipt)?) {
+            return Err(TreasuryError::Invalid(
+                "persisted receipt integrity check failed".to_string(),
+            ));
+        }
+        Ok(json!(receipt))
     }
 
     fn owner_create_agent(
@@ -2731,6 +2800,7 @@ impl Treasury {
                 };
                 intent.provider_reference = Some(reference);
                 intent.transition(TransactionState::Settled)?;
+                Self::issue_receipt(&mut intent)?;
                 self.record_settled(&intent)?;
             }
             ReconciliationOutcome::Declined => {
@@ -2762,6 +2832,7 @@ impl Treasury {
                     })?;
                     intent.provider_reference = Some(reference);
                     intent.transition(TransactionState::Settled)?;
+                    Self::issue_receipt(&mut intent)?;
                     self.record_settled(&intent)?;
                 }
                 let refund = match self.state.provider_mode {
@@ -3268,11 +3339,12 @@ impl Treasury {
         }) {
             return Ok(());
         }
+        let source = self.provider_id().to_string();
         self.append_ledger(
             LedgerEventKind::SpendingSettled,
             intent.request.final_total.clone(),
             Some(intent.id.clone()),
-            "simulated-provider",
+            &source,
             true,
         )
     }
@@ -3371,8 +3443,29 @@ impl Treasury {
         })
     }
 
-    fn receipt(&self, intent: &PurchaseIntent) -> Result<Receipt> {
-        Ok(Receipt {
+    fn owner_intent(&self, intent: &PurchaseIntent) -> Value {
+        let mut value = self.sanitized_intent(intent);
+        value["checkout_facts"] = json!({
+            "payment_form": intent.request.payment_form,
+            "redirect_chain": intent.request.redirect_chain,
+            "recurring": intent.request.recurring,
+            "trial_auto_renew": intent.request.trial_auto_renew,
+            "stored_card": intent.request.stored_card,
+            "tip_minor": intent.request.tip_minor,
+            "preauthorization": intent.request.preauthorization,
+            "installments": intent.request.installments,
+            "scenario": intent.request.scenario,
+        });
+        value
+    }
+
+    fn issue_receipt(intent: &mut PurchaseIntent) -> Result<()> {
+        if intent.receipt.is_some() || intent.receipt_hash.is_some() {
+            return Err(TreasuryError::Conflict(
+                "receipt was already issued for this intent".to_string(),
+            ));
+        }
+        let receipt = Receipt {
             intent_id: intent.id.clone(),
             merchant_domain: intent.request.merchant_domain.clone(),
             amount: intent.request.final_total.clone(),
@@ -3380,7 +3473,10 @@ impl Treasury {
             provider_reference: intent.provider_reference.clone(),
             issued_at: now(),
             personal_information_redacted: true,
-        })
+        };
+        intent.receipt_hash = Some(Self::receipt_hash(&receipt)?);
+        intent.receipt = Some(receipt);
+        Ok(())
     }
 
     fn receipt_hash(receipt: &Receipt) -> Result<String> {
@@ -4419,6 +4515,9 @@ mod tests {
             Policy::conservative_demo().unwrap(),
             AutonomyMode::BoundedAutonomous,
         );
+        let budget = treasury.handle(&token, Request::GetBudget).unwrap();
+        assert_eq!(budget["provider_balance"]["evidence"]["stale"], false);
+        assert!(budget["provider_balance"]["evidence"]["observed_at"].is_number());
         let intent = treasury
             .handle(&token, Request::CreatePurchaseIntent { request: request("manual", 500) })
             .unwrap();
@@ -4441,6 +4540,26 @@ mod tests {
             .unwrap();
         assert_eq!(execution["status"], "unknown");
         treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerReconcile {
+                    intent_id: intent["id"].as_str().unwrap().to_string(),
+                    outcome: ReconciliationOutcome::Settled,
+                    provider_reference: Some("manual-settlement-1".to_string()),
+                },
+            )
+            .unwrap();
+        let receipt = treasury
+            .handle(
+                &token,
+                Request::GetReceipt { intent_id: intent["id"].as_str().unwrap().to_string() },
+            )
+            .unwrap();
+        assert_eq!(receipt["provider_reference"], "manual-settlement-1");
+        assert!(treasury.state.ledger.iter().any(|event| {
+            event.kind == LedgerEventKind::SpendingSettled && event.source == "manual-prepaid-card"
+        }));
+        treasury
             .state
             .manual_provider
             .as_mut()
@@ -4450,6 +4569,9 @@ mod tests {
             .unwrap()
             .expires_at = now() - 1;
         assert!(treasury.provider_available_balance().is_err());
+        let dashboard =
+            treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
+        assert_eq!(dashboard["provider"]["balance_evidence"]["stale"], true);
     }
 
     #[test]
@@ -4638,6 +4760,57 @@ mod tests {
         assert_eq!(result["receipt"]["amount"]["minor"], 600);
         assert_eq!(treasury.state.provider.balance.minor, 1_400);
         assert_eq!(treasury.ledger_snapshot("CAD").unwrap().settled_spending.minor, 600);
+    }
+
+    #[test]
+    fn negative_tips_are_rejected() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(2_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let mut purchase = request("negative-tip", 500);
+        purchase.tip_minor = -1;
+        assert!(
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).is_err()
+        );
+    }
+
+    #[test]
+    fn receipts_are_unavailable_before_settlement_and_immutable_afterward() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(2_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let intent = treasury
+            .handle(
+                &token,
+                Request::CreatePurchaseIntent { request: request("immutable-receipt", 500) },
+            )
+            .unwrap();
+        let intent_id = intent["id"].as_str().unwrap().to_string();
+        assert!(
+            treasury.handle(&token, Request::GetReceipt { intent_id: intent_id.clone() }).is_err()
+        );
+        treasury
+            .handle(&token, Request::ExecutePurchaseIntent { intent_id: intent_id.clone() })
+            .unwrap();
+        let first =
+            treasury.handle(&token, Request::GetReceipt { intent_id: intent_id.clone() }).unwrap();
+        let second = treasury.handle(&token, Request::GetReceipt { intent_id }).unwrap();
+        assert_eq!(first, second);
+        let persisted = &treasury.state.intents[first["intent_id"].as_str().unwrap()];
+        let expected_hash = Treasury::receipt_hash(persisted.receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(persisted.receipt_hash.as_deref(), Some(expected_hash.as_str()));
     }
 
     #[test]
