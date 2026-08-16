@@ -1111,6 +1111,7 @@ pub enum Request {
     GetCapabilities,
     GetBudget,
     GetReceiveInstructions,
+    OwnerGetDashboard,
     CreatePurchaseIntent {
         request: PurchaseRequest,
     },
@@ -1203,6 +1204,7 @@ impl Request {
                 | Self::OwnerConfigureManualProvider { .. }
                 | Self::OwnerConfigureReceiveInstructions { .. }
                 | Self::OwnerListAudit
+                | Self::OwnerGetDashboard
         )
     }
 }
@@ -1243,7 +1245,8 @@ where
         | "get_budget"
         | "get_receive_instructions"
         | "list_transactions"
-        | "owner_list_audit" => &[],
+        | "owner_list_audit"
+        | "owner_get_dashboard" => &[],
         "create_purchase_intent" => &["request"],
         "get_purchase_intent"
         | "execute_purchase_intent"
@@ -1754,6 +1757,7 @@ impl Treasury {
             Request::GetCapabilities => self.get_capabilities(&actor),
             Request::GetBudget => self.get_budget(&actor),
             Request::GetReceiveInstructions => self.get_receive_instructions(&actor),
+            Request::OwnerGetDashboard => self.owner_get_dashboard(&actor),
             Request::CreatePurchaseIntent { request } => self.create_intent(&actor, request),
             Request::GetPurchaseIntent { intent_id } => self.get_intent(&actor, &intent_id),
             Request::ExecutePurchaseIntent { intent_id } => self.execute_intent(&actor, &intent_id),
@@ -1890,6 +1894,82 @@ impl Treasury {
                 }))
             }
         }
+    }
+
+    fn owner_get_dashboard(&self, actor: &Actor) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let agents: Vec<Value> = self
+            .state
+            .agents
+            .values()
+            .map(|agent| {
+                json!({
+                    "id": agent.id,
+                    "name": agent.name,
+                    "policy_id": agent.policy_id,
+                    "mode": agent.mode,
+                    "created_at": agent.created_at,
+                    "expires_at": agent.expires_at,
+                    "revoked": agent.revoked,
+                    "broker_session_expires_at": agent.broker_session_expires_at,
+                    "approved_merchants": agent.approved_merchants,
+                })
+            })
+            .collect();
+        let transactions: Vec<Value> =
+            self.state.intents.values().map(|intent| self.sanitized_intent(intent)).collect();
+        let pending_approvals: Vec<Value> = self
+            .state
+            .intents
+            .values()
+            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+            .map(|intent| self.sanitized_intent(intent))
+            .collect();
+        let reconciliation_required: Vec<Value> = self
+            .state
+            .intents
+            .values()
+            .filter(|intent| {
+                matches!(
+                    intent.state,
+                    TransactionState::ProviderPending
+                        | TransactionState::Unknown
+                        | TransactionState::ReconciliationRequired
+                )
+            })
+            .map(|intent| self.sanitized_intent(intent))
+            .collect();
+        let manual_card = self.state.manual_provider.as_ref().map(|provider| {
+            json!({
+                "provider_kind": provider.card.provider_kind,
+                "last_four": provider.card.last_four,
+                "credential_reference_configured": !provider.card.reference.is_empty(),
+            })
+        });
+        let unsafe_modes = if self.state.provider_mode == ProviderMode::ManualPrepaidCard {
+            vec!["manual prepaid-card checkout requires owner handoff and reconciliation"]
+        } else {
+            Vec::new()
+        };
+        Ok(json!({
+            "emergency_stop": self.state.emergency_stop,
+            "provider": {
+                "id": self.provider_id(),
+                "mode": self.state.provider_mode,
+                "balance": self.provider_reported_balance().ok(),
+                "balance_status": self.provider_balance_status(),
+                "manual_card": manual_card,
+            },
+            "agents": agents,
+            "policies": self.state.policies,
+            "transactions": transactions,
+            "pending_approvals": pending_approvals,
+            "reconciliation_required": reconciliation_required,
+            "receive_instructions": self.state.receive_instructions,
+            "audit_entry_count": self.state.audit.len(),
+            "unsafe_modes": unsafe_modes,
+            "sanitized": true,
+        }))
     }
 
     fn get_capabilities(&self, actor: &Actor) -> Result<Value> {

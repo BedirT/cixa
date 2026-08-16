@@ -147,6 +147,34 @@ def make_handler(state: DashboardState):
                 raise ValueError("request must be an object")
             return value
 
+        def _owner_operation(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            schemas: dict[str, tuple[str, set[str]]] = {
+                "/api/emergency-stop": ("owner_set_emergency_stop", {"stopped"}),
+                "/api/agents/create": ("owner_create_agent", {"name", "policy", "mode", "ttl_secs"}),
+                "/api/agents/revoke": ("owner_revoke_agent", {"agent_id"}),
+                "/api/agents/mode": ("owner_set_agent_mode", {"agent_id", "mode"}),
+                "/api/agents/arm-session": ("owner_arm_agent_session", {"agent_id", "ttl_secs"}),
+                "/api/policies/update": ("owner_update_policy", {"agent_id", "policy"}),
+                "/api/approvals/approve": ("owner_approve_intent", {"intent_id"}),
+                "/api/merchants/approve": ("owner_approve_merchant", {"agent_id", "merchant_domain"}),
+                "/api/reconcile": ("owner_reconcile", {"intent_id", "outcome", "provider_reference"}),
+                "/api/provider/manual": (
+                    "owner_configure_manual_provider",
+                    {"credential_reference", "provider_kind", "last_four", "balance", "balance_status", "balance_ttl_secs"},
+                ),
+                "/api/receive": ("owner_configure_receive_instructions", {"method", "address", "memo_template"}),
+                "/api/deposits/record": (
+                    "owner_record_deposit",
+                    {"amount", "source", "verified", "agent_id", "external_reference"},
+                ),
+            }
+            if path not in schemas:
+                raise KeyError(path)
+            operation_type, fields = schemas[path]
+            if set(body) != fields:
+                raise ValueError(f"body fields must be exactly {sorted(fields)}")
+            return {"type": operation_type, **body}
+
         def do_GET(self) -> None:  # noqa: N802
             if not self._host_allowed():
                 self._send_json(400, {"error": "untrusted Host"})
@@ -190,6 +218,26 @@ def make_handler(state: DashboardState):
                 except (OSError, RuntimeError, ValueError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
+            if self.path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
+                if not self._require_owner():
+                    return
+                try:
+                    if self.path == "/api/overview":
+                        value = state.call({"type": "owner_get_dashboard"})
+                    elif self.path == "/api/transactions":
+                        value = state.call({"type": "list_transactions"})
+                    elif self.path == "/api/audit":
+                        value = state.call({"type": "owner_list_audit"})
+                    else:
+                        value = {
+                            "overview": state.call({"type": "owner_get_dashboard"}),
+                            "audit": state.call({"type": "owner_list_audit"}),
+                            "sanitized": True,
+                        }
+                    self._send_json(200, value)
+                except (OSError, RuntimeError, ValueError):
+                    self._send_json(502, {"error": "broker request failed"})
+                return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -198,15 +246,17 @@ def make_handler(state: DashboardState):
             if not self._same_origin() or not self._csrf_ok():
                 self._send_json(403, {"error": "origin or CSRF validation failed"})
                 return
-            if self.path != "/api/emergency-stop":
-                self._send_json(404, {"error": "not found"})
-                return
             try:
                 body = self._read_json()
-                if set(body) != {"stopped"} or not isinstance(body["stopped"], bool):
-                    raise ValueError("body must contain only boolean stopped")
-                value = state.call({"type": "owner_set_emergency_stop", "stopped": body["stopped"]})
+                operation = self._owner_operation(self.path, body)
+                if operation["type"] == "owner_set_emergency_stop" and not isinstance(
+                    operation["stopped"], bool
+                ):
+                    raise ValueError("stopped must be boolean")
+                value = state.call(operation)
                 self._send_json(200, value)
+            except KeyError:
+                self._send_json(404, {"error": "not found"})
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
                 self._send_json(400, {"error": "request rejected"})
 

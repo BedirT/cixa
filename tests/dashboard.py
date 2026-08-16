@@ -46,6 +46,25 @@ def request(
     return result
 
 
+def rpc(socket_path: Path, token: str, operation: dict) -> dict:
+    envelope = {
+        "api_version": "v1",
+        "request_id": "dashboard-integration",
+        "token": token,
+        "operation": operation,
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+        channel.connect(str(socket_path))
+        channel.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+        response = b""
+        while b"\n" not in response:
+            response += channel.recv(65536)
+    decoded = json.loads(response.split(b"\n", 1)[0])
+    if not decoded["ok"]:
+        raise RuntimeError(decoded["error"])
+    return decoded["data"]
+
+
 with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_directory:
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
@@ -162,6 +181,18 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
             b'{"stopped":false}',
         )[0] == 401
         owner_headers = dict(unauthenticated_attack, Authorization=authorization)
+
+        def owner_post(path: str, value: dict) -> dict:
+            status, _, response_body = request(
+                port,
+                "POST",
+                path,
+                owner_headers,
+                json.dumps(value).encode(),
+            )
+            assert status == 200, (path, status, response_body)
+            return json.loads(response_body)
+
         status, _, body = request(
             port,
             "POST",
@@ -170,7 +201,100 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
             b'{"stopped":true}',
         )
         assert status == 200 and json.loads(body)["emergency_stop"] is True
-        print("owner dashboard authentication and emergency-control assertions passed")
+        owner_post("/api/emergency-stop", {"stopped": False})
+
+        status, _, body = request(port, "GET", "/api/overview", authenticated)
+        overview = json.loads(body)
+        assert status == 200 and overview["provider"]["balance_status"] == "simulated_provider_verified", (
+            status,
+            overview,
+        )
+        policy = next(iter(overview["policies"].values()))
+        created = owner_post(
+            "/api/agents/create",
+            {"name": "dashboard-agent", "policy": policy, "mode": "bounded_autonomous", "ttl_secs": 3600},
+        )
+        agent_id = created["agent_id"]
+        agent_token = created["capability_token"]
+        assert agent_token not in json.dumps(json.loads(request(port, "GET", "/api/overview", authenticated)[2]))
+        policy["max_per_transaction"] = {"minor": 2000, "currency": "CAD"}
+        assert owner_post("/api/policies/update", {"agent_id": agent_id, "policy": policy})["policy"]["version"] == 2
+        owner_post("/api/agents/mode", {"agent_id": agent_id, "mode": "bounded_autonomous"})
+        owner_post("/api/agents/arm-session", {"agent_id": agent_id, "ttl_secs": 600})
+        owner_post(
+            "/api/merchants/approve",
+            {"agent_id": agent_id, "merchant_domain": "merchant.example.test"},
+        )
+        owner_post(
+            "/api/receive",
+            {
+                "method": "interac_e_transfer",
+                "address": "public-inbox@example.invalid",
+                "memo_template": "AGENT-{agent_id}-{intent_id}",
+            },
+        )
+        owner_post(
+            "/api/provider/manual",
+            {
+                "credential_reference": "keychain://agent-treasury/dashboard-card",
+                "provider_kind": "os-credential-store",
+                "last_four": "1111",
+                "balance": {"minor": 10000, "currency": "CAD"},
+                "balance_status": "owner_confirmed",
+                "balance_ttl_secs": 900,
+            },
+        )
+        purchase = {
+            "idempotency_key": "dashboard-purchase",
+            "amount": {"minor": 500, "currency": "CAD"},
+            "final_total": {"minor": 500, "currency": "CAD"},
+            "merchant_domain": "merchant.example.test",
+            "category": "software",
+            "recurring": False,
+            "trial_auto_renew": False,
+            "stored_card": False,
+            "tip_minor": 0,
+            "preauthorization": False,
+            "installments": False,
+            "fulfillment_profile": "digital-email",
+            "payment_form": "hosted_fields",
+            "redirect_chain": ["https://merchant.example.test/checkout"],
+            "attempts": 1,
+            "session_id": "dashboard-session",
+            "scenario": "normal",
+        }
+        intent = rpc(socket_path, agent_token, {"type": "create_purchase_intent", "request": purchase})
+        assert intent["state"] == "approval_required"
+        pending = json.loads(request(port, "GET", "/api/overview", authenticated)[2])
+        assert pending["pending_approvals"][0]["id"] == intent["id"]
+        owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
+        execution = rpc(
+            socket_path,
+            agent_token,
+            {"type": "execute_purchase_intent", "intent_id": intent["id"]},
+        )
+        assert execution["status"] == "unknown"
+        owner_post(
+            "/api/reconcile",
+            {"intent_id": intent["id"], "outcome": "settled", "provider_reference": "dashboard-ref-1"},
+        )
+        owner_post(
+            "/api/deposits/record",
+            {
+                "amount": {"minor": 100, "currency": "CAD"},
+                "source": "dashboard-notification",
+                "verified": False,
+                "agent_id": None,
+                "external_reference": "dashboard-deposit-1",
+            },
+        )
+        assert request(port, "GET", "/api/transactions", authenticated)[0] == 200
+        assert request(port, "GET", "/api/audit", authenticated)[0] == 200
+        export_status, _, export_body = request(port, "GET", "/api/export", authenticated)
+        assert export_status == 200 and json.loads(export_body)["sanitized"] is True
+        owner_post("/api/agents/revoke", {"agent_id": agent_id})
+        assert rpc(owner_socket_path, owner_file.read_text().strip(), {"type": "owner_get_dashboard"})["agents"][0]["revoked"] is True
+        print("owner dashboard full-workflow assertions passed")
     finally:
         if dashboard is not None:
             dashboard.send_signal(signal.SIGTERM)

@@ -10,8 +10,74 @@
   <h1>agent-treasury</h1>
   <p class="warning"><strong>Owner control:</strong> emergency stop is immediate for new spending. Pending or ambiguous payments never resume automatically.</p>
   <p><button id="stop" type="button">Emergency stop</button> <button id="resume" type="button">Resume new spending</button></p>
-  <h2>Status</h2>
+  <p id="verification" class="verification">Loading provider verification status...</p>
+  <p id="unsafe" class="unsafe" hidden></p>
+
+  <nav>
+    <button class="refresh" type="button">Refresh overview</button>
+    <button id="export" type="button">Sanitized audit export</button>
+  </nav>
+  <h2>Owner Overview</h2>
   <pre id="status">Loading...</pre>
+
+  <h2>Agent Management</h2>
+  <form data-endpoint="/api/agents/create">
+    <label>Create agent JSON<textarea>{"name":"dashboard-agent","policy":{},"mode":"approval_required","ttl_secs":3600}</textarea></label>
+    <button type="submit">Create agent</button>
+  </form>
+  <form data-endpoint="/api/agents/revoke">
+    <label>Revoke agent JSON<textarea>{"agent_id":"agent_id"}</textarea></label>
+    <button type="submit">Revoke agent</button>
+  </form>
+  <form data-endpoint="/api/agents/mode">
+    <label>Pause or change mode JSON<textarea>{"agent_id":"agent_id","mode":"disabled"}</textarea></label>
+    <button type="submit">Set mode</button>
+  </form>
+  <form data-endpoint="/api/agents/arm-session">
+    <label>Arm session JSON<textarea>{"agent_id":"agent_id","ttl_secs":600}</textarea></label>
+    <button type="submit">Arm session</button>
+  </form>
+
+  <h2>Policy And Merchant Trust</h2>
+  <form data-endpoint="/api/policies/update">
+    <label>Versioned policy update JSON<textarea>{"agent_id":"agent_id","policy":{}}</textarea></label>
+    <button type="submit">Update policy</button>
+  </form>
+  <form data-endpoint="/api/merchants/approve">
+    <label>Durable merchant approval JSON<textarea>{"agent_id":"agent_id","merchant_domain":"merchant.example.test"}</textarea></label>
+    <button type="submit">Approve merchant</button>
+  </form>
+
+  <h2>Pending Approvals And Reconciliation</h2>
+  <form data-endpoint="/api/approvals/approve">
+    <label>Approve immutable intent JSON<textarea>{"intent_id":"intent_id"}</textarea></label>
+    <button type="submit">Approve intent</button>
+  </form>
+  <form data-endpoint="/api/reconcile">
+    <label>Reconcile ambiguous transaction JSON<textarea>{"intent_id":"intent_id","outcome":"settled","provider_reference":"owner-verified-reference"}</textarea></label>
+    <button type="submit">Reconcile</button>
+  </form>
+
+  <h2>Provider And Receiving Setup</h2>
+  <p class="unsafe">Experimental manual provider mode never submits card details. It requires owner handoff and reconciliation. Never enter PAN or CVV here.</p>
+  <form data-endpoint="/api/provider/manual">
+    <label>Manual provider JSON<textarea>{"credential_reference":"keychain://agent-treasury/card","provider_kind":"os-credential-store","last_four":"1111","balance":{"minor":5000,"currency":"CAD"},"balance_status":"owner_confirmed","balance_ttl_secs":900}</textarea></label>
+    <button type="submit">Configure manual provider</button>
+  </form>
+  <form data-endpoint="/api/receive">
+    <label>Receive instructions JSON<textarea>{"method":"interac_e_transfer","address":"public-inbox@example.invalid","memo_template":"AGENT-{agent_id}-{intent_id}"}</textarea></label>
+    <button type="submit">Configure receiving</button>
+  </form>
+  <form data-endpoint="/api/deposits/record">
+    <label>Record deposit JSON<textarea>{"amount":{"minor":500,"currency":"CAD"},"source":"owner-reconciliation","verified":false,"agent_id":null,"external_reference":"external-reference"}</textarea></label>
+    <button type="submit">Record deposit</button>
+  </form>
+
+  <h2>Audit Inspection</h2>
+  <button id="audit" type="button">Load sanitized audit</button>
+  <pre id="audit-output">Not loaded.</pre>
+  <h2>Last Owner Operation</h2>
+  <pre id="result">No operation yet.</pre>
   <script src="/app.js"></script>
 </body>
 </html>
