@@ -290,10 +290,17 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
             "scenario": "normal",
         }
         owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
+        owner_token = owner_file.read_text().strip()
+        handoff = rpc(
+            owner_socket_path,
+            owner_token,
+            {"type": "owner_begin_manual_handoff", "intent_id": intent["id"]},
+        )
+        assert handoff["status"] == "owner_handoff_ready"
         execution = rpc(
-            socket_path,
-            agent_token,
-            {"type": "execute_purchase_intent", "intent_id": intent["id"]},
+            owner_socket_path,
+            owner_token,
+            {"type": "owner_complete_manual_handoff", "intent_id": intent["id"]},
         )
         assert execution["status"] == "unknown"
         owner_post(
