@@ -16,8 +16,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+#[cfg(unix)]
+use std::{
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::unix::net::UnixStream,
+};
 use thiserror::Error;
 use url::Url;
 
@@ -1308,6 +1313,37 @@ enum Actor {
 impl Treasury {
     pub fn is_owner_token(&self, token: &str) -> bool {
         self.state.owner.capability_token_hash == token_hash(token)
+    }
+
+    pub fn bind_approved_secret_operation(
+        &self,
+        owner_token: &str,
+        intent_id: &str,
+    ) -> Result<ApprovedSecretOperation> {
+        if !self.is_owner_token(owner_token) {
+            return Err(TreasuryError::Unauthorized);
+        }
+        let intent = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?;
+        if intent.state != TransactionState::Approved {
+            return Err(TreasuryError::Conflict(
+                "payment secrets may be bound only after explicit owner approval".to_string(),
+            ));
+        }
+        let card = self
+            .state
+            .manual_provider
+            .as_ref()
+            .ok_or_else(|| {
+                TreasuryError::Conflict("manual provider is not configured".to_string())
+            })?
+            .card
+            .reference
+            .clone();
+        ApprovedSecretOperation::new(&new_id("secret_op"), intent_id, &card)
     }
 
     pub fn bootstrap(owner_name: &str, initial_balance: Money) -> Result<Bootstrap> {
@@ -3814,11 +3850,38 @@ fn redact_json_value(value: Value) -> Value {
     }
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ApprovedSecretOperation {
+    operation_id: String,
+    intent_id: String,
+    card_reference: String,
+}
+
+impl ApprovedSecretOperation {
+    fn new(operation_id: &str, intent_id: &str, card_reference: &str) -> Result<Self> {
+        bounded(operation_id, "secret_operation_id", 128)?;
+        bounded(intent_id, "intent_id", 128)?;
+        bounded(card_reference, "card_reference", 256)?;
+        Ok(Self {
+            operation_id: operation_id.to_string(),
+            intent_id: intent_id.to_string(),
+            card_reference: card_reference.to_string(),
+        })
+    }
+
+    pub fn for_simulated_test(operation_id: &str) -> Result<Self> {
+        Self::new(operation_id, "simulated-intent", "simulated-card")
+    }
+}
+
 pub trait SecretProvider {
     fn kind(&self) -> &'static str;
     fn reference(&self) -> &str;
     fn last_four(&self) -> Option<&str>;
-    fn fetch_for_owner_operation(&mut self, operation_id: &str) -> Result<VolatileSecret>;
+    fn fetch_for_owner_operation(
+        &mut self,
+        operation: &ApprovedSecretOperation,
+    ) -> Result<VolatileSecret>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -3856,20 +3919,193 @@ impl Drop for VolatileSecret {
     }
 }
 
+fn require_secret_binding(
+    expected: &ApprovedSecretOperation,
+    actual: &ApprovedSecretOperation,
+    reference: &str,
+) -> Result<()> {
+    if expected != actual || actual.card_reference != reference {
+        return Err(TreasuryError::Forbidden(
+            "secret retrieval is not bound to this approved intent and card reference".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub struct InteractiveOwnerEntryProvider {
+    reference: String,
+    operation: ApprovedSecretOperation,
+    secret: Option<VolatileSecret>,
+}
+
+impl InteractiveOwnerEntryProvider {
+    pub fn from_owner_reader<R: Read>(
+        reference: &str,
+        operation: ApprovedSecretOperation,
+        reader: R,
+    ) -> Result<Self> {
+        if operation.card_reference != reference {
+            return Err(TreasuryError::Forbidden(
+                "interactive secret reference does not match the approved operation".to_string(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        reader.take(4097).read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err(TreasuryError::Invalid(
+                "interactive owner secret must contain 1..4096 bytes".to_string(),
+            ));
+        }
+        Ok(Self {
+            reference: reference.to_string(),
+            operation,
+            secret: Some(VolatileSecret::new(bytes)),
+        })
+    }
+}
+
+impl SecretProvider for InteractiveOwnerEntryProvider {
+    fn kind(&self) -> &'static str {
+        "interactive_owner_entry"
+    }
+    fn reference(&self) -> &str {
+        &self.reference
+    }
+    fn last_four(&self) -> Option<&str> {
+        None
+    }
+    fn fetch_for_owner_operation(
+        &mut self,
+        operation: &ApprovedSecretOperation,
+    ) -> Result<VolatileSecret> {
+        require_secret_binding(&self.operation, operation, &self.reference)?;
+        self.secret.take().ok_or_else(|| {
+            TreasuryError::Conflict("interactive owner secret was already consumed".to_string())
+        })
+    }
+}
+
+pub struct VolatileSessionSecretProvider {
+    reference: String,
+    operation: ApprovedSecretOperation,
+    secret: Option<VolatileSecret>,
+}
+
+impl VolatileSessionSecretProvider {
+    pub fn new(
+        reference: &str,
+        operation: ApprovedSecretOperation,
+        secret: VolatileSecret,
+    ) -> Result<Self> {
+        if operation.card_reference != reference || secret.is_empty() {
+            return Err(TreasuryError::Invalid(
+                "volatile secret must be non-empty and bound to its card reference".to_string(),
+            ));
+        }
+        Ok(Self { reference: reference.to_string(), operation, secret: Some(secret) })
+    }
+}
+
+impl SecretProvider for VolatileSessionSecretProvider {
+    fn kind(&self) -> &'static str {
+        "volatile_session"
+    }
+    fn reference(&self) -> &str {
+        &self.reference
+    }
+    fn last_four(&self) -> Option<&str> {
+        None
+    }
+    fn fetch_for_owner_operation(
+        &mut self,
+        operation: &ApprovedSecretOperation,
+    ) -> Result<VolatileSecret> {
+        require_secret_binding(&self.operation, operation, &self.reference)?;
+        self.secret.take().ok_or_else(|| {
+            TreasuryError::Conflict("volatile session secret was already consumed".to_string())
+        })
+    }
+}
+
+#[cfg(unix)]
+pub struct OwnerControlledSecretHelperProvider {
+    socket_path: PathBuf,
+    reference: String,
+    operation: ApprovedSecretOperation,
+}
+
+#[cfg(unix)]
+impl OwnerControlledSecretHelperProvider {
+    pub fn new(
+        socket_path: PathBuf,
+        reference: &str,
+        operation: ApprovedSecretOperation,
+    ) -> Result<Self> {
+        if operation.card_reference != reference {
+            return Err(TreasuryError::Forbidden(
+                "helper reference does not match the approved operation".to_string(),
+            ));
+        }
+        Ok(Self { socket_path, reference: reference.to_string(), operation })
+    }
+}
+
+#[cfg(unix)]
+impl SecretProvider for OwnerControlledSecretHelperProvider {
+    fn kind(&self) -> &'static str {
+        "owner_controlled_local_helper"
+    }
+    fn reference(&self) -> &str {
+        &self.reference
+    }
+    fn last_four(&self) -> Option<&str> {
+        None
+    }
+    fn fetch_for_owner_operation(
+        &mut self,
+        operation: &ApprovedSecretOperation,
+    ) -> Result<VolatileSecret> {
+        require_secret_binding(&self.operation, operation, &self.reference)?;
+        let metadata = fs::symlink_metadata(&self.socket_path)?;
+        if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(TreasuryError::Forbidden(
+                "owner secret-helper socket must be private and must not be a symlink".to_string(),
+            ));
+        }
+        let mut stream = UnixStream::connect(&self.socket_path)?;
+        serde_json::to_writer(&mut stream, operation)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let mut length = [0_u8; 4];
+        stream.read_exact(&mut length)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if !(1..=4096).contains(&length) {
+            return Err(TreasuryError::Invalid(
+                "owner secret-helper response length is invalid".to_string(),
+            ));
+        }
+        let mut bytes = vec![0_u8; length];
+        stream.read_exact(&mut bytes)?;
+        Ok(VolatileSecret::new(bytes))
+    }
+}
+
 pub struct SimulatedSecretProvider {
     reference: String,
     last_four: String,
     canary: Vec<u8>,
+    operation: ApprovedSecretOperation,
 }
 
 impl SimulatedSecretProvider {
-    pub fn new(canary_pan: &str, canary_cvv: &str) -> Self {
+    pub fn new(canary_pan: &str, canary_cvv: &str, operation: ApprovedSecretOperation) -> Self {
         let mut canary = canary_pan.as_bytes().to_vec();
         canary.extend_from_slice(canary_cvv.as_bytes());
         Self {
             reference: "simulated-card".to_string(),
             last_four: canary_pan.chars().rev().take(4).collect::<String>().chars().rev().collect(),
             canary,
+            operation,
         }
     }
 }
@@ -3884,7 +4120,11 @@ impl SecretProvider for SimulatedSecretProvider {
     fn last_four(&self) -> Option<&str> {
         Some(&self.last_four)
     }
-    fn fetch_for_owner_operation(&mut self, _operation_id: &str) -> Result<VolatileSecret> {
+    fn fetch_for_owner_operation(
+        &mut self,
+        operation: &ApprovedSecretOperation,
+    ) -> Result<VolatileSecret> {
+        require_secret_binding(&self.operation, operation, &self.reference)?;
         Ok(VolatileSecret::new(self.canary.clone()))
     }
 }
@@ -4556,6 +4796,14 @@ mod tests {
             .handle(&token, Request::CreatePurchaseIntent { request: request("manual", 500) })
             .unwrap();
         assert_eq!(intent["state"], "approval_required");
+        assert!(
+            treasury
+                .bind_approved_secret_operation(
+                    &bootstrap.owner_token,
+                    intent["id"].as_str().unwrap()
+                )
+                .is_err()
+        );
         treasury
             .handle(
                 &bootstrap.owner_token,
@@ -4564,6 +4812,10 @@ mod tests {
                 },
             )
             .unwrap();
+        let secret_operation = treasury
+            .bind_approved_secret_operation(&bootstrap.owner_token, intent["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(secret_operation.card_reference, "keychain://agent-treasury/card");
         let execution = treasury
             .handle(
                 &token,
@@ -4931,6 +5183,66 @@ mod tests {
         assert!(!redact_sensitive("4111-1111-1111-1111 CVC=737").contains("4111-1111"));
         assert!(!redact_sensitive("4111 1111 1111 1111 CVC=737").contains("737"));
         assert_eq!(redact_sensitive("short 123"), "short 123");
+    }
+
+    #[test]
+    fn secret_providers_are_one_shot_and_operation_bound() {
+        let operation = ApprovedSecretOperation::new("op-1", "intent-1", "card-ref-1").unwrap();
+        let wrong_operation =
+            ApprovedSecretOperation::new("op-2", "intent-1", "card-ref-1").unwrap();
+        let mut interactive = InteractiveOwnerEntryProvider::from_owner_reader(
+            "card-ref-1",
+            operation.clone(),
+            &b"synthetic-owner-entry"[..],
+        )
+        .unwrap();
+        assert!(interactive.fetch_for_owner_operation(&wrong_operation).is_err());
+        assert!(!interactive.fetch_for_owner_operation(&operation).unwrap().is_empty());
+        assert!(interactive.fetch_for_owner_operation(&operation).is_err());
+
+        let mut session = VolatileSessionSecretProvider::new(
+            "card-ref-1",
+            operation.clone(),
+            VolatileSecret::new(b"synthetic-session-value".to_vec()),
+        )
+        .unwrap();
+        assert!(session.fetch_for_owner_operation(&wrong_operation).is_err());
+        assert!(!session.fetch_for_owner_operation(&operation).unwrap().is_empty());
+        assert!(session.fetch_for_owner_operation(&operation).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_secret_helper_uses_private_bound_protocol() {
+        use std::os::unix::net::UnixListener;
+        use std::thread;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("owner-helper.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let operation =
+            ApprovedSecretOperation::new("helper-op", "intent-1", "card-ref-1").unwrap();
+        let expected = operation.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["operation_id"], expected.operation_id);
+            assert_eq!(request["intent_id"], expected.intent_id);
+            assert_eq!(request["card_reference"], expected.card_reference);
+            let response = b"synthetic-helper-value";
+            let mut stream = reader.into_inner();
+            stream.write_all(&(response.len() as u32).to_be_bytes()).unwrap();
+            stream.write_all(response).unwrap();
+        });
+        let mut provider =
+            OwnerControlledSecretHelperProvider::new(socket_path, "card-ref-1", operation.clone())
+                .unwrap();
+        assert!(!provider.fetch_for_owner_operation(&operation).unwrap().is_empty());
+        server.join().unwrap();
     }
 
     proptest! {

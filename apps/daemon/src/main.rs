@@ -1,7 +1,7 @@
 use agent_treasury_domain::{
-    API_VERSION, AutonomyMode, BalanceStatus, Money, Policy, PurchaseRequest,
-    ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider, SimulatedScenario,
-    SimulatedSecretProvider, Treasury, redact_sensitive,
+    API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money, Policy,
+    PurchaseRequest, ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider,
+    SimulatedScenario, SimulatedSecretProvider, Treasury, redact_sensitive,
 };
 use fs2::FileExt;
 use serde_json::{Value, json};
@@ -690,8 +690,10 @@ fn run_demo() -> CliResult<()> {
         &agent_token,
         Request::CreatePurchaseIntent { request: demo_request("stopped", 500) },
     )?;
-    let mut secret_provider = SimulatedSecretProvider::new("4111111111111111", "737");
-    let secret_len = secret_provider.fetch_for_owner_operation("demo")?.len();
+    let secret_operation = ApprovedSecretOperation::for_simulated_test("demo")?;
+    let mut secret_provider =
+        SimulatedSecretProvider::new("4111111111111111", "737", secret_operation.clone());
+    let secret_len = secret_provider.fetch_for_owner_operation(&secret_operation)?.len();
     drop(secret_provider);
     treasury.verify_audit_chain()?;
 
