@@ -3,13 +3,14 @@ name = "agent-treasury"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "treasury"
 path = "src/main.rs"
 
 [dependencies]
-agent-treasury-domain = { path = "../../crates/domain" }
+agent-treasury-domain = { path = "../../crates/domain", version = "0.1.0" }
 fs2.workspace = true
 libc.workspace = true
 serde.workspace = true

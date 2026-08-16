@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
@@ -73,4 +75,3 @@ function createServer() {
 
 void serveStdio(createServer);
 console.error("agent-treasury MCP server running over local stdio");
-
