@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
             "/",
             {"Authorization": authorization},
         )
-        assert status == 200 and b"Emergency stop" in body
+        assert status == 200 and b"Stop all spending" in body and b"Cixa" in body
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         cookie_header = "; ".join(value.split(";", 1)[0] for value in cookies)
         csrf = next(
@@ -167,6 +167,11 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         authenticated = {"Authorization": authorization, "Cookie": cookie_header}
         assert request(port, "GET", "/app.js", authenticated)[0] == 200
         assert request(port, "GET", "/style.css", authenticated)[0] == 200
+        mark_status, mark_headers, mark_body = request(
+            port, "GET", "/cixa-mark.svg", authenticated
+        )
+        assert mark_status == 200 and b"<svg" in mark_body
+        assert dict(mark_headers)["Content-Type"] == "image/svg+xml"
         assert request(port, "GET", "/api/status", authenticated)[0] == 200
         unauthenticated_attack = {
             "Origin": f"http://127.0.0.1:{port}",
@@ -290,31 +295,36 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
             "installments": False,
             "scenario": "normal",
         }
+        detail_status, _, detail_body = request(
+            port, "GET", f"/api/intents/{intent['id']}", authenticated
+        )
+        assert detail_status == 200 and json.loads(detail_body)["id"] == intent["id"]
+        assert request(port, "GET", f"/api/receipts/{intent['id']}", authenticated)[0] == 404
+        assert request(port, "GET", "/api/intents/not%2Fsafe", authenticated)[0] == 400
+        denied = owner_post("/api/approvals/deny", {"intent_id": intent["id"]})
+        assert denied["state"] == "cancelled" and denied["last_error"] == "owner_denied"
+
+        purchase["idempotency_key"] = "dashboard-purchase-handoff"
+        intent = rpc(
+            socket_path,
+            agent_token,
+            {"type": "create_purchase_intent", "request": purchase},
+        )
+        assert intent["state"] == "approval_required"
         owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
-        handoff = run(
-            "begin-handoff",
-            "--data-dir",
-            str(directory),
-            "--owner-token-file",
-            str(owner_file),
-            "--intent-id",
-            intent["id"],
-        )
+        handoff = owner_post("/api/handoff/begin", {"intent_id": intent["id"]})
         assert handoff["status"] == "owner_handoff_ready"
-        execution = run(
-            "complete-handoff",
-            "--data-dir",
-            str(directory),
-            "--owner-token-file",
-            str(owner_file),
-            "--intent-id",
-            intent["id"],
-        )
+        execution = owner_post("/api/handoff/complete", {"intent_id": intent["id"]})
         assert execution["status"] == "unknown"
         owner_post(
             "/api/reconcile",
             {"intent_id": intent["id"], "outcome": "settled", "provider_reference": "dashboard-ref-1"},
         )
+        receipt_status, _, receipt_body = request(
+            port, "GET", f"/api/receipts/{intent['id']}", authenticated
+        )
+        assert receipt_status == 200
+        assert json.loads(receipt_body)["personal_information_redacted"] is True
         owner_post(
             "/api/deposits/record",
             {

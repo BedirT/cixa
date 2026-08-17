@@ -1213,6 +1213,9 @@ pub enum Request {
     OwnerApproveIntent {
         intent_id: String,
     },
+    OwnerDenyIntent {
+        intent_id: String,
+    },
     OwnerBeginManualHandoff {
         intent_id: String,
     },
@@ -1265,6 +1268,7 @@ impl Request {
                 | Self::OwnerRevokeAgent { .. }
                 | Self::OwnerSetEmergencyStop { .. }
                 | Self::OwnerApproveIntent { .. }
+                | Self::OwnerDenyIntent { .. }
                 | Self::OwnerBeginManualHandoff { .. }
                 | Self::OwnerCompleteManualHandoff { .. }
                 | Self::OwnerApproveMerchant { .. }
@@ -1323,6 +1327,7 @@ where
         | "cancel_purchase_intent"
         | "get_receipt"
         | "owner_approve_intent"
+        | "owner_deny_intent"
         | "owner_begin_manual_handoff"
         | "owner_complete_manual_handoff" => &["intent_id"],
         "owner_create_agent" => &["name", "policy", "mode", "ttl_secs"],
@@ -2018,6 +2023,7 @@ impl Treasury {
                 self.owner_emergency_stop(&actor, stopped)
             }
             Request::OwnerApproveIntent { intent_id } => self.owner_approve(&actor, &intent_id),
+            Request::OwnerDenyIntent { intent_id } => self.owner_deny(&actor, &intent_id),
             Request::OwnerBeginManualHandoff { intent_id } => {
                 self.owner_begin_manual_handoff(&actor, &intent_id)
             }
@@ -2939,6 +2945,31 @@ impl Treasury {
             Some(intent.policy_version),
             Some("allowed"),
             json!({ "owner_action": true, "approval_scope": "intent_only" }),
+        )?;
+        Ok(self.sanitized_intent(&intent))
+    }
+
+    fn owner_deny(&mut self, actor: &Actor, intent_id: &str) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let mut intent = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(intent_id.to_string()))?
+            .clone();
+        if intent.state != TransactionState::ApprovalRequired {
+            return Err(TreasuryError::Conflict("intent is not awaiting approval".to_string()));
+        }
+        intent.transition(TransactionState::Cancelled)?;
+        intent.last_error = Some("owner_denied".to_string());
+        self.state.intents.insert(intent.id.clone(), intent.clone());
+        self.audit(
+            "owner",
+            "deny_intent",
+            Some(intent_id),
+            Some(intent.policy_version),
+            Some("denied"),
+            json!({ "owner_action": true, "retry": false }),
         )?;
         Ok(self.sanitized_intent(&intent))
     }
@@ -5310,6 +5341,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(executed["status"], "settled");
+    }
+
+    #[test]
+    fn owner_can_deny_only_an_intent_awaiting_approval() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::ApprovalRequired,
+        );
+        let intent = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("deny", 500) })
+            .unwrap();
+        let intent_id = intent["id"].as_str().unwrap().to_string();
+
+        assert!(
+            treasury
+                .handle(&token, Request::OwnerDenyIntent { intent_id: intent_id.clone() },)
+                .is_err()
+        );
+        let denied = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerDenyIntent { intent_id: intent_id.clone() },
+            )
+            .unwrap();
+        assert_eq!(denied["state"], "cancelled");
+        assert_eq!(denied["last_error"], "owner_denied");
+        assert!(
+            treasury
+                .handle(&bootstrap.owner_token, Request::OwnerDenyIntent { intent_id })
+                .is_err()
+        );
+        let event = treasury.state.audit.last().unwrap();
+        assert_eq!(event.actor, "owner");
+        assert_eq!(event.action, "deny_intent");
+        assert_eq!(event.decision.as_deref(), Some("denied"));
     }
 
     #[test]

@@ -207,6 +207,9 @@ def make_handler(state: DashboardState):
                 "/api/agents/arm-session": ("owner_arm_agent_session", {"agent_id", "ttl_secs"}),
                 "/api/policies/update": ("owner_update_policy", {"agent_id", "policy"}),
                 "/api/approvals/approve": ("owner_approve_intent", {"intent_id"}),
+                "/api/approvals/deny": ("owner_deny_intent", {"intent_id"}),
+                "/api/handoff/begin": ("owner_begin_manual_handoff", {"intent_id"}),
+                "/api/handoff/complete": ("owner_complete_manual_handoff", {"intent_id"}),
                 "/api/merchants/approve": ("owner_approve_merchant", {"agent_id", "merchant_domain"}),
                 "/api/reconcile": ("owner_reconcile", {"intent_id", "outcome", "provider_reference"}),
                 "/api/provider/manual": (
@@ -245,21 +248,44 @@ def make_handler(state: DashboardState):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path in {"/app.js", "/style.css"}:
+            if self.path in {"/app.js", "/style.css", "/cixa-mark.svg"}:
                 if not self._require_owner():
                     return
                 name = self.path.removeprefix("/")
                 body = Path(__file__).with_name(name).read_bytes()
-                content_type = (
-                    "application/javascript; charset=utf-8"
-                    if name.endswith(".js")
-                    else "text/css; charset=utf-8"
-                )
+                if name.endswith(".js"):
+                    content_type = "application/javascript; charset=utf-8"
+                elif name.endswith(".svg"):
+                    content_type = "image/svg+xml"
+                else:
+                    content_type = "text/css; charset=utf-8"
                 self.send_response(200)
                 self._headers(content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if self.path.startswith("/api/intents/") or self.path.startswith("/api/receipts/"):
+                if not self._require_owner():
+                    return
+                intent_id = self.path.rsplit("/", 1)[-1]
+                if not 1 <= len(intent_id) <= 128 or not all(
+                    character.isalnum() or character in "_-" for character in intent_id
+                ):
+                    self._send_json(400, {"error": "invalid intent identifier"})
+                    return
+                operation_type = (
+                    "get_purchase_intent"
+                    if self.path.startswith("/api/intents/")
+                    else "get_receipt"
+                )
+                try:
+                    self._send_json(
+                        200,
+                        state.call({"type": operation_type, "intent_id": intent_id}),
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    self._send_json(404, {"error": "intent detail is unavailable"})
                 return
             if self.path == "/api/status":
                 if not self._require_owner():
