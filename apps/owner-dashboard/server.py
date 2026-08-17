@@ -66,7 +66,7 @@ class DashboardState:
         if metadata.st_mode & 0o077:
             raise ValueError("agent token directory permissions are too broad")
 
-    def create_agent(self, operation: dict[str, Any], token_filename: Any) -> Any:
+    def write_capability(self, operation: dict[str, Any], token_filename: Any) -> Any:
         if not isinstance(token_filename, str) or not 1 <= len(token_filename) <= 64:
             raise ValueError("token_filename must be a short string")
         if token_filename in {".", ".."} or not all(
@@ -186,6 +186,10 @@ def make_handler(state: DashboardState):
                     {"name", "policy", "mode", "ttl_secs", "token_filename"},
                 ),
                 "/api/agents/revoke": ("owner_revoke_agent", {"agent_id"}),
+                "/api/agents/rotate": (
+                    "owner_rotate_agent_capability",
+                    {"agent_id", "ttl_secs", "token_filename"},
+                ),
                 "/api/agents/mode": ("owner_set_agent_mode", {"agent_id", "mode"}),
                 "/api/agents/arm-session": ("owner_arm_agent_session", {"agent_id", "ttl_secs"}),
                 "/api/policies/update": ("owner_update_policy", {"agent_id", "policy"}),
@@ -347,9 +351,9 @@ def make_handler(state: DashboardState):
                     operation["stopped"], bool
                 ):
                     raise ValueError("stopped must be boolean")
-                if operation["type"] == "owner_create_agent":
+                if operation["type"] in {"owner_create_agent", "owner_rotate_agent_capability"}:
                     token_filename = operation.pop("token_filename")
-                    value = state.create_agent(operation, token_filename)
+                    value = state.write_capability(operation, token_filename)
                 else:
                     value = state.call(operation)
                 self._send_json(200, value)

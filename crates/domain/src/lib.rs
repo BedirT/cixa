@@ -37,6 +37,7 @@ const MAX_PURCHASE_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_INTENTS: usize = 10_000;
 const MAX_INTENTS_PER_AGENT: usize = 2_000;
 const MAX_AUDIT_ENTRIES: usize = 100_000;
+const AUDIT_SAFETY_RESERVE: usize = 1_024;
 const EMERGENCY_AUDIT_RESERVE: usize = 256;
 const MAX_AGENTS: usize = 16;
 const MAX_POLICY_BYTES: usize = 2 * 1024;
@@ -120,10 +121,40 @@ fn bounded_bytes(value: &str, field: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
-fn audit_capacity_allows(length: usize, action: &str) -> bool {
-    length < MAX_AUDIT_ENTRIES
-        || action == "emergency_stop_on"
-        || action == "emergency_stop_off" && length < MAX_AUDIT_ENTRIES + EMERGENCY_AUDIT_RESERVE
+fn is_emergency_audit(action: &str) -> bool {
+    matches!(action, "emergency_stop_on" | "emergency_stop_off")
+}
+
+fn is_money_safety_audit(action: &str) -> bool {
+    matches!(
+        action,
+        "reserve_funds"
+            | "provider_outcome"
+            | "quarantine_provider_error"
+            | "recover_interrupted_execution"
+            | "begin_manual_handoff"
+            | "complete_manual_handoff"
+            | "reconcile_intent"
+    )
+}
+
+fn audit_capacity_allows(non_emergency: usize, emergency: usize, action: &str) -> bool {
+    if action == "emergency_stop_on" {
+        return true;
+    }
+    if action == "emergency_stop_off" {
+        return emergency < EMERGENCY_AUDIT_RESERVE;
+    }
+    let limit = if is_money_safety_audit(action) {
+        MAX_AUDIT_ENTRIES
+    } else {
+        MAX_AUDIT_ENTRIES - AUDIT_SAFETY_RESERVE
+    };
+    non_emergency < limit
+}
+
+fn money_workflow_capacity_allows(used: usize, reserved: usize, new_slots: usize) -> bool {
+    used.saturating_add(reserved).saturating_add(new_slots) <= MAX_AUDIT_ENTRIES
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1247,6 +1278,10 @@ pub enum Request {
     OwnerRevokeAgent {
         agent_id: String,
     },
+    OwnerRotateAgentCapability {
+        agent_id: String,
+        ttl_secs: i64,
+    },
     OwnerSetEmergencyStop {
         stopped: bool,
     },
@@ -1311,6 +1346,7 @@ impl Request {
                 | Self::OwnerUpdatePolicy { .. }
                 | Self::OwnerSetAgentMode { .. }
                 | Self::OwnerRevokeAgent { .. }
+                | Self::OwnerRotateAgentCapability { .. }
                 | Self::OwnerSetEmergencyStop { .. }
                 | Self::OwnerApproveIntent { .. }
                 | Self::OwnerDenyIntent { .. }
@@ -1384,6 +1420,7 @@ where
         "owner_update_policy" => &["agent_id", "policy"],
         "owner_set_agent_mode" => &["agent_id", "mode"],
         "owner_revoke_agent" => &["agent_id"],
+        "owner_rotate_agent_capability" => &["agent_id", "ttl_secs"],
         "owner_set_emergency_stop" => &["stopped"],
         "owner_approve_merchant" => &["agent_id", "merchant_domain"],
         "owner_reconcile" => &["intent_id", "outcome", "provider_reference"],
@@ -1719,11 +1756,11 @@ impl Treasury {
         if self.state.schema_version != 2 {
             return Err(TreasuryError::Invalid("unsupported persisted state schema".to_string()));
         }
-        let audit_overflow = self.state.audit.get(MAX_AUDIT_ENTRIES..).unwrap_or_default();
-        let invalid_audit_overflow = audit_overflow.len() > EMERGENCY_AUDIT_RESERVE + 1
-            || audit_overflow.iter().any(|entry| {
-                !matches!(entry.action.as_str(), "emergency_stop_on" | "emergency_stop_off")
-            });
+        let emergency_audit_count =
+            self.state.audit.iter().filter(|entry| is_emergency_audit(&entry.action)).count();
+        let non_emergency_audit_count = self.state.audit.len() - emergency_audit_count;
+        let invalid_audit_overflow = non_emergency_audit_count > MAX_AUDIT_ENTRIES
+            || emergency_audit_count > EMERGENCY_AUDIT_RESERVE + 1;
         if self.state.intents.len() > MAX_INTENTS
             || self.state.agents.len() > MAX_AGENTS
             || invalid_audit_overflow
@@ -2100,6 +2137,9 @@ impl Treasury {
                 self.owner_set_agent_mode(&actor, &agent_id, mode)
             }
             Request::OwnerRevokeAgent { agent_id } => self.owner_revoke_agent(&actor, &agent_id),
+            Request::OwnerRotateAgentCapability { agent_id, ttl_secs } => {
+                self.owner_rotate_agent_capability(&actor, &agent_id, ttl_secs)
+            }
             Request::OwnerSetEmergencyStop { stopped } => {
                 self.owner_emergency_stop(&actor, stopped)
             }
@@ -2605,6 +2645,7 @@ impl Treasury {
     }
 
     fn prepare_intent_execution(&mut self, actor: &Actor, intent_id: &str) -> Result<()> {
+        self.require_money_workflow_audit_capacity(4)?;
         let agent_id = self.require_agent_scope(actor, "purchase_intents:execute")?.to_string();
         let existing = self
             .state
@@ -3146,6 +3187,55 @@ impl Treasury {
             json!({ "agent_id": agent_id }),
         )?;
         Ok(json!({ "agent_id": agent_id, "revoked": true, "mode": "disabled" }))
+    }
+
+    fn owner_rotate_agent_capability(
+        &mut self,
+        actor: &Actor,
+        agent_id: &str,
+        ttl_secs: i64,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        if ttl_secs <= 0 || ttl_secs > 24 * 60 * 60 {
+            return Err(TreasuryError::Invalid(
+                "agent TTL must be between 1 second and 24 hours".to_string(),
+            ));
+        }
+        let policy = self.policy(&self.agent(agent_id)?.policy_id)?.clone();
+        let token = new_token();
+        let expires_at = now() + ttl_secs;
+        let session_expires_at = if self.state.emergency_stop {
+            0
+        } else {
+            now() + ttl_secs.min(policy.card_session_ttl_secs)
+        };
+        let agent = self
+            .state
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?;
+        agent.capability_token_hash = token_hash(&token);
+        agent.expires_at = expires_at;
+        agent.broker_session_id = new_id("session");
+        agent.broker_session_expires_at = session_expires_at;
+        agent.revoked = false;
+        agent.mode = AutonomyMode::ApprovalRequired;
+        self.audit(
+            "owner",
+            "rotate_agent_capability",
+            None,
+            Some(policy.version),
+            Some("allowed"),
+            json!({ "agent_id": agent_id, "expires_at": expires_at, "mode": "approval_required" }),
+        )?;
+        Ok(json!({
+            "agent_id": agent_id,
+            "capability_token": token,
+            "expires_at": expires_at,
+            "broker_session_expires_at": session_expires_at,
+            "mode": "approval_required",
+            "warning": "The previous capability is invalid. Store this replacement once in a protected file.",
+        }))
     }
 
     fn owner_approve(&mut self, actor: &Actor, intent_id: &str) -> Result<Value> {
@@ -4129,6 +4219,29 @@ impl Treasury {
         Ok(hex::encode(digest.finalize()))
     }
 
+    fn require_money_workflow_audit_capacity(&self, new_slots: usize) -> Result<()> {
+        let used =
+            self.state.audit.iter().filter(|entry| !is_emergency_audit(&entry.action)).count();
+        let reserved: usize = self
+            .state
+            .intents
+            .values()
+            .map(|intent| match intent.state {
+                TransactionState::Executing => 2,
+                TransactionState::ProviderPending
+                | TransactionState::Unknown
+                | TransactionState::ReconciliationRequired => 1,
+                _ => 0,
+            })
+            .sum();
+        if !money_workflow_capacity_allows(used, reserved, new_slots) {
+            return Err(TreasuryError::Conflict(
+                "audit safety reserve is full; resolve existing payment outcomes first".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn audit(
         &mut self,
         actor: &str,
@@ -4138,7 +4251,10 @@ impl Treasury {
         decision: Option<&str>,
         details: Value,
     ) -> Result<()> {
-        if !audit_capacity_allows(self.state.audit.len(), action) {
+        let emergency =
+            self.state.audit.iter().filter(|entry| is_emergency_audit(&entry.action)).count();
+        let non_emergency = self.state.audit.len() - emergency;
+        if !audit_capacity_allows(non_emergency, emergency, action) {
             return Err(TreasuryError::Conflict(
                 "durable audit quota reached; archive this treasury before continuing".to_string(),
             ));
@@ -5756,7 +5872,7 @@ mod tests {
                 .is_err()
         );
 
-        for stopped in (0..510).map(|index| index % 2 == 0) {
+        for stopped in (0..200).map(|index| index % 2 == 0) {
             treasury
                 .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped })
                 .unwrap();
@@ -5764,7 +5880,7 @@ mod tests {
         let audit = treasury.handle(&bootstrap.owner_token, Request::OwnerListAuditRecent).unwrap();
         assert_eq!(audit["entries"].as_array().unwrap().len(), 25);
         assert_eq!(audit["truncated"], true);
-        assert!(audit["entries_total"].as_u64().unwrap() > 500);
+        assert!(audit["entries_total"].as_u64().unwrap() > 400);
         assert_eq!(audit["chain_valid"], true);
         assert!(serde_json::to_vec(&audit).unwrap().len() < 256 * 1024);
         let audit_page = treasury
@@ -5907,11 +6023,19 @@ mod tests {
 
     #[test]
     fn emergency_stop_audit_is_never_blocked_by_the_ordinary_quota() {
-        assert!(!audit_capacity_allows(MAX_AUDIT_ENTRIES, "update_policy"));
-        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, "emergency_stop_on"));
-        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, "emergency_stop_off"));
         assert!(!audit_capacity_allows(
-            MAX_AUDIT_ENTRIES + EMERGENCY_AUDIT_RESERVE,
+            MAX_AUDIT_ENTRIES - AUDIT_SAFETY_RESERVE,
+            0,
+            "update_policy"
+        ));
+        assert!(money_workflow_capacity_allows(MAX_AUDIT_ENTRIES - 4, 0, 4));
+        assert!(!money_workflow_capacity_allows(MAX_AUDIT_ENTRIES - 4, 1, 4));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES - 1, 0, "provider_outcome"));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, 0, "emergency_stop_on"));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, 0, "emergency_stop_off"));
+        assert!(!audit_capacity_allows(
+            MAX_AUDIT_ENTRIES,
+            EMERGENCY_AUDIT_RESERVE,
             "emergency_stop_off"
         ));
     }

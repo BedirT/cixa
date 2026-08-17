@@ -226,9 +226,10 @@ try {
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console.png"),fullPage:true});
   await page.getByRole("link", {name:"Agents"}).first().click();
   await page.getByRole("button", {name:"Manage limits"}).click();
-  await page.getByRole("button", {name:"Revoke permanently"}).click();
-  await dialog.getByRole("button", {name:"Revoke agent"}).click();
+  await page.getByRole("button", {name:"Revoke capability"}).click();
+  await dialog.getByRole("button", {name:"Revoke capability"}).click();
   await page.getByText("Revoked", {exact:true}).waitFor();
+  await page.getByRole("button",{name:"Rotate capability"}).click();await dialog.getByLabel("New token filename").fill("research-runner-rotated.token");await dialog.getByRole("button",{name:"Rotate capability"}).click();await page.getByText("Active",{exact:true}).waitFor();const rotatedToken=(await readFile(join(directory,"agent-tokens","research-runner-rotated.token"),"utf8")).trim();assert.equal(rotatedToken.length,64);await assert.rejects(()=>rpc(agentSocket,agentToken,{type:"get_status"}));assert.equal((await rpc(agentSocket,rotatedToken,{type:"get_status"})).mode,"approval_required");
   assert.deepEqual(errors, []);
   daemon.kill("SIGTERM");
   await new Promise((resolveExit) => daemon.once("exit",resolveExit));
