@@ -249,6 +249,37 @@ process.exit(0);
     assert helper.wait(timeout=5) == 0
     assert not adapter_marker.exists(), "malformed secret reached the adapter"
 
+    closed_stdout_intent = create_approved_intent("automated-handoff-closed-stdout", 503)
+    closed_stdout_pid_file = directory / "closed-stdout.pid"
+    adapter.write_text(f"""
+import {{spawn}} from 'node:child_process';
+import {{writeFileSync}} from 'node:fs';
+const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 6000)'], {{
+  stdio: 'ignore',
+}});
+writeFileSync({json.dumps(str(closed_stdout_pid_file))}, String(child.pid));
+process.stdout.write(JSON.stringify({{outcome: 'unknown', reason: 'test'}}) + '\\n', () => process.exit(0));
+""".strip() + "\n", encoding="utf-8")
+    helper = launch_helper(b'{"pan":"group-canary","expiry":"12/99","cvv":"999"}')
+    closed_stdout = subprocess.run([
+        str(BINARY), "execute-handoff", "--data-dir", str(directory),
+        "--owner-token-file", str(owner_file), "--intent-id", closed_stdout_intent["id"],
+        "--helper-socket", str(helper_socket), "--helper-key-file", str(helper_dir / "helper.key"),
+        "--helper-id-file", str(helper_dir / "helper.id"), "--node-path", str(NODE),
+        "--adapter-script", str(adapter), "--adapter-config", str(adapter_config),
+    ], cwd=ROOT, capture_output=True, text=True, timeout=8)
+    assert closed_stdout.returncode == 0
+    assert helper.wait(timeout=5) == 0
+    closed_stdout_pid = int(closed_stdout_pid_file.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            os.kill(closed_stdout_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("same-group checkout descendant survived EOF cleanup")
+
     detached_intent = create_approved_intent("automated-handoff-detached-output", 503)
     detached_pid_file = directory / "detached.pid"
     adapter.write_text(f"""

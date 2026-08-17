@@ -576,7 +576,7 @@ impl DescendantTracker {
         Self { root: root_identity, stop, processes, watcher: Some(watcher) }
     }
 
-    fn terminate(&mut self, child: &mut Child) {
+    fn terminate(&mut self, child: &mut Child) -> Option<ExitStatus> {
         self.stop.store(true, Ordering::Release);
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
@@ -593,7 +593,7 @@ impl DescendantTracker {
             }
         }
         let _ = child.kill();
-        let _ = child.wait();
+        child.wait().ok()
     }
 }
 
@@ -622,8 +622,25 @@ mod process_identity_tests {
 }
 
 #[cfg(unix)]
-fn terminate_child_group(child: &mut Child, tracker: &mut DescendantTracker) {
-    tracker.terminate(child);
+fn terminate_child_group(child: &mut Child, tracker: &mut DescendantTracker) -> Option<ExitStatus> {
+    tracker.terminate(child)
+}
+
+#[cfg(unix)]
+fn child_exited_without_reaping(pid: u32) -> std::io::Result<bool> {
+    let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut information,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { information.si_pid() } != 0)
 }
 
 #[cfg(unix)]
@@ -645,7 +662,6 @@ fn collect_child_output(
 
     let deadline = Instant::now() + timeout;
     let mut output = Zeroizing::new(Vec::new());
-    let mut status = None;
     let mut eof = false;
     while Instant::now() < deadline {
         let mut buffer = [0_u8; 4096];
@@ -666,24 +682,24 @@ fn collect_child_output(
                 return Err(error.into());
             }
         }
-        // Keep an exited adapter as an unreaped child while descendants still
-        // hold stdout. Its PID and process-group ID cannot be reused before
-        // timeout cleanup validates and signals the group.
-        if eof && status.is_none() {
-            status = match child.try_wait() {
-                Ok(status) => status,
+        if eof {
+            let exited = match child_exited_without_reaping(child.id()) {
+                Ok(exited) => exited,
                 Err(error) => {
                     terminate_child_group(child, tracker);
                     return Err(error.into());
                 }
             };
-        }
-        if let Some(status) = status
-            && eof
-        {
-            // The direct adapter may have spawned descendants that closed stdout.
-            terminate_child_group(child, tracker);
-            return Ok((status, output));
+            if exited {
+                // Keep the root as a zombie until its process group is signaled,
+                // then reap it and preserve its original exit status.
+                let status = terminate_child_group(child, tracker).ok_or_else(|| {
+                    agent_treasury_domain::TreasuryError::Conflict(
+                        "controlled checkout adapter could not be reaped".to_string(),
+                    )
+                })?;
+                return Ok((status, output));
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
