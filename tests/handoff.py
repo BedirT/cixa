@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +20,24 @@ ARTIFACTS = ROOT / "build" / "handoff-artifacts"
 shutil.rmtree(ARTIFACTS, ignore_errors=True)
 ARTIFACTS.mkdir(parents=True)
 command_index = 0
+
+
+def scan_handoff_artifacts() -> None:
+    if not any(ARTIFACTS.iterdir()):
+        return
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "secret-canary-scan.py"), str(ARTIFACTS)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout + result.stderr)
+        sys.stderr.flush()
+        os._exit(1)
+
+
+atexit.register(scan_handoff_artifacts)
 
 
 def run(*args: str) -> dict:
@@ -230,13 +250,16 @@ process.exit(0);
     assert not adapter_marker.exists(), "malformed secret reached the adapter"
 
     detached_intent = create_approved_intent("automated-handoff-detached-output", 503)
-    adapter.write_text("""
-import {spawn} from 'node:child_process';
-const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 6000)'], {
+    detached_pid_file = directory / "detached.pid"
+    adapter.write_text(f"""
+import {{spawn}} from 'node:child_process';
+import {{writeFileSync}} from 'node:fs';
+const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 6000)'], {{
   detached: true, stdio: ['ignore', process.stdout, 'ignore'],
-});
+}});
 child.unref();
-process.stdout.write(JSON.stringify({outcome: 'unknown', reason: 'test'}) + '\\n');
+writeFileSync({json.dumps(str(detached_pid_file))}, String(child.pid));
+setTimeout(() => process.stdout.write(JSON.stringify({{outcome: 'unknown', reason: 'test'}}) + '\\n'), 100);
 """.strip() + "\n", encoding="utf-8")
     helper = launch_helper(b'{"pan":"detached-canary","expiry":"12/99","cvv":"999"}')
     started = time.monotonic()
@@ -248,8 +271,19 @@ process.stdout.write(JSON.stringify({outcome: 'unknown', reason: 'test'}) + '\\n
         "--adapter-script", str(adapter), "--adapter-config", str(adapter_config),
     ], cwd=ROOT, capture_output=True, text=True, timeout=8)
     assert detached.returncode != 0
+    (ARTIFACTS / "execute-detached.stdout").write_text(detached.stdout, encoding="utf-8")
+    (ARTIFACTS / "execute-detached.stderr").write_text(detached.stderr, encoding="utf-8")
     assert time.monotonic() - started < 7
     assert helper.wait(timeout=5) == 0
+    detached_pid = int(detached_pid_file.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            os.kill(detached_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("detached checkout descendant survived broker cleanup")
     persisted = json.loads((directory / "state.json").read_text(encoding="utf-8"))
     assert persisted["state"]["intents"][detached_intent["id"]]["state"] == "unknown"
     assert "detached-canary" not in json.dumps(persisted)

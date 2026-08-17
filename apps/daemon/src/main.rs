@@ -276,32 +276,143 @@ struct CheckoutAdapterInput<'a> {
 }
 
 #[cfg(unix)]
-fn terminate_child_group(child: &mut Child) {
-    unsafe {
-        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+fn direct_child_pids(parent: u32) -> Vec<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "proc")]
+        unsafe extern "C" {
+            fn proc_listchildpids(
+                ppid: libc::c_int,
+                buffer: *mut libc::c_void,
+                buffersize: libc::c_int,
+            ) -> libc::c_int;
+        }
+        let mut pids = vec![0_i32; 4096];
+        let count = unsafe {
+            proc_listchildpids(
+                parent as libc::c_int,
+                pids.as_mut_ptr().cast(),
+                (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
+            )
+        };
+        if count <= 0 {
+            return Vec::new();
+        }
+        pids.truncate(count as usize);
+        pids.into_iter().filter(|pid| *pid > 0).map(|pid| pid as u32).collect()
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(target_os = "linux")]
+    {
+        let mut children = Vec::new();
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+                    continue;
+                };
+                let Some(after_name) = stat.rsplit_once(") ").map(|(_, value)| value) else {
+                    continue;
+                };
+                if after_name.split_whitespace().nth(1).and_then(|value| value.parse().ok())
+                    == Some(parent)
+                {
+                    children.push(pid);
+                }
+            }
+        }
+        children
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn descendant_pids(root: u32) -> Vec<u32> {
+    let mut pending = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop() {
+        for child in direct_child_pids(parent) {
+            if !descendants.contains(&child) {
+                descendants.push(child);
+                pending.push(child);
+            }
+        }
+    }
+    descendants
+}
+
+#[cfg(unix)]
+struct DescendantTracker {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    pids: Arc<Mutex<std::collections::BTreeSet<u32>>>,
+    watcher: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl DescendantTracker {
+    fn new(root: u32) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pids = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let watcher_stop = Arc::clone(&stop);
+        let watcher_pids = Arc::clone(&pids);
+        let watcher = std::thread::spawn(move || {
+            while !watcher_stop.load(Ordering::Acquire) {
+                if let Ok(mut tracked) = watcher_pids.lock() {
+                    tracked.extend(descendant_pids(root));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        Self { stop, pids, watcher: Some(watcher) }
+    }
+
+    fn terminate(&mut self, child: &mut Child) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
+        if let Ok(mut tracked) = self.pids.lock() {
+            tracked.extend(descendant_pids(child.id()));
+            unsafe {
+                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            for pid in tracked.iter().rev() {
+                unsafe {
+                    libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_child_group(child: &mut Child, tracker: &mut DescendantTracker) {
+    tracker.terminate(child);
 }
 
 #[cfg(unix)]
 fn collect_child_output(
     child: &mut Child,
+    tracker: &mut DescendantTracker,
     mut stdout: ChildStdout,
     timeout: Duration,
-) -> agent_treasury_domain::Result<(ExitStatus, Vec<u8>)> {
+) -> agent_treasury_domain::Result<(ExitStatus, Zeroizing<Vec<u8>>)> {
     use std::os::fd::AsRawFd;
 
     let descriptor = stdout.as_raw_fd();
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
-        terminate_child_group(child);
+        terminate_child_group(child, tracker);
         return Err(std::io::Error::last_os_error().into());
     }
 
     let deadline = Instant::now() + timeout;
-    let mut output = Vec::new();
+    let mut output = Zeroizing::new(Vec::new());
     let mut status = None;
     let mut eof = false;
     while Instant::now() < deadline {
@@ -311,7 +422,7 @@ fn collect_child_output(
             Ok(count) => {
                 output.extend_from_slice(&buffer[..count]);
                 if output.len() > 16 * 1024 {
-                    terminate_child_group(child);
+                    terminate_child_group(child, tracker);
                     return Err(agent_treasury_domain::TreasuryError::Conflict(
                         "controlled checkout adapter output is too large".to_string(),
                     ));
@@ -319,7 +430,7 @@ fn collect_child_output(
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => {
-                terminate_child_group(child);
+                terminate_child_group(child, tracker);
                 return Err(error.into());
             }
         }
@@ -327,7 +438,7 @@ fn collect_child_output(
             status = match child.try_wait() {
                 Ok(status) => status,
                 Err(error) => {
-                    terminate_child_group(child);
+                    terminate_child_group(child, tracker);
                     return Err(error.into());
                 }
             };
@@ -336,15 +447,13 @@ fn collect_child_output(
             && eof
         {
             // The direct adapter may have spawned descendants that closed stdout.
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-            }
+            terminate_child_group(child, tracker);
             return Ok((status, output));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    terminate_child_group(child);
+    terminate_child_group(child, tracker);
     Err(agent_treasury_domain::TreasuryError::Conflict(
         "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
             .to_string(),
@@ -409,17 +518,18 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             command.process_group(0);
         }
         let mut child = command.spawn()?;
+        let mut tracker = DescendantTracker::new(child.id());
         let mut stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
-                terminate_child_group(&mut child);
+                terminate_child_group(&mut child, &mut tracker);
                 return Err(agent_treasury_domain::TreasuryError::Conflict(
                     "checkout adapter stdin is unavailable".to_string(),
                 ));
             }
         };
         if let Err(error) = stdin.write_all(&encoded) {
-            terminate_child_group(&mut child);
+            terminate_child_group(&mut child, &mut tracker);
             return Err(error.into());
         }
         encoded.zeroize();
@@ -427,7 +537,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_child_group(&mut child);
+                terminate_child_group(&mut child, &mut tracker);
                 return Err(agent_treasury_domain::TreasuryError::Conflict(
                     "checkout adapter stdout is unavailable".to_string(),
                 ));
@@ -435,12 +545,12 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         };
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            terminate_child_group(&mut child);
+            terminate_child_group(&mut child, &mut tracker);
             return Err(agent_treasury_domain::TreasuryError::Conflict(
                 "owner handoff deadline expired before adapter completion".to_string(),
             ));
         }
-        let (status, output) = collect_child_output(&mut child, stdout, remaining)?;
+        let (status, output) = collect_child_output(&mut child, &mut tracker, stdout, remaining)?;
         if !status.success() {
             return Err(agent_treasury_domain::TreasuryError::Conflict(
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
