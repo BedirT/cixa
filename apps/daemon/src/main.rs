@@ -360,6 +360,11 @@ fn process_identity_matches(identity: ProcessIdentity) -> bool {
 }
 
 #[cfg(unix)]
+fn process_group_identity_matches(root: ProcessIdentity) -> bool {
+    process_identity_matches(root)
+}
+
+#[cfg(unix)]
 fn direct_child_pids(parent: u32) -> Vec<u32> {
     #[cfg(target_os = "macos")]
     {
@@ -431,6 +436,7 @@ fn descendant_processes(root: u32) -> Vec<ProcessIdentity> {
 
 #[cfg(unix)]
 struct DescendantTracker {
+    root: Option<ProcessIdentity>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     processes: Arc<Mutex<std::collections::BTreeSet<ProcessIdentity>>>,
     watcher: Option<std::thread::JoinHandle<()>>,
@@ -439,6 +445,7 @@ struct DescendantTracker {
 #[cfg(unix)]
 impl DescendantTracker {
     fn new(root: u32) -> Self {
+        let root_identity = process_identity(root);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let processes = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
         let watcher_stop = Arc::clone(&stop);
@@ -451,7 +458,7 @@ impl DescendantTracker {
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
-        Self { stop, processes, watcher: Some(watcher) }
+        Self { root: root_identity, stop, processes, watcher: Some(watcher) }
     }
 
     fn terminate(&mut self, child: &mut Child) {
@@ -461,8 +468,10 @@ impl DescendantTracker {
         }
         if let Ok(mut tracked) = self.processes.lock() {
             tracked.extend(descendant_processes(child.id()));
-            unsafe {
-                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+            if let Some(root) = self.root.filter(|root| process_group_identity_matches(*root)) {
+                unsafe {
+                    libc::killpg(root.pid as libc::pid_t, libc::SIGKILL);
+                }
             }
             for identity in tracked.iter().rev() {
                 if process_identity_matches(*identity) {
@@ -485,10 +494,10 @@ mod process_identity_tests {
     fn stale_process_identity_is_rejected_before_signaling() {
         let current = process_identity(std::process::id()).expect("current process identity");
         assert!(process_identity_matches(current));
-        assert!(!process_identity_matches(ProcessIdentity {
-            started: current.started.wrapping_add(1),
-            ..current
-        }));
+        let stale = ProcessIdentity { started: current.started.wrapping_add(1), ..current };
+        assert!(!process_identity_matches(stale));
+        assert!(process_group_identity_matches(current));
+        assert!(!process_group_identity_matches(stale));
     }
 }
 
