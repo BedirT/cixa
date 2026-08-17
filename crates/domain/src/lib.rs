@@ -2315,7 +2315,7 @@ impl Treasury {
             ));
         }
         let policy = self.policy(&agent.policy_id)?.clone();
-        if agent.broker_session_expires_at <= now() {
+        if !self.state.emergency_stop && agent.broker_session_expires_at <= now() {
             return Err(TreasuryError::Forbidden(
                 "agent spending session has expired and must be re-armed by the owner".to_string(),
             ));
@@ -2848,6 +2848,7 @@ impl Treasury {
         if stopped && !self.state.emergency_stop {
             for agent in self.state.agents.values_mut() {
                 agent.broker_session_id = new_id("stopped-session");
+                agent.broker_session_expires_at = 0;
                 invalidated_sessions += 1;
             }
         }
@@ -4927,6 +4928,14 @@ mod tests {
         treasury
             .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped: false })
             .unwrap();
+        assert!(
+            treasury
+                .handle(
+                    &token,
+                    Request::CreatePurchaseIntent { request: request("after-resume", 500) },
+                )
+                .is_err()
+        );
         treasury
             .handle(
                 &bootstrap.owner_token,
