@@ -23,7 +23,7 @@ The first real-world configuration is a manual adapter for a user-owned Canadian
 
 ## Quickstart
 
-Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, `pip-audit` 2.9.0, `cyclonedx-python-lib` 9.1.0, `packageurl-python` 0.17.6, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the hashed Python build graph with `python3 -m pip install --require-hashes -r requirements-build.lock`, install `pip-audit==2.9.0 cyclonedx-python-lib==9.1.0 packageurl-python==0.17.6`, and install the Rust scanner with `cargo install cargo-audit --version 0.22.2 --locked`; install the pinned source scanner from its official release. The simulated demo needs no account, paid service, or API key.
+Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, `pip-audit` 2.9.0, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the hashed Python build and evidence-tool graph with `python3 -m pip install --require-hashes -r requirements-build.lock`, install `pip-audit==2.9.0`, and install the Rust scanner with `cargo install cargo-audit --version 0.22.2 --locked`; install the pinned source scanner from its official release. The simulated demo needs no account, paid service, or API key.
 
 ```bash
 cargo build --locked
