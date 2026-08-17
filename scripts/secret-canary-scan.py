@@ -31,12 +31,14 @@ if not files:
 for path in files:
     try:
         encoded = path.read_bytes()
-        content = encoded.decode("utf-8")
-    except (OSError, UnicodeDecodeError) as error:
+    except OSError as error:
         raise SystemExit(f"cannot read secret-canary artifact {path}: {error}") from error
     for canary in canaries:
-        if canary in content:
+        if canary.encode("ascii") in encoded:
             violations.append(f"{path}: synthetic PAN")
+    # Latin-1 preserves every byte, allowing the ASCII-oriented expression to
+    # inspect mixed or binary artifacts without treating valid binary as an error.
+    content = encoded.decode("latin-1")
     if content.strip() == "737" or cvv_pattern.search(content):
         violations.append(f"{path}: synthetic CVV")
 if violations:
