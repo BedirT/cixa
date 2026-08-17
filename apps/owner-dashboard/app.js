@@ -304,28 +304,21 @@ function showHandoff(result) { const intent=result.intent;const facts=intent.che
 function openAgent(agent) {
   const policy=state.overview.policies[agent.policy_id]; const sessionTtl=policy.card_session_ttl_secs;const canOperate=!agent.revoked&&agent.expires_at>Date.now()/1000;const modeSelect=node("select",{disabled:!canOperate},["observe","approval_required","bounded_autonomous","disabled"].map((mode)=>node("option",{value:mode,text:title(mode),selected:agent.mode===mode})));
   const merchantInput=node("input",{placeholder:"merchant.example.test",maxLength:253});
-  openDrawer([
-    node("p", { class:"eyebrow", text:agent.revoked ? "Revoked" : title(agent.mode) }),
-    node("h2", { id:"drawer-title", text:agent.name }),
-    node("p", { class:"decision-meta", text:`Capability expires ${when(agent.expires_at)}` }),
-    detailSection("Authority", [
-      node("label", { class:"stacked-form" }, [node("span", { text:"Mode" }), modeSelect]),
-      canOperate?node("div", { class:"card-actions" }, [
+  const section=(heading,copy,contents,action)=>node("section",{class:"drawer-section agent-settings-section"},[node("div",{class:"agent-section-heading"},[node("div",{},[node("h3",{text:heading}),node("p",{text:copy})]),action]),...[].concat(contents)]);
+  const header=node("header",{class:"agent-drawer-header"},[node("span",{class:"agent-avatar"},[svgIcon("icon-agents")]),node("div",{class:"agent-drawer-title"},[node("p",{class:"eyebrow",text:agent.revoked?"Revoked":title(agent.mode)}),node("h2",{id:"drawer-title",text:agent.name}),node("p",{class:"decision-meta",text:`Capability expires ${when(agent.expires_at)}`})])]);
+  openDrawer([node("div",{class:"agent-settings-drawer"},[
+    header,
+    section("Authority","Choose what this agent may do.",[
+      node("label", { class:"agent-mode-field" }, [node("span", { text:"Mode" }), modeSelect]),
+      canOperate?node("div", { class:"agent-control-actions" }, [
         button("Save mode", "primary-button", () => setAgentMode(agent, modeSelect.value)),
         button(`Arm ${durationMinutes(sessionTtl)}`, "quiet-button", () => { closeDrawer(); confirmAction({ title:`Arm this agent for ${durationMinutes(sessionTtl)}?`, copy:"This opens a spending session inside the current policy and autonomy mode.", facts:[["Agent",agent.name],["Mode",title(agent.mode)]], label:"Arm session", action:() => post("/api/agents/arm-session", { agent_id:agent.id, ttl_secs:sessionTtl }, `Agent session armed for ${durationMinutes(sessionTtl)}.`) }); }),
       ]):node("div",{},[node("p",{class:"safety-note",text:"This capability cannot operate. Rotate it to invalidate the old token and issue fresh approval-required access."}),button("Rotate capability","quiet-button",()=>{closeDrawer();openRotateAgent(agent);})]),
     ]),
-    detailSection("Limits", [
-      fact("Per purchase", money(policy.max_per_transaction)), fact("Per session", money(policy.max_per_session)),
-      fact("Rolling 24 hours", money(policy.max_rolling_24h)), fact("Lifetime", money(policy.max_lifetime)),
-      button("Edit policy", "quiet-button", () => openPolicy(agent, policy)),
-    ]),
-    detailSection("Trusted merchants", [
-      node("p", { text:agent.approved_merchants.length ? agent.approved_merchants.join(", ") : "No durable merchant approvals." }),
-      node("div", { class:"card-actions" }, [merchantInput, button("Trust merchant", "quiet-button", () => { const merchant=merchantInput.value.trim(); closeDrawer(); confirmAction({ title:"Trust this merchant for future purchases?", copy:"This is broader than a one-time approval. The merchant will join this agent's durable allowlist.", facts:[["Agent",agent.name],["Merchant",merchant]], label:"Trust merchant", action:() => post("/api/merchants/approve", { agent_id:agent.id, merchant_domain:merchant }, "Merchant added to this agent's policy.") }); })]),
-    ]),
-    agent.revoked ? null : detailSection("Capability", button("Revoke capability", "secondary-button", () => { closeDrawer(); confirmAction({ title:"Revoke this capability?", copy:"This token stops working immediately. You can later rotate the agent to a fresh approval-required token.", label:"Revoke capability", danger:true, action:() => post("/api/agents/revoke", { agent_id:agent.id }, "Capability revoked.") }); })),
-  ]);
+    section("Limits","Hard spending boundaries for this agent.",node("div",{class:"agent-limit-grid"},[fact("Per purchase",money(policy.max_per_transaction)),fact("Per session",money(policy.max_per_session)),fact("Rolling 24 hours",money(policy.max_rolling_24h)),fact("Lifetime",money(policy.max_lifetime))]),button("Edit policy","quiet-button compact-button",()=>openPolicy(agent,policy))),
+    section("Trusted merchants",agent.approved_merchants.length?"Durable approvals for future purchases.":"No merchants are trusted yet.",node("div",{class:"agent-merchant-row"},[merchantInput,button("Trust merchant","quiet-button",()=>{const merchant=merchantInput.value.trim();closeDrawer();confirmAction({title:"Trust this merchant for future purchases?",copy:"This is broader than a one-time approval. The merchant will join this agent's durable allowlist.",facts:[["Agent",agent.name],["Merchant",merchant]],label:"Trust merchant",action:()=>post("/api/merchants/approve",{agent_id:agent.id,merchant_domain:merchant},"Merchant added to this agent's policy.")});})])),
+    agent.revoked?null:section("Capability","Revoking immediately invalidates this agent's token.",button("Revoke capability","secondary-button",()=>{closeDrawer();confirmAction({title:"Revoke this capability?",copy:"This token stops working immediately. You can later rotate the agent to a fresh approval-required token.",label:"Revoke capability",danger:true,action:()=>post("/api/agents/revoke",{agent_id:agent.id},"Capability revoked.")});})),
+  ])]);
 }
 async function applyAgentMode(agent,mode){closeDrawer();await post("/api/agents/mode",{agent_id:agent.id,mode},`${agent.name} is now ${title(mode).toLowerCase()}.`);}
 function setAgentMode(agent,mode){const rank={disabled:0,observe:0,approval_required:1,bounded_autonomous:2};if((rank[mode]??0)>(rank[agent.mode]??0)){if($("#detail-drawer").classList.contains("open"))closeDrawer();confirmAction({title:`Give ${agent.name} more authority?`,copy:"This changes what the agent may do on future requests. Its existing policy limits still apply.",facts:[["Current mode",title(agent.mode)],["New mode",title(mode)]],label:"Change authority",action:()=>applyAgentMode(agent,mode)});}else return applyAgentMode(agent,mode);}

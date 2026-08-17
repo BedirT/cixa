@@ -191,10 +191,11 @@ try {
   const researchCard=page.locator(".agent-card").filter({hasText:"Research Runner"});
   await researchCard.locator(".fact-list").click();
   await page.locator("#detail-drawer").getByRole("heading", {name:"Research Runner",exact:true}).waitFor();
+  assert.equal(await page.locator(".agent-settings-section").count(),4);assert.equal((await page.locator(".agent-limit-grid").evaluate((element)=>getComputedStyle(element).gridTemplateColumns.split(" ").length)),2);
   const authorityMode=page.getByRole("button",{name:"Mode: Approval Required"});
-  await authorityMode.focus();await page.keyboard.press("ArrowDown");
+  const saveModeBefore=await page.getByRole("button",{name:"Save mode"}).boundingBox();await authorityMode.focus();await page.keyboard.press("ArrowDown");
   const authorityMenu=page.getByRole("listbox",{name:"Mode options"});await authorityMenu.waitFor();
-  const menuBox=await authorityMenu.boundingBox();const saveBox=await page.getByRole("button",{name:"Save mode"}).boundingBox();assert.equal(menuBox.y+menuBox.height<saveBox.y,true);
+  const saveModeAfter=await page.getByRole("button",{name:"Save mode"}).boundingBox();assert.equal(saveModeAfter.y,saveModeBefore.y);assert.equal(await authorityMenu.evaluate((element)=>getComputedStyle(element).position),"absolute");
   await page.locator("#toast-region").evaluate((region)=>region.replaceChildren());
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-authority-menu.png"),fullPage:false});
   await page.setViewportSize({width:390,height:844});const mobileMenuBox=await authorityMenu.boundingBox();assert.equal(mobileMenuBox.x>=0&&mobileMenuBox.x+mobileMenuBox.width<=390,true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-authority-menu-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
