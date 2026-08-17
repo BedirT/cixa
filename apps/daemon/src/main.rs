@@ -276,6 +276,90 @@ struct CheckoutAdapterInput<'a> {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProcessIdentity {
+    pid: u32,
+    started: u128,
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = stat.rsplit_once(") ")?.1;
+    let started = after_name.split_whitespace().nth(19)?.parse::<u128>().ok()?;
+    Some(ProcessIdentity { pid, started })
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcBsdInfo {
+        flags: u32,
+        status: u32,
+        xstatus: u32,
+        pid: u32,
+        ppid: u32,
+        uid: u32,
+        gid: u32,
+        ruid: u32,
+        rgid: u32,
+        svuid: u32,
+        svgid: u32,
+        rfu_1: u32,
+        comm: [u8; 16],
+        name: [u8; 32],
+        nfiles: u32,
+        pgid: u32,
+        pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        nice: i32,
+        start_tvsec: u64,
+        start_tvusec: u64,
+    }
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+    const PROC_PIDTBSDINFO: libc::c_int = 3;
+    let mut info = ProcBsdInfo::default();
+    let expected = std::mem::size_of::<ProcBsdInfo>() as libc::c_int;
+    let received = unsafe {
+        proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdInfo).cast(),
+            expected,
+        )
+    };
+    if received != expected || info.pid != pid {
+        return None;
+    }
+    Some(ProcessIdentity {
+        pid,
+        started: u128::from(info.start_tvsec) * 1_000_000 + u128::from(info.start_tvusec),
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_identity(_pid: u32) -> Option<ProcessIdentity> {
+    None
+}
+
+#[cfg(unix)]
+fn process_identity_matches(identity: ProcessIdentity) -> bool {
+    process_identity(identity.pid) == Some(identity)
+}
+
+#[cfg(unix)]
 fn direct_child_pids(parent: u32) -> Vec<u32> {
     #[cfg(target_os = "macos")]
     {
@@ -329,13 +413,15 @@ fn direct_child_pids(parent: u32) -> Vec<u32> {
 }
 
 #[cfg(unix)]
-fn descendant_pids(root: u32) -> Vec<u32> {
+fn descendant_processes(root: u32) -> Vec<ProcessIdentity> {
     let mut pending = vec![root];
     let mut descendants = Vec::new();
     while let Some(parent) = pending.pop() {
         for child in direct_child_pids(parent) {
-            if !descendants.contains(&child) {
-                descendants.push(child);
+            if !descendants.iter().any(|identity: &ProcessIdentity| identity.pid == child) {
+                if let Some(identity) = process_identity(child) {
+                    descendants.push(identity);
+                }
                 pending.push(child);
             }
         }
@@ -346,7 +432,7 @@ fn descendant_pids(root: u32) -> Vec<u32> {
 #[cfg(unix)]
 struct DescendantTracker {
     stop: Arc<std::sync::atomic::AtomicBool>,
-    pids: Arc<Mutex<std::collections::BTreeSet<u32>>>,
+    processes: Arc<Mutex<std::collections::BTreeSet<ProcessIdentity>>>,
     watcher: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -354,18 +440,18 @@ struct DescendantTracker {
 impl DescendantTracker {
     fn new(root: u32) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let pids = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let processes = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
         let watcher_stop = Arc::clone(&stop);
-        let watcher_pids = Arc::clone(&pids);
+        let watcher_processes = Arc::clone(&processes);
         let watcher = std::thread::spawn(move || {
             while !watcher_stop.load(Ordering::Acquire) {
-                if let Ok(mut tracked) = watcher_pids.lock() {
-                    tracked.extend(descendant_pids(root));
+                if let Ok(mut tracked) = watcher_processes.lock() {
+                    tracked.extend(descendant_processes(root));
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
-        Self { stop, pids, watcher: Some(watcher) }
+        Self { stop, processes, watcher: Some(watcher) }
     }
 
     fn terminate(&mut self, child: &mut Child) {
@@ -373,19 +459,36 @@ impl DescendantTracker {
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
         }
-        if let Ok(mut tracked) = self.pids.lock() {
-            tracked.extend(descendant_pids(child.id()));
+        if let Ok(mut tracked) = self.processes.lock() {
+            tracked.extend(descendant_processes(child.id()));
             unsafe {
                 libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
             }
-            for pid in tracked.iter().rev() {
-                unsafe {
-                    libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+            for identity in tracked.iter().rev() {
+                if process_identity_matches(*identity) {
+                    unsafe {
+                        libc::kill(identity.pid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
             }
         }
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+#[cfg(all(test, unix, any(target_os = "macos", target_os = "linux")))]
+mod process_identity_tests {
+    use super::*;
+
+    #[test]
+    fn stale_process_identity_is_rejected_before_signaling() {
+        let current = process_identity(std::process::id()).expect("current process identity");
+        assert!(process_identity_matches(current));
+        assert!(!process_identity_matches(ProcessIdentity {
+            started: current.started.wrapping_add(1),
+            ..current
+        }));
     }
 }
 
