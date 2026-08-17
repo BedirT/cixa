@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from agent_treasury import TreasuryClient
+from cixa import CixaClient
 
 
 class ClientTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class ClientTests(unittest.TestCase):
 
             worker = threading.Thread(target=serve)
             worker.start()
-            client = TreasuryClient(socket_path, token_path)
+            client = CixaClient(socket_path, token_path)
             self.assertEqual(client.get_status(), {"principal": "agent"})
             worker.join(timeout=2)
             listener.close()

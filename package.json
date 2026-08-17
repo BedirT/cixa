@@ -1,8 +1,9 @@
 {
-  "name": "agent-treasury-workspace",
+  "name": "cixa-workspace",
   "private": true,
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "repository": "github:BedirT/cixa",
   "type": "module",
   "workspaces": [
     "packages/sdk-typescript",

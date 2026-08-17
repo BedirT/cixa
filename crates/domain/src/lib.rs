@@ -1,4 +1,4 @@
-//! The provider-neutral, deterministic security core for agent-treasury.
+//! The provider-neutral, deterministic security core for Cixa.
 //!
 //! The core deliberately has no browser, network, MCP, or framework dependency. A
 //! caller supplies an authenticated capability token and a typed request. All
@@ -29,7 +29,7 @@ use url::Url;
 pub const API_VERSION: &str = "v1";
 pub const STATE_FILE: &str = "state.json";
 pub const AUDIT_KEY_FILE: &str = "audit.key";
-pub const LOCK_FILE: &str = "treasury.lock";
+pub const LOCK_FILE: &str = "cixa.lock";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -75,7 +75,7 @@ fn new_token() -> String {
 
 fn token_hash(token: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"agent-treasury capability token v1\0");
+    digest.update(b"cixa capability token v1\0");
     digest.update(token.as_bytes());
     hex::encode(digest.finalize())
 }
@@ -4141,7 +4141,7 @@ fn sanitize_provider_reference(input: &str) -> String {
 
 fn opaque_reference(kind: &str, input: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(format!("agent-treasury {kind} reference v1\0").as_bytes());
+    digest.update(format!("cixa {kind} reference v1\0").as_bytes());
     digest.update(input.as_bytes());
     format!("{kind}_ref_{}", &hex::encode(digest.finalize())[..32])
 }
@@ -5588,7 +5588,7 @@ mod tests {
             .handle(
                 &bootstrap.owner_token,
                 Request::OwnerConfigureManualProvider {
-                    credential_reference: "keychain://agent-treasury/card".to_string(),
+                    credential_reference: "keychain://cixa/card".to_string(),
                     provider_kind: "os-credential-store".to_string(),
                     last_four: Some("1111".to_string()),
                     balance: Money::positive(1_000, "CAD").unwrap(),
@@ -5629,7 +5629,7 @@ mod tests {
         let secret_operation = treasury
             .bind_approved_secret_operation(&bootstrap.owner_token, intent["id"].as_str().unwrap())
             .unwrap();
-        assert_eq!(secret_operation.card_reference, "keychain://agent-treasury/card");
+        assert_eq!(secret_operation.card_reference, "keychain://cixa/card");
         assert!(
             treasury
                 .handle(
@@ -5710,7 +5710,7 @@ mod tests {
             Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
         let mut treasury = bootstrap.treasury;
         for (credential_reference, provider_kind) in
-            [("737", "os-credential-store"), ("keychain://agent-treasury/card", "arbitrary-plugin")]
+            [("737", "os-credential-store"), ("keychain://cixa/card", "arbitrary-plugin")]
         {
             assert!(
                 treasury
@@ -5733,7 +5733,7 @@ mod tests {
                 .handle(
                     &bootstrap.owner_token,
                     Request::OwnerConfigureManualProvider {
-                        credential_reference: "keychain://agent-treasury/card".to_string(),
+                        credential_reference: "keychain://cixa/card".to_string(),
                         provider_kind: "os-credential-store".to_string(),
                         last_four: Some("1111".to_string()),
                         balance: Money::positive(1_000, "CAD").unwrap(),
@@ -5747,7 +5747,7 @@ mod tests {
             .handle(
                 &bootstrap.owner_token,
                 Request::OwnerConfigureManualProvider {
-                    credential_reference: "keychain://agent-treasury/card".to_string(),
+                    credential_reference: "keychain://cixa/card".to_string(),
                     provider_kind: "os-credential-store".to_string(),
                     last_four: Some("1111".to_string()),
                     balance: Money::positive(1_000, "CAD").unwrap(),

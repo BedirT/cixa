@@ -1,39 +1,85 @@
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, sans-serif;
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #17211c;
+  background: #f2f0e9;
 }
 
 body {
   max-width: 72rem;
-  margin: 2rem auto;
-  padding: 0 1rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+  line-height: 1.5;
+}
+
+.hero {
+  padding: 1.5rem 0 1rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  color: #68736d;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(3.5rem, 9vw, 6.5rem);
+  font-weight: 600;
+  letter-spacing: -0.065em;
+  line-height: 0.95;
+}
+
+.tagline {
+  max-width: 40rem;
+  margin: 1rem 0 0;
+  color: #4e5c54;
+  font-size: 1.15rem;
+}
+
+h2 {
+  margin-top: 2.5rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.75rem;
+  font-weight: 600;
 }
 
 .warning,
 .unsafe {
-  border: 3px solid #c62828;
+  border: 1px solid #d5a4a0;
+  border-left: 5px solid #b83d34;
+  border-radius: 0.6rem;
   padding: 1rem;
-  background: #fff3f3;
-  color: #7f0000;
+  background: #fff8f7;
+  color: #6d241f;
 }
 
 .unsafe {
-  border-color: #e65100;
-  background: #fff8e1;
-  color: #7f3000;
+  border-color: #d89854;
+  background: #fff8ee;
+  color: #744113;
   font-weight: 700;
 }
 
 .verification {
-  border: 1px solid currentColor;
+  border: 1px solid #c9cec8;
+  border-radius: 0.6rem;
   padding: 0.75rem;
+  background: #fff;
   font-weight: 650;
 }
 
 form {
   margin: 1rem 0;
-  padding: 0.75rem;
-  border: 1px solid #777;
+  padding: 1rem;
+  border: 1px solid #d1d5d0;
+  border-radius: 0.75rem;
+  background: #fcfcfa;
+  box-shadow: 0 1px 2px rgb(23 33 28 / 5%);
 }
 
 label,
@@ -46,22 +92,60 @@ textarea {
   box-sizing: border-box;
   min-height: 5rem;
   margin: 0.5rem 0;
+  padding: 0.7rem;
+  border: 1px solid #c7ccc7;
+  border-radius: 0.45rem;
+  color: #1f2923;
+  background: #f7f8f5;
   font-family: ui-monospace, monospace;
 }
 
 button {
   font: inherit;
-  padding: 0.7rem 1rem;
+  padding: 0.65rem 0.95rem;
+  border: 1px solid #aeb6b0;
+  border-radius: 0.45rem;
+  color: #26342c;
+  background: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #eef1ed;
+}
+
+.primary-actions,
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
 }
 
 #stop {
-  background: #c62828;
+  background: #a92e27;
   color: white;
-  border: 0;
+  border-color: #a92e27;
   font-weight: 700;
+}
+
+#stop:hover {
+  background: #8e251f;
 }
 
 pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  padding: 1rem;
+  border: 1px solid #d8dcd6;
+  border-radius: 0.65rem;
+  color: #dce8df;
+  background: #1d2922;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 40rem) {
+  body {
+    padding: 1.5rem 1rem 4rem;
+  }
 }

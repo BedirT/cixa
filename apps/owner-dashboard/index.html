@@ -3,13 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>agent-treasury owner dashboard</title>
+  <title>Cixa owner dashboard</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <h1>agent-treasury</h1>
+  <header class="hero">
+    <p class="eyebrow">Local owner control</p>
+    <h1>Cixa</h1>
+    <p class="tagline">The fortress between your agents and real money.</p>
+  </header>
   <p class="warning"><strong>Owner control:</strong> emergency stop is immediate for new spending. Pending or ambiguous payments never resume automatically.</p>
-  <p><button id="stop" type="button">Emergency stop</button> <button id="resume" type="button">Resume new spending</button></p>
+  <p class="primary-actions"><button id="stop" type="button">Emergency stop</button> <button id="resume" type="button">Resume new spending</button></p>
   <p id="verification" class="verification">Loading provider verification status...</p>
   <p id="unsafe" class="unsafe" hidden></p>
 
@@ -61,7 +65,7 @@
   <h2>Provider And Receiving Setup</h2>
   <p class="unsafe">Experimental manual provider mode never submits card details. It requires owner handoff and reconciliation. Never enter PAN or CVV here.</p>
   <form data-endpoint="/api/provider/manual">
-    <label>Manual provider JSON<textarea>{"credential_reference":"keychain://agent-treasury/card","provider_kind":"os-credential-store","last_four":"1111","balance":{"minor":5000,"currency":"CAD"},"balance_status":"owner_confirmed","balance_ttl_secs":900}</textarea></label>
+    <label>Manual provider JSON<textarea>{"credential_reference":"keychain://cixa/card","provider_kind":"os-credential-store","last_four":"1111","balance":{"minor":5000,"currency":"CAD"},"balance_status":"owner_confirmed","balance_ttl_secs":900}</textarea></label>
     <button type="submit">Configure manual provider</button>
   </form>
   <form data-endpoint="/api/receive">

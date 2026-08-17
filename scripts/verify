@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERIFY_LOCK="$(git rev-parse --git-path agent-treasury-verify.lock 2>/dev/null || printf '%s' "$ROOT/.verify.lock")"
+VERIFY_LOCK="$(git rev-parse --git-path cixa-verify.lock 2>/dev/null || printf '%s' "$ROOT/.verify.lock")"
 VERIFY_OWNER="$VERIFY_LOCK/owner"
 if ! mkdir "$VERIFY_LOCK" 2>/dev/null; then
   owner_pid="$(sed -n '1p' "$VERIFY_OWNER" 2>/dev/null || true)"
@@ -68,7 +68,7 @@ node tests/mcp-smoke.mjs
 python3 tests/package-smoke.py
 printf '%s\n' '[8/14] Python tests and compile'
 PYTHONPATH="$ROOT/packages/sdk-python" python3 -m unittest discover -s packages/sdk-python/tests
-python3 -m py_compile apps/owner-dashboard/server.py packages/sdk-python/agent_treasury.py tests/*.py scripts/*.py
+python3 -m py_compile apps/owner-dashboard/server.py packages/sdk-python/cixa.py tests/*.py scripts/*.py
 printf '%s\n' '[9/14] Persisted daemon integration'
 PYTHONPATH="$ROOT/packages/sdk-python" python3 tests/integration.py
 python3 tests/handoff.py
@@ -94,4 +94,4 @@ if [[ "$(gitleaks version)" != "8.30.1" ]]; then
 fi
 gitleaks dir --redact --no-banner .
 printf '%s\n' '[14/14] Verification complete'
-printf '%s\n' 'agent-treasury verification passed'
+printf '%s\n' 'cixa verification passed'

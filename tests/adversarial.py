@@ -70,7 +70,7 @@ for leaked_value in (
     '{"security_code":"737"}\n',
     '{"card_verification_value":"737"}\n',
 ):
-    with tempfile.TemporaryDirectory(prefix="agent-treasury-cvv-regression-") as directory:
+    with tempfile.TemporaryDirectory(prefix="cixa-cvv-regression-") as directory:
         Path(directory, "controlled.log").write_text(leaked_value, encoding="utf-8")
         cvv_scan = subprocess.run(
             ["python3", str(ROOT / "scripts" / "secret-canary-scan.py"), directory],
@@ -86,7 +86,7 @@ missing_scan = subprocess.run(
     text=True,
 )
 assert missing_scan.returncode != 0
-with tempfile.TemporaryDirectory(prefix="agent-treasury-binary-regression-") as directory:
+with tempfile.TemporaryDirectory(prefix="cixa-binary-regression-") as directory:
     Path(directory, "capture.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
     binary_scan = subprocess.run(
         ["python3", str(ROOT / "scripts" / "secret-canary-scan.py"), directory],

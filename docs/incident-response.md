@@ -23,7 +23,7 @@ If PAN, CVV, owner token, agent token, or a login credential may have been expos
 An `unknown` or `provider_pending` intent is quarantined. The owner checks the provider's official transaction view, captures only a sanitized reference and status, then runs:
 
 ```bash
-target/debug/treasury reconcile --data-dir .local \
+target/debug/cixa reconcile --data-dir .local \
   --owner-token-file .local/owner.token --intent-id INTENT_ID --outcome settled
 ```
 

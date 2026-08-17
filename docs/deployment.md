@@ -4,20 +4,20 @@ The broker and the agent should run as separate OS identities or containers. The
 
 ## macOS launchd
 
-Create an owner-reviewed `~/Library/LaunchAgents/com.example.agent-treasury.plist` with absolute paths and a private data directory. The important arguments are:
+Create an owner-reviewed `~/Library/LaunchAgents/com.example.cixa.plist` with absolute paths and a private data directory. The important arguments are:
 
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/absolute/path/target/release/treasury</string>
+  <string>/absolute/path/target/release/cixa</string>
   <string>serve</string>
   <string>--data-dir</string>
-  <string>/Users/OWNER/.local/agent-treasury</string>
+  <string>/Users/OWNER/.local/cixa</string>
 </array>
 <key>RunAtLoad</key><true/>
 <key>Umask</key><integer>63</integer>
-<key>StandardOutPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.out</string>
-<key>StandardErrorPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.err</string>
+<key>StandardOutPath</key><string>/Users/OWNER/.local/cixa/daemon.out</string>
+<key>StandardErrorPath</key><string>/Users/OWNER/.local/cixa/daemon.err</string>
 ```
 
 Review the plist before `launchctl bootstrap gui/$UID ...`. Do not put a token or card secret in the plist.
@@ -30,28 +30,28 @@ Use a dedicated service account and a private directory. An owner-reviewed unit 
 
 ```ini
 [Service]
-ExecStart=/absolute/path/target/release/treasury serve --data-dir /var/lib/agent-treasury
-User=agent-treasury
-Group=agent-treasury
+ExecStart=/absolute/path/target/release/cixa serve --data-dir /var/lib/cixa
+User=cixa
+Group=cixa
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/agent-treasury
+ReadWritePaths=/var/lib/cixa
 ```
 
-The agent should connect through only the bounded `treasury.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/agent-treasury`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
+The agent should connect through only the bounded `cixa.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/cixa`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
 
 For manual-provider mode, create a dedicated `treasury-agent-ipc` group and an agent service account. The broker owner must be permitted to assign that group, but the agent account must be a distinct UID. Put the shared socket and agent token outside the `0700` broker data directory, then run:
 
 ```bash
-treasury create-agent --data-dir /var/lib/agent-treasury \
-  --owner-token-file /var/lib/agent-treasury/owner.token \
-  --agent-token-file /run/agent-treasury-agent/agent.token \
+cixa create-agent --data-dir /var/lib/cixa \
+  --owner-token-file /var/lib/cixa/owner.token \
+  --agent-token-file /run/cixa-agent/agent.token \
   --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
-treasury serve --data-dir /var/lib/agent-treasury \
-  --socket /run/agent-treasury-agent/treasury.sock \
+cixa serve --data-dir /var/lib/cixa \
+  --socket /run/cixa-agent/cixa.sock \
   --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
 ```
 

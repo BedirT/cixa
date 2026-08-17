@@ -1,11 +1,11 @@
-use agent_treasury_domain::{
+use cixa_domain::{
     API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money,
     OwnerHandoffTransport, Policy, ProviderOutcome, PurchaseItem, PurchaseRequest,
     ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider, SimulatedScenario,
     SimulatedSecretProvider, Treasury, VolatileSecret, redact_sensitive,
 };
 #[cfg(unix)]
-use agent_treasury_domain::{
+use cixa_domain::{
     DurableNonceRedemptionStore, OwnerControlledSecretHelperProvider,
     redeem_owner_helper_operation, unix_peer_effective_uid,
 };
@@ -40,7 +40,7 @@ impl DataDirLock {
                 return Err("data directory must be a real directory".into());
             }
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-            let lock_path = directory.join("treasury.lock");
+            let lock_path = directory.join("cixa.lock");
             if let Ok(metadata) = fs::symlink_metadata(&lock_path)
                 && (metadata.file_type().is_symlink() || !metadata.is_file())
             {
@@ -53,10 +53,7 @@ impl DataDirLock {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(lock_path)?;
-            fs::set_permissions(
-                directory.join("treasury.lock"),
-                fs::Permissions::from_mode(0o600),
-            )?;
+            fs::set_permissions(directory.join("cixa.lock"), fs::Permissions::from_mode(0o600))?;
             file.try_lock_exclusive()
                 .map_err(|_| "treasury data directory is already owned by another writer")?;
             Ok(Self(file))
@@ -67,7 +64,7 @@ impl DataDirLock {
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(directory.join("treasury.lock"))?;
+                .open(directory.join("cixa.lock"))?;
             file.try_lock_exclusive()
                 .map_err(|_| "treasury data directory is already owned by another writer")?;
             Ok(Self(file))
@@ -127,13 +124,13 @@ fn run() -> CliResult<()> {
         "resume" => stop_command(&rest, false),
         "audit" => direct_command(&rest, Request::OwnerListAudit),
         "serve" => serve_command(&rest),
-        other => Err(format!("unknown command {other}; run `treasury help`").into()),
+        other => Err(format!("unknown command {other}; run `cixa help`").into()),
     }
 }
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "Cixa {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -649,7 +646,7 @@ fn collect_child_output(
     tracker: &mut DescendantTracker,
     mut stdout: ChildStdout,
     timeout: Duration,
-) -> agent_treasury_domain::Result<(ExitStatus, Zeroizing<Vec<u8>>)> {
+) -> cixa_domain::Result<(ExitStatus, Zeroizing<Vec<u8>>)> {
     use std::os::fd::AsRawFd;
 
     let descriptor = stdout.as_raw_fd();
@@ -671,7 +668,7 @@ fn collect_child_output(
                 output.extend_from_slice(&buffer[..count]);
                 if output.len() > 16 * 1024 {
                     terminate_child_group(child, tracker);
-                    return Err(agent_treasury_domain::TreasuryError::Conflict(
+                    return Err(cixa_domain::TreasuryError::Conflict(
                         "controlled checkout adapter output is too large".to_string(),
                     ));
                 }
@@ -694,7 +691,7 @@ fn collect_child_output(
                 // Keep the root as a zombie until its process group is signaled,
                 // then reap it and preserve its original exit status.
                 let status = terminate_child_group(child, tracker).ok_or_else(|| {
-                    agent_treasury_domain::TreasuryError::Conflict(
+                    cixa_domain::TreasuryError::Conflict(
                         "controlled checkout adapter could not be reaped".to_string(),
                     )
                 })?;
@@ -705,7 +702,7 @@ fn collect_child_output(
     }
 
     terminate_child_group(child, tracker);
-    Err(agent_treasury_domain::TreasuryError::Conflict(
+    Err(cixa_domain::TreasuryError::Conflict(
         "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
             .to_string(),
     ))
@@ -729,10 +726,10 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         &mut self,
         request: &PurchaseRequest,
         secret: &VolatileSecret,
-    ) -> agent_treasury_domain::Result<ProviderOutcome> {
+    ) -> cixa_domain::Result<ProviderOutcome> {
         let secret: CheckoutSecret<'_> =
             serde_json::from_slice(secret.as_bytes()).map_err(|_| {
-                agent_treasury_domain::TreasuryError::Invalid(
+                cixa_domain::TreasuryError::Invalid(
                 "owner secret must be one strict JSON object for the controlled checkout adapter"
                     .to_string(),
             )
@@ -745,7 +742,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             || secret.cvv.len() > 8
             || secret.cardholder.is_some_and(|value| value.is_empty() || value.len() > 128)
         {
-            return Err(agent_treasury_domain::TreasuryError::Invalid(
+            return Err(cixa_domain::TreasuryError::Invalid(
                 "owner secret fields are missing or outside their size limits".to_string(),
             ));
         }
@@ -753,7 +750,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let mut encoded = Zeroizing::new(serde_json::to_vec(&input)?);
         encoded.push(b'\n');
         if encoded.len() > 16 * 1024 {
-            return Err(agent_treasury_domain::TreasuryError::Invalid(
+            return Err(cixa_domain::TreasuryError::Invalid(
                 "checkout adapter request is too large".to_string(),
             ));
         }
@@ -774,7 +771,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             Some(stdin) => stdin,
             None => {
                 terminate_child_group(&mut child, &mut tracker);
-                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                return Err(cixa_domain::TreasuryError::Conflict(
                     "checkout adapter stdin is unavailable".to_string(),
                 ));
             }
@@ -789,7 +786,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             Some(stdout) => stdout,
             None => {
                 terminate_child_group(&mut child, &mut tracker);
-                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                return Err(cixa_domain::TreasuryError::Conflict(
                     "checkout adapter stdout is unavailable".to_string(),
                 ));
             }
@@ -797,18 +794,18 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             terminate_child_group(&mut child, &mut tracker);
-            return Err(agent_treasury_domain::TreasuryError::Conflict(
+            return Err(cixa_domain::TreasuryError::Conflict(
                 "owner handoff deadline expired before adapter completion".to_string(),
             ));
         }
         let (status, output) = collect_child_output(&mut child, &mut tracker, stdout, remaining)?;
         if !status.success() {
-            return Err(agent_treasury_domain::TreasuryError::Conflict(
+            return Err(cixa_domain::TreasuryError::Conflict(
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
             ));
         }
         let _: ProviderOutcome = serde_json::from_slice(&output).map_err(|_| {
-            agent_treasury_domain::TreasuryError::Conflict(
+            cixa_domain::TreasuryError::Conflict(
                 "controlled checkout adapter returned an invalid sanitized outcome".to_string(),
             )
         })?;
@@ -818,7 +815,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         })
     }
 
-    fn cleanup(&mut self) -> agent_treasury_domain::Result<()> {
+    fn cleanup(&mut self) -> cixa_domain::Result<()> {
         Ok(())
     }
 }
@@ -869,7 +866,7 @@ fn run_request(args: &[String], token: String, operation: Request) -> CliResult<
     {
         let socket_argument =
             if operation.requires_owner() { "--owner-socket" } else { "--socket" };
-        let default_name = if operation.requires_owner() { "owner.sock" } else { "treasury.sock" };
+        let default_name = if operation.requires_owner() { "owner.sock" } else { "cixa.sock" };
         let socket = value(args, socket_argument)
             .map(PathBuf::from)
             .unwrap_or_else(|| directory.join(default_name));
@@ -1335,7 +1332,7 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
         adapter_config: config,
         deadline: handoff_deadline,
     };
-    let mut executor = agent_treasury_domain::SecureOwnerHandoffExecutor::new(
+    let mut executor = cixa_domain::SecureOwnerHandoffExecutor::new(
         operation,
         expected_request,
         provider,
@@ -1395,9 +1392,8 @@ fn stop_command(args: &[String], stopped: bool) -> CliResult<()> {
 fn serve_command(args: &[String]) -> CliResult<()> {
     let directory = data_dir(args)?;
     let _lock = DataDirLock::acquire(&directory)?;
-    let agent_socket = value(args, "--socket")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| directory.join("treasury.sock"));
+    let agent_socket =
+        value(args, "--socket").map(PathBuf::from).unwrap_or_else(|| directory.join("cixa.sock"));
     let owner_socket = value(args, "--owner-socket")
         .map(PathBuf::from)
         .unwrap_or_else(|| directory.join("owner.sock"));
@@ -1407,7 +1403,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     }
     let mut treasury = Treasury::load_from(&directory)?;
     let require_separate_agent =
-        treasury.state.provider_mode == agent_treasury_domain::ProviderMode::ManualPrepaidCard;
+        treasury.state.provider_mode == cixa_domain::ProviderMode::ManualPrepaidCard;
     if require_separate_agent && agent_gid.is_none() {
         return Err(
             "manual provider mode requires --agent-gid and a separate agent OS identity".into()
@@ -1433,8 +1429,8 @@ fn serve_command(args: &[String]) -> CliResult<()> {
         }
         share_with_agent_group(&agent_socket, gid, 0o660)?;
     }
-    eprintln!("agent-treasury agent broker listening on {}", agent_socket.display());
-    eprintln!("agent-treasury owner control listening on {}", owner_socket.display());
+    eprintln!("Cixa agent broker listening on {}", agent_socket.display());
+    eprintln!("Cixa owner control listening on {}", owner_socket.display());
     let owner_state = Arc::clone(&state);
     let owner_directory = directory.clone();
     std::thread::spawn(move || {
@@ -1640,7 +1636,7 @@ fn demo_request(key: &str, amount: i64) -> PurchaseRequest {
         preauthorization: false,
         installments: false,
         fulfillment_profile: "digital-email".to_string(),
-        payment_form: agent_treasury_domain::PaymentFormTrust::HostedFields,
+        payment_form: cixa_domain::PaymentFormTrust::HostedFields,
         redirect_chain: vec!["https://merchant.example.test/checkout".to_string()],
         attempts: 1,
         session_id: "demo-session".to_string(),
@@ -1701,7 +1697,7 @@ fn run_demo() -> CliResult<()> {
     let currency =
         treasury.handle(&agent_token, Request::CreatePurchaseIntent { request: currency })?;
     let mut hostile_form = demo_request("hostile-form", 500);
-    hostile_form.payment_form = agent_treasury_domain::PaymentFormTrust::MerchantControlled;
+    hostile_form.payment_form = cixa_domain::PaymentFormTrust::MerchantControlled;
     let hostile_form =
         treasury.handle(&agent_token, Request::CreatePurchaseIntent { request: hostile_form })?;
     treasury.handle(&owner, Request::OwnerSetEmergencyStop { stopped: true })?;
@@ -1717,7 +1713,7 @@ fn run_demo() -> CliResult<()> {
     treasury.verify_audit_chain()?;
 
     print_json(&json!({
-        "project": "agent-treasury",
+        "project": "cixa",
         "demo": "passed",
         "budget": budget,
         "public_receive_instructions": receive,

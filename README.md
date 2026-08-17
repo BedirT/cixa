@@ -1,167 +1,216 @@
-# agent-treasury
+<!-- Final banner: docs/assets/cixa-banner.png -->
 
-`agent-treasury` is a local payment authorization gateway and policy firewall for software agents. It gives an untrusted agent bounded financial autonomy without giving that agent account logins, raw payment credentials, policy mutation rights, or authority to increase its own limits.
+<div align="center">
 
-The project is local-first and provider-agnostic. The security-critical core is Rust. A versioned JSON-line API over a Unix-domain socket is adapted to MCP, a CLI, a TypeScript SDK, and a dependency-free Python SDK.
+# Cixa
 
-## What It Does
+**A local fortress between software agents and real money.**
 
-- Enforces integer minor-unit money arithmetic and explicit ISO 4217 currencies.
-- Separates the owner, agent, broker, and financial-provider principals.
-- Supports observe, approval-required, bounded-autonomous, and disabled modes.
-- Applies deterministic budgets, merchant and currency rules, fulfillment allowlists, recurring-payment denial, redirect validation, pre-submit revalidation, and emergency stop.
-- Uses scoped, expiring, revocable agent capability tokens stored hashed in the broker state.
-- Provides an append-only ledger, HMAC hash-chain audit log, and HMAC-authenticated state envelope.
-- Quarantines ambiguous payments as `unknown` or `reconciliation_required` and never retries them automatically.
-- Includes a deterministic simulated provider, a manual prepaid-card adapter boundary, a hostile local merchant fixture, a loopback-only owner dashboard, MCP tools, SDKs, and a fully local demo.
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-5c6ac4.svg)](LICENSE)
+![Core: Rust](https://img.shields.io/badge/core-Rust-b7410e.svg)
+![Transport: local Unix socket](https://img.shields.io/badge/transport-local%20Unix%20socket-2f855a.svg)
+![Status: reference implementation](https://img.shields.io/badge/status-reference%20implementation-6b7280.svg)
 
-## What It Is Not
+</div>
 
-This is not a bank, wallet, issuer, payment processor, money transmitter, KOHO API, KOHO partner, Mastercard or Interac product, custodial service, or universal checkout system. It is not a claim of PCI DSS certification, PCI compliance, formal security certification, or universal merchant compatibility. KOHO and Mastercard are unaffiliated products and trademarks of their respective owners.
+Cixa is a local payment authorization gateway for software agents. It lets an agent ask for a purchase, then checks that request against limits you control before any payment can move forward.
 
-The first real-world configuration is a manual adapter for a user-owned Canadian KOHO prepaid virtual Mastercard and an owner-configured Interac e-Transfer receiving address. There is no KOHO login automation, private API use, outgoing Interac e-Transfer support, or real-money test.
+The agent never gets your account login, raw card details, owner controls, or permission to raise its own budget. Cixa stays on your machine, listens on a Unix socket, and fails closed when something is unclear.
 
-## Quickstart
+The name comes from Laz. **Cixa** means fortress or castle, and appears in the names of historical fortifications across the Laz region. It is pronounced roughly **JEE-kha**, with the `x` sounding like the `ch` in *Bach* or *loch*.
 
-Requirements: Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, `pip-audit` 2.9.0, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the hashed Python build and evidence-tool graph with `python3 -m pip install --require-hashes -r requirements-build.lock`, install `pip-audit==2.9.0`, and install the Rust scanner with `cargo install cargo-audit --version 0.22.2 --locked`; install the pinned source scanner from its official release. The simulated demo needs no account, paid service, or API key.
+## Take It For A Spin
+
+You only need Rust stable, Node.js 20+, npm, and Python 3.11+ for the local demo. It uses synthetic data and a simulated provider, so there is no account, API key, paid service, or real transaction involved.
 
 ```bash
-cargo build --locked
+git clone https://github.com/BedirT/cixa.git
+cd cixa
 npm ci
 ./scripts/demo
-./scripts/verify
 ```
 
-Hosted GitHub CI is intentionally not configured for this solo-developer repository. Run `./scripts/verify` before every push; it is the canonical local gate and avoids hosted-runner limits and unnecessary remote execution.
+The demo walks through a valid bounded purchase, duplicate protection, over-budget denial, recurring-payment denial, currency substitution, a hostile checkout form, emergency stop, audit verification, and a secret-canary scan.
 
-The demo proves a valid bounded purchase, duplicate idempotency protection, over-budget denial, recurring denial, currency substitution denial, merchant-controlled-form approval gating, emergency stop, a valid audit chain, and a secret-canary result without printing the synthetic PAN or CVV.
+## A Quick Look
 
-## Persisted Local Setup
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/owner-dashboard.png" alt="Cixa owner dashboard showing local controls and provider status">
+    </td>
+    <td width="50%">
+      <img src="docs/assets/checkout-lab.png" alt="Cixa hostile checkout laboratory used for local security tests">
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Owner-only dashboard on loopback</sub></td>
+    <td align="center"><sub>Hostile local checkout fixture</sub></td>
+  </tr>
+</table>
 
-Tokens are read from protected files, not command-line values. The following creates a simulated treasury and a bounded agent:
+Both screens are local test surfaces. The dashboard loads no CDN assets, analytics, or third-party scripts, and the checkout lab never accepts real payment details.
 
-```bash
-mkdir -p .local
-target/debug/treasury init --data-dir .local --owner-token-file .local/owner.token
-target/debug/treasury create-agent --data-dir .local --owner-token-file .local/owner.token \
-  --agent-token-file .local/agent.token --mode bounded_autonomous
-target/debug/treasury arm-session --data-dir .local --owner-token-file .local/owner.token \
-  --agent-id AGENT_ID --ttl-secs 600
-target/debug/treasury update-policy --data-dir .local --owner-token-file .local/owner.token \
-  --agent-id AGENT_ID --policy-file policy.json
-target/debug/treasury approve-merchant --data-dir .local \
-  --owner-token-file .local/owner.token --agent-id AGENT_ID \
-  --merchant-domain merchant.example.test
-target/debug/treasury configure-receive --data-dir .local \
-  --owner-token-file .local/owner.token --address public-inbox@example.invalid
-target/debug/treasury serve --data-dir .local
-```
+## What Cixa Actually Does
 
-The same-identity commands above are simulated-mode developer setup only. Manual-provider operation refuses same-UID agent connections and requires the group-isolated deployment in [docs/deployment.md](docs/deployment.md).
+- Checks amounts using integer minor units and explicit ISO 4217 currencies.
+- Keeps owner, agent, broker, and payment-provider permissions separate.
+- Supports observe-only, approval-required, bounded-autonomous, and disabled modes.
+- Enforces budgets, merchant rules, currency rules, fulfillment allowlists, redirect checks, and recurring-payment denial.
+- Gives agents scoped, expiring, revocable capability tokens. Stored state keeps only token hashes.
+- Records an append-only ledger, an HMAC hash-chain audit log, and an authenticated state envelope.
+- Treats uncertain payment outcomes as `unknown` or `reconciliation_required` instead of retrying and hoping for the best.
+- Ships with a Rust CLI and daemon, MCP server, TypeScript SDK, dependency-free Python SDK, local owner dashboard, and simulated provider.
 
-Run the agent-facing MCP server in a separate, untrusted process with:
-
-```bash
-TREASURY_SOCKET_PATH="$PWD/.local/treasury.sock" \
-TREASURY_AGENT_TOKEN_FILE="$PWD/.local/agent.token" \
-node packages/mcp-server/dist/index.js
-```
-
-The owner dashboard is an optional loopback-only bridge:
-
-```bash
-umask 077
-openssl rand -hex 32 > .local/dashboard.token
-python3 apps/owner-dashboard/server.py \
-  --socket-path "$PWD/.local/owner.sock" \
-  --owner-token-file "$PWD/.local/owner.token" \
-  --access-token-file "$PWD/.local/dashboard.token"
-```
-
-The browser prompts for HTTP Basic authentication. Use username `owner` and the separate dashboard access token as the password. Startup rejects reuse of the broker owner credential as the dashboard credential. CSRF, origin, host, and authenticated session checks remain additional controls. The daemon reserves a distinct `owner.sock` control channel that is not shared with the agent connection pool; give agents only `treasury.sock`. The dashboard has no CDN, analytics, third-party script, public bind, or agent endpoint. Stop the daemon and manually lock or replace a real card after a risky run.
-
-Configure a reference-only manual prepaid card without supplying card data:
-
-```bash
-target/debug/treasury configure-manual-provider --data-dir .local \
-  --owner-token-file .local/owner.token \
-  --credential-reference keychain://agent-treasury/card \
-  --provider-kind os-credential-store --last-four 1111 \
-  --balance-minor 5000 --balance-status owner_confirmed
-```
-
-The credential reference identifies an owner-controlled helper entry. It is not a PAN or CVV. After `approve`, the real-world manual path is deliberately two phase:
-
-```bash
-target/debug/treasury begin-handoff --data-dir .local \
-  --owner-token-file .local/owner.token --intent-id INTENT_ID
-# Suspend the agent. In an owner-only browser, verify the returned facts and submit at most once.
-target/debug/treasury complete-handoff --data-dir .local \
-  --owner-token-file .local/owner.token --intent-id INTENT_ID
-target/debug/treasury reconcile --data-dir .local \
-  --owner-token-file .local/owner.token --intent-id INTENT_ID \
-  --outcome settled --provider-reference OWNER_VERIFIED_REFERENCE
-```
-
-These two manual commands require a continuously running `treasury serve` daemon so an intentional continuation is not mistaken for crash recovery. `begin-handoff` durably records `executing` before the owner can submit. `complete-handoff` records an ambiguous, non-retryable outcome, and only owner reconciliation can settle it. The project never receives card data or automates the KOHO login or payment form in this default path.
-
-An experimental owner-only Playwright adapter and one-shot helper are also shipped for explicitly reviewed hosted-field integrations. They run only through `execute-handoff` while the broker lock excludes the daemon and therefore suspends agent RPC. See [docs/checkout-adapters.md](docs/checkout-adapters.md) for the strict adapter configuration, helper lifecycle, and safe-denial requirements. This is not universal checkout support and must not be pointed at KOHO login pages or unknown merchant-controlled forms.
-
-Owner and agent credentials must be written to their required protected token files. The CLI never prints either credential. Intent approval is scoped to that immutable intent; durable merchant trust requires the separate owner-authenticated `approve-merchant` command.
-
-## Architecture
+## How It Fits Together
 
 ```mermaid
 flowchart LR
-  A[Untrusted agent] -->|scoped capability token| M[MCP / SDK / CLI adapter]
-  M -->|local v1 JSON IPC| B[Trusted Rust broker]
-  O[Owner CLI or dashboard] -->|owner token| B
-  B --> P[Deterministic policy and budget engine]
-  B --> L[Append-only ledger and HMAC audit chain]
-  B --> S[SecretProvider boundary]
-  B --> F[Simulated provider or manual card adapter]
-  B --> X[Secure handoff / safe-denial checkout boundary]
+  A["Untrusted agent"] -->|"scoped capability"| M["MCP or SDK"]
+  M -->|"local v1 JSON IPC"| C["Cixa broker"]
+  O["Owner CLI or dashboard"] -->|"owner-only channel"| C
+  C --> P["Policy and budget engine"]
+  C --> L["Ledger and audit chain"]
+  C --> S["Secret provider boundary"]
+  C --> X["Simulated or manual provider"]
 ```
 
-The agent-facing surface does not register owner operations. The raw card number, CVV, billing identity, shipping identity, account login, and security settings are outside the agent capability model. See [docs/architecture.md](docs/architecture.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
+The agent-facing socket and owner-control socket are separate. Agent integrations get `cixa.sock` and a scoped token. They do not get `owner.sock`, the data directory, provider credentials, or the browser handoff.
 
-## Agent Operations
+For the deeper version, see [the architecture guide](docs/architecture.md) and [threat model](THREAT_MODEL.md).
 
-The MCP server exposes only:
+## Run A Persisted Local Broker
 
-- `treasury_get_status`
-- `treasury_get_capabilities`
-- `treasury_get_budget`
-- `treasury_get_receive_instructions`
-- `treasury_create_purchase_intent`
-- `treasury_get_purchase_intent`
-- `treasury_execute_purchase_intent`
-- `treasury_cancel_purchase_intent`
-- `treasury_list_transactions`
-- `treasury_get_receipt`
+Build the workspace, create a local data directory, and add a bounded agent:
 
-The owner-only operations for policy changes, agent creation and revocation, approvals, deposits, reconciliation, provider setup, audit export, and emergency stop are implemented in the Rust core, CLI, and authenticated local dashboard but are not exposed by the MCP server.
+```bash
+cargo build --locked
+mkdir -p .local
 
-## Security Warnings
+target/debug/cixa init \
+  --data-dir .local \
+  --owner-token-file .local/owner.token
 
-- Treat the agent and all merchant content as compromised input.
-- Do not place real credentials in fixtures, environment variables, shell arguments, logs, browser profiles, screenshots, traces, or MCP output.
-- The default secret provider does not persist CVV. Encrypted CVV storage is not automatically compliant and is not implemented here.
-- A manual card balance is owner-confirmed or estimated, not an authoritative provider balance.
-- A compromised local administrator, kernel, browser runtime, issuer, merchant, or owner is outside some guarantees.
-- Payments that time out after submission are unknown and require owner reconciliation. An `executing` intent is persisted before provider submission, and restart recovery quarantines it rather than retrying.
-- Caller-provided `session_id` values are metadata only. Budget sessions are broker-issued, owner-armed, expiring, and bound to the agent capability.
+target/debug/cixa create-agent \
+  --data-dir .local \
+  --owner-token-file .local/owner.token \
+  --agent-token-file .local/agent.token \
+  --mode bounded_autonomous
 
-## KOHO Reference Setup
+target/debug/cixa serve --data-dir .local
+```
 
-Read [docs/koho-setup.md](docs/koho-setup.md) for the dated, manual-only Canadian setup and current official-source links. Read [docs/limitations.md](docs/limitations.md) before using any real card. Do not share a KOHO password, verification code, card number, CVV, recovery information, or government identity data with this project or an agent.
+That same-user setup is for simulated local development. Manual-provider mode requires the separate Unix identities and group-isolated socket layout in [the deployment guide](docs/deployment.md).
+
+### Connect An MCP Client
+
+Build the packages, then run the MCP adapter inside the untrusted agent process:
+
+```bash
+npm run build
+
+CIXA_SOCKET_PATH="$PWD/.local/cixa.sock" \
+CIXA_AGENT_TOKEN_FILE="$PWD/.local/agent.token" \
+node packages/mcp-server/dist/index.js
+```
+
+The MCP server exposes only the agent-safe surface:
+
+| Tool | Purpose |
+| --- | --- |
+| `cixa_get_status` | Read sanitized broker status |
+| `cixa_get_capabilities` | Read the agent's fixed capabilities |
+| `cixa_get_budget` | Read the effective budget and provider labels |
+| `cixa_get_receive_instructions` | Read owner-approved public receiving details |
+| `cixa_create_purchase_intent` | Ask Cixa to validate a proposed purchase |
+| `cixa_get_purchase_intent` | Read one sanitized intent |
+| `cixa_execute_purchase_intent` | Execute an already authorized intent |
+| `cixa_cancel_purchase_intent` | Cancel an unexecuted intent |
+| `cixa_list_transactions` | List the agent's sanitized transactions |
+| `cixa_get_receipt` | Read a receipt with personal details removed |
+
+Policy edits, agent creation and revocation, approvals, deposits, reconciliation, provider setup, audit export, and emergency stop stay on the owner side.
+
+### Use The SDKs
+
+TypeScript:
+
+```ts
+import { BrokerClient } from "cixa-sdk";
+
+const cixa = new BrokerClient({
+  socketPath: process.env.CIXA_SOCKET_PATH!,
+  tokenFile: process.env.CIXA_AGENT_TOKEN_FILE!,
+});
+
+console.log(await cixa.getBudget());
+```
+
+Python:
+
+```python
+from cixa import CixaClient
+
+cixa = CixaClient(".local/cixa.sock", ".local/agent.token")
+print(cixa.get_budget())
+```
+
+More complete examples live in [examples](examples) and [the agent integration guide](docs/agent-integration.md).
+
+## The Serious Bit
+
+Cixa is **not a bank**, wallet, issuer, payment processor, money transmitter, custodial service, KOHO API, KOHO partner, Mastercard product, Interac product, or universal checkout system. It does not claim PCI DSS compliance, formal certification, or compatibility with every merchant.
+
+The first real-world reference path is deliberately **manual-only**: a user-owned Canadian KOHO prepaid virtual Mastercard plus an owner-configured Interac e-Transfer receiving address. Cixa does not automate a KOHO login, use a private KOHO API, send outgoing Interac e-Transfers, or run real-money tests.
+
+A few rules are worth repeating:
+
+- Treat the agent and every merchant page as hostile input.
+- Never put real card details, login credentials, owner tokens, or agent tokens in source, prompts, environment variables, logs, screenshots, traces, or MCP output.
+- A timeout after submission is ambiguous. Cixa quarantines it for owner reconciliation and does not retry automatically.
+- The default secret-provider path never persists CVV.
+- A local administrator, compromised kernel, browser runtime, issuer, merchant, or owner sits outside some guarantees.
+- A green test run is useful evidence about this checkout, not a security warranty.
+
+Read [SECURITY.md](SECURITY.md), [the credential guide](docs/credential-handling.md), and [the limitations](docs/limitations.md) before connecting anything beyond the simulator.
+
+## Manual Provider Reference
+
+The manual adapter stores a reference to an owner-controlled credential entry, not the card itself:
+
+```bash
+target/debug/cixa configure-manual-provider \
+  --data-dir .local \
+  --owner-token-file .local/owner.token \
+  --credential-reference keychain://cixa/card \
+  --provider-kind os-credential-store \
+  --last-four 1111 \
+  --balance-minor 5000 \
+  --balance-status owner_confirmed
+```
+
+Real-world completion is two-phase and owner-driven. Cixa records `executing` before handoff, records uncertain completion as non-retryable, and requires the owner to reconcile the result. The details are in [the checkout adapter guide](docs/checkout-adapters.md) and [KOHO reference setup](docs/koho-setup.md).
+
+## Verify The Whole Project
+
+The full local gate also expects `pip-audit` 2.9.0, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1. Install the pinned Python build graph from `requirements-build.lock`, then run:
+
+```bash
+./scripts/verify
+```
+
+That gate covers formatting, Rust build and Clippy, Rust and SDK tests, fuzz-harness compilation, installed-package smoke tests, persisted daemon integration, owner dashboard integration, adversarial scenarios, docs, dependency licenses, SBOM output, vulnerability scans, and secret-canary checks.
 
 ## Project Status
 
-This is a security-focused reference implementation intended for human review before any real-money experiment. It has no real provider automation, no payment processor integration, no public network default, and no claim of certification. The canonical verification path is `./scripts/verify`; a green result is evidence about this checkout, not a security warranty.
+Cixa is an early security-focused reference implementation. The simulated path is complete and heavily tested. The manual path is intentionally cautious. There is no public network listener by default, no automated real provider, and no real transaction made by this repository or its test harness.
 
-No real transaction has been made by this repository or its verification harness.
+Before the first tagged release, persisted data from the old pre-release project name should be discarded and initialized again. Capability and reference domain separators changed as part of the rename.
+
+## Contributing
+
+Small, reviewable changes are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and please read the nearest ADR before changing a trust boundary. Security reports belong in the private process described in [SECURITY.md](SECURITY.md), not in a public issue with sensitive details.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). Dependency licenses are checked against the locked graph by the verification harness.
+Apache-2.0. See [LICENSE](LICENSE).

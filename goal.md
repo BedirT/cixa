@@ -1,4 +1,4 @@
-Build, harden, test, and fully document a publish-ready open-source project with the working name `agent-treasury`: a local-first, provider-agnostic payment firewall and treasury control plane that lets an untrusted software agent make legitimate online purchases using a user-owned prepaid or virtual card, within a hard owner-defined autonomy envelope, without giving the agent access to account logins, raw payment credentials, security settings, or the ability to increase its own authority.
+Build, harden, test, and fully document a publish-ready open-source project with the working name `cixa`: a local-first, provider-agnostic payment firewall and treasury control plane that lets an untrusted software agent make legitimate online purchases using a user-owned prepaid or virtual card, within a hard owner-defined autonomy envelope, without giving the agent access to account logins, raw payment credentials, security settings, or the ability to increase its own authority.
 
 The first documented real-world setup must work with a user-owned Canadian KOHO prepaid virtual Mastercard and an Interac e-Transfer receiving address, but KOHO must be treated only as a manual card provider. The project must remain independent of KOHO, independent of any particular LLM framework, and usable by any compatible agent through MCP, a CLI, a local API, or thin SDKs.
 
@@ -67,7 +67,7 @@ An LLM may optionally identify additional risk, but an LLM result may only make 
 
 ## Project identity and positioning
 
-Use `agent-treasury` as the temporary repository and package name unless a conflict makes that impractical.
+Use `cixa` as the temporary repository and package name unless a conflict makes that impractical.
 
 The project must be described accurately as:
 
@@ -439,16 +439,16 @@ Provide examples for:
 
 Agent-facing operations should include equivalents of:
 
-- `treasury_get_status`;
-- `treasury_get_capabilities`;
-- `treasury_get_budget`;
-- `treasury_get_receive_instructions`;
-- `treasury_create_purchase_intent`;
-- `treasury_get_purchase_intent`;
-- `treasury_execute_purchase_intent`;
-- `treasury_cancel_purchase_intent`;
-- `treasury_list_transactions`;
-- `treasury_get_receipt`.
+- `cixa_get_status`;
+- `cixa_get_capabilities`;
+- `cixa_get_budget`;
+- `cixa_get_receive_instructions`;
+- `cixa_create_purchase_intent`;
+- `cixa_get_purchase_intent`;
+- `cixa_execute_purchase_intent`;
+- `cixa_cancel_purchase_intent`;
+- `cixa_list_transactions`;
+- `cixa_get_receipt`.
 
 Use strict schemas with bounded input sizes and `additionalProperties: false` where applicable.
 

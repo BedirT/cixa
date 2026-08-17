@@ -1,8 +1,10 @@
 [package]
-name = "agent-treasury-domain"
+name = "cixa-domain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Provider-neutral policy and authorization core for Cixa"
 
 [dependencies]
 chrono.workspace = true

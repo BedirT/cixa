@@ -3,13 +3,13 @@
 ## Start the Broker
 
 ```bash
-target/debug/treasury init --data-dir .local --owner-token-file .local/owner.token
-target/debug/treasury create-agent --data-dir .local --owner-token-file .local/owner.token \
+target/debug/cixa init --data-dir .local --owner-token-file .local/owner.token
+target/debug/cixa create-agent --data-dir .local --owner-token-file .local/owner.token \
   --agent-token-file .local/agent.token --mode bounded_autonomous
-target/debug/treasury serve --data-dir .local
+target/debug/cixa serve --data-dir .local
 ```
 
-The daemon creates a bounded agent Unix-domain socket at `.local/treasury.sock` and an independently admitted owner control socket at `.local/owner.sock`. It does not bind a TCP port. An agent container must receive only `treasury.sock` and a scoped token file or brokered IPC handle, never `owner.sock`, the data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
+The daemon creates a bounded agent Unix-domain socket at `.local/cixa.sock` and an independently admitted owner control socket at `.local/owner.sock`. It does not bind a TCP port. An agent container must receive only `cixa.sock` and a scoped token file or brokered IPC handle, never `owner.sock`, the data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
 
 ## MCP
 
@@ -18,8 +18,8 @@ Build the workspace and start the server as a child process of an MCP host:
 ```bash
 npm ci
 npm run build
-TREASURY_SOCKET_PATH="$PWD/.local/treasury.sock" \
-TREASURY_AGENT_TOKEN_FILE="$PWD/.local/agent.token" \
+CIXA_SOCKET_PATH="$PWD/.local/cixa.sock" \
+CIXA_AGENT_TOKEN_FILE="$PWD/.local/agent.token" \
 node packages/mcp-server/dist/index.js
 ```
 
@@ -28,13 +28,13 @@ The MCP server uses the maintained `@modelcontextprotocol/server` v2 SDK and std
 ## TypeScript SDK
 
 ```ts
-import { BrokerClient } from "agent-treasury-sdk";
+import { BrokerClient } from "cixa-sdk";
 
-const treasury = new BrokerClient({
-  socketPath: process.env.TREASURY_SOCKET_PATH!,
-  tokenFile: process.env.TREASURY_AGENT_TOKEN_FILE!,
+const cixa = new BrokerClient({
+  socketPath: process.env.CIXA_SOCKET_PATH!,
+  tokenFile: process.env.CIXA_AGENT_TOKEN_FILE!,
 });
-const budget = await treasury.getBudget();
+const budget = await cixa.getBudget();
 ```
 
 The SDK reads the capability token from a protected file. It does not accept a raw token in a method argument and does not provide owner operations.
@@ -42,10 +42,10 @@ The SDK reads the capability token from a protected file. It does not accept a r
 ## Python SDK
 
 ```python
-from agent_treasury import TreasuryClient
+from cixa import CixaClient
 
-treasury = TreasuryClient(".local/treasury.sock", ".local/agent.token")
-print(treasury.get_budget())
+cixa = CixaClient(".local/cixa.sock", ".local/agent.token")
+print(cixa.get_budget())
 ```
 
 Use `PYTHONPATH=packages/sdk-python` for the repository example without installing it. The Python client has no runtime dependency beyond the standard library.

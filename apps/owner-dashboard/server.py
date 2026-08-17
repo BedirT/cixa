@@ -121,7 +121,7 @@ class DashboardState:
 
 def make_handler(state: DashboardState):
     class Handler(http.server.BaseHTTPRequestHandler):
-        server_version = "agent-treasury-dashboard/0.1"
+        server_version = "cixa-dashboard/0.1"
 
         def log_message(self, format: str, *args: object) -> None:
             print(format % args)
@@ -174,7 +174,7 @@ def make_handler(state: DashboardState):
                 return True
             self.send_response(401)
             self._headers("application/json; charset=utf-8")
-            self.send_header("WWW-Authenticate", 'Basic realm="agent-treasury owner"')
+            self.send_header("WWW-Authenticate", 'Basic realm="cixa owner"')
             body = b'{"error":"owner authentication required"}'
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

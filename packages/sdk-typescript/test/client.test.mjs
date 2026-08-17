@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { BrokerClient } from "../dist/index.js";
 
 test("TypeScript client uses the v1 line protocol and token file", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-treasury-sdk-"));
+  const directory = await mkdtemp(join(tmpdir(), "cixa-sdk-"));
   const tokenFile = join(directory, "agent.token");
   const socketPath = join(directory, "broker.sock");
   await writeFile(tokenFile, "synthetic-token\n", { mode: 0o600 });

@@ -1,6 +1,6 @@
 #![no_main]
 
-use agent_treasury_domain::{canonicalize_domain, redact_sensitive, validate_https_url};
+use cixa_domain::{canonicalize_domain, redact_sensitive, validate_https_url};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

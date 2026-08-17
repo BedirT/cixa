@@ -60,7 +60,7 @@ async function exportSanitized() {
   const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = "agent-treasury-sanitized-export.json";
+  link.download = "cixa-sanitized-export.json";
   link.click();
   URL.revokeObjectURL(link.href);
 }

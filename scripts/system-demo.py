@@ -18,9 +18,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "sdk-python"))
-from agent_treasury import BrokerError, TreasuryClient  # noqa: E402
+from cixa import BrokerError, CixaClient  # noqa: E402
 
-BINARY = ROOT / "target" / "debug" / "treasury"
+BINARY = ROOT / "target" / "debug" / "cixa"
 
 
 def run(*args: str) -> dict:
@@ -120,12 +120,12 @@ def write_artifact(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_directory:
+with tempfile.TemporaryDirectory(prefix="cixa-system-demo-") as raw_directory:
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
     agent_file = directory / "agent.token"
     access_file = directory / "dashboard.token"
-    socket_path = directory / "treasury.sock"
+    socket_path = directory / "cixa.sock"
     owner_socket = directory / "owner.sock"
     artifacts = directory / "artifacts"
     artifacts.mkdir(mode=0o700)
@@ -250,7 +250,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-system-demo-") as raw_di
         (artifacts / "mcp.stdout").write_text(mcp_result.stdout, encoding="utf-8")
         (artifacts / "mcp.stderr").write_text(mcp_result.stderr, encoding="utf-8")
         mcp = json.loads(mcp_result.stdout)
-        client = TreasuryClient(str(socket_path), str(agent_file))
+        client = CixaClient(str(socket_path), str(agent_file))
         starting_budget = client.get_budget()
         receiving = client.get_receive_instructions()
         valid = client.create_purchase_intent(purchase("demo-valid"))

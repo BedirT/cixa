@@ -3,40 +3,6 @@
 version = 4
 
 [[package]]
-name = "agent-treasury"
-version = "0.1.0"
-dependencies = [
- "agent-treasury-domain",
- "fs2",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "zeroize",
-]
-
-[[package]]
-name = "agent-treasury-domain"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "hmac",
- "idna",
- "libc",
- "proptest",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "url",
- "zeroize",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,6 +90,40 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "cixa"
+version = "0.1.0"
+dependencies = [
+ "cixa-domain",
+ "fs2",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
+name = "cixa-domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac",
+ "idna",
+ "libc",
+ "proptest",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 #![no_main]
 
-use agent_treasury_domain::RpcRequest;
+use cixa_domain::RpcRequest;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

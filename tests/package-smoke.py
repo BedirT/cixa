@@ -47,14 +47,14 @@ subprocess.run(
         "--locked",
         "--allow-dirty",
         "-p",
-        "agent-treasury-domain",
+        "cixa-domain",
     ],
     cwd=ROOT,
     check=True,
     stdout=subprocess.DEVNULL,
 )
 daemon_files = subprocess.run(
-    ["cargo", "package", "--allow-dirty", "-p", "agent-treasury", "--list"],
+    ["cargo", "package", "--allow-dirty", "-p", "cixa", "--list"],
     cwd=ROOT,
     check=True,
     capture_output=True,
@@ -63,7 +63,7 @@ daemon_files = subprocess.run(
 if not {"Cargo.toml", "src/main.rs"}.issubset(daemon_files):
     raise SystemExit("Rust daemon source package is incomplete")
 
-with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_directory:
+with tempfile.TemporaryDirectory(prefix="cixa-packages-") as raw_directory:
     directory = Path(raw_directory)
     rust_install = directory / "rust-install"
     subprocess.run(
@@ -80,9 +80,9 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    installed_treasury = rust_install / "bin" / "treasury"
-    subprocess.run([str(installed_treasury), "--help"], check=True, stdout=subprocess.DEVNULL)
-    subprocess.run([str(installed_treasury), "demo"], check=True, stdout=subprocess.DEVNULL)
+    installed_cixa = rust_install / "bin" / "cixa"
+    subprocess.run([str(installed_cixa), "--help"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([str(installed_cixa), "demo"], check=True, stdout=subprocess.DEVNULL)
 
     tarballs: list[Path] = []
     for workspace in ("packages/sdk-typescript", "packages/mcp-server"):
@@ -121,15 +121,15 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
         stdout=subprocess.DEVNULL,
     )
     subprocess.run(
-        ["node", "--input-type=module", "-e", "await import('agent-treasury-sdk')"],
+        ["node", "--input-type=module", "-e", "await import('cixa-sdk')"],
         cwd=install,
         check=True,
     )
-    mcp_command = install / "node_modules" / ".bin" / "agent-treasury-mcp"
+    mcp_command = install / "node_modules" / ".bin" / "cixa-mcp"
     mcp_result = subprocess.run(
         [str(mcp_command)], cwd=install, capture_output=True, text=True, timeout=10
     )
-    if mcp_result.returncode != 2 or "TREASURY_SOCKET_PATH" not in mcp_result.stderr:
+    if mcp_result.returncode != 2 or "CIXA_SOCKET_PATH" not in mcp_result.stderr:
         raise SystemExit("installed MCP executable did not run under Node as expected")
 
     python_dist = directory / "python-dist"
@@ -163,8 +163,8 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-packages-") as raw_direc
         stdout=subprocess.DEVNULL,
     )
     subprocess.run(
-        [str(virtualenv / "bin" / "python"), "-c", "import agent_treasury"], check=True
+        [str(virtualenv / "bin" / "python"), "-c", "import cixa"], check=True
     )
 
-shutil.rmtree(ROOT / "packages" / "sdk-python" / "agent_treasury_sdk.egg-info", ignore_errors=True)
+shutil.rmtree(ROOT / "packages" / "sdk-python" / "cixa_sdk.egg-info", ignore_errors=True)
 print("Rust, npm, and Python package smoke assertions passed")

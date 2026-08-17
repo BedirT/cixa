@@ -19,7 +19,7 @@ def _bounded(value: str, field: str, maximum: int) -> None:
         raise ValueError(f"{field} must contain 1..{maximum} printable characters")
 
 
-class TreasuryClient:
+class CixaClient:
     """Agent-only client. It reads a token from a protected file, never from arguments."""
 
     def __init__(self, socket_path: str, token_file: str, timeout: float = 10.0) -> None:

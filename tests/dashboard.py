@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "debug" / "treasury"
+BINARY = ROOT / "target" / "debug" / "cixa"
 
 
 def run(*args: str) -> dict:
@@ -66,7 +66,7 @@ def rpc(socket_path: Path, token: str, operation: dict) -> dict:
     return decoded["data"]
 
 
-with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_directory:
+with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
     access_file = directory / "dashboard.token"
@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
     )
     assert same_credential.returncode != 0
     assert "must differ" in same_credential.stderr
-    socket_path = directory / "treasury.sock"
+    socket_path = directory / "cixa.sock"
     owner_socket_path = directory / "owner.sock"
     daemon = subprocess.Popen(
         [str(BINARY), "serve", "--data-dir", str(directory), "--socket", str(socket_path)],
@@ -247,7 +247,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-dashboard-") as raw_dire
         owner_post(
             "/api/provider/manual",
             {
-                "credential_reference": "keychain://agent-treasury/dashboard-card",
+                "credential_reference": "keychain://cixa/dashboard-card",
                 "provider_kind": "os-credential-store",
                 "last_four": "1111",
                 "balance": {"minor": 10000, "currency": "CAD"},
