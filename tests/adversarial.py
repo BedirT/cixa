@@ -94,7 +94,15 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-binary-regression-") as 
         capture_output=True,
         text=True,
     )
-    assert binary_scan.returncode != 0
+    assert binary_scan.returncode == 0
+    Path(directory, "capture.png").write_bytes(b"\x89PNG\r\n4111111111111111\x00\xff")
+    binary_leak_scan = subprocess.run(
+        ["python3", str(ROOT / "scripts" / "secret-canary-scan.py"), directory],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert binary_leak_scan.returncode != 0
 for name in ("over_budget", "recurring", "currency_substitution", "emergency_stop"):
     assert report[name]["state"] == "failed", (name, report[name])
 assert report["merchant_controlled_form"]["state"] == "approval_required"
