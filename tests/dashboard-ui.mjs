@@ -254,12 +254,17 @@ try {
   await dialog.getByRole("button", {name:"Start again"}).click();
   await page.locator("#stop-banner").getByText("Spending is stopped.", {exact:true}).waitFor({state:"hidden"});
 
+  assert.equal(await page.locator("#theme-button use").getAttribute("href"), "#icon-moon");
   await page.getByRole("button", {name:"Use dark theme"}).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+  assert.equal(await page.locator("#theme-button use").getAttribute("href"), "#icon-sun");
+  assert.equal(await page.locator("#theme-button").getAttribute("title"), "Use light theme");
   await page.reload({waitUntil:"networkidle"});
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+  assert.equal(await page.locator("#theme-button use").getAttribute("href"), "#icon-sun");
   await page.getByRole("button", {name:"Use light theme"}).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+  assert.equal(await page.locator("#theme-button use").getAttribute("href"), "#icon-moon");
   await page.setViewportSize({width:834,height:1112});
   await page.getByRole("link", {name:"Today"}).last().click();
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
@@ -282,6 +287,9 @@ try {
   await page.evaluate(() => scrollTo(0,0));
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
   assert.equal(await page.locator("#today-metrics").evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").length), 3);
+  const metricValueTops=await page.locator("#today-metrics .metric-value").evaluateAll((values)=>values.map((value)=>Math.round(value.getBoundingClientRect().top)));
+  assert.equal(new Set(metricValueTops).size,1);
+  assert.equal(await page.locator(".decision-body").first().evaluate((body)=>getComputedStyle(body).gridTemplateColumns.split(" ").length),1);
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-today-1024.png"),fullPage:true});
   await page.setViewportSize({width:1440,height:1000});
   await page.getByRole("link", {name:"Agents"}).first().click();
