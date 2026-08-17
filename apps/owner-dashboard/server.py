@@ -257,15 +257,28 @@ def make_handler(state: DashboardState):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path in {"/app.js", "/style.css", "/cixa-mark.svg"}:
-                name = self.path.removeprefix("/")
-                body = Path(__file__).with_name(name).read_bytes()
-                if name.endswith(".js"):
-                    content_type = "application/javascript; charset=utf-8"
-                elif name.endswith(".svg"):
-                    content_type = "image/svg+xml"
-                else:
-                    content_type = "text/css; charset=utf-8"
+            static_files = {
+                "/app.js": (
+                    Path(__file__).with_name("app.js"),
+                    "application/javascript; charset=utf-8",
+                ),
+                "/style.css": (
+                    Path(__file__).with_name("style.css"),
+                    "text/css; charset=utf-8",
+                ),
+                "/cixa-mark.svg": (Path(__file__).with_name("cixa-mark.svg"), "image/svg+xml"),
+                "/assets/manrope-latin.woff2": (
+                    Path(__file__).with_name("assets") / "manrope-latin.woff2",
+                    "font/woff2",
+                ),
+                "/assets/newsreader-latin.woff2": (
+                    Path(__file__).with_name("assets") / "newsreader-latin.woff2",
+                    "font/woff2",
+                ),
+            }
+            if self.path in static_files:
+                static_path, content_type = static_files[self.path]
+                body = static_path.read_bytes()
                 self.send_response(200)
                 self._headers(content_type)
                 self.send_header("Content-Length", str(len(body)))

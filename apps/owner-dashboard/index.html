@@ -16,6 +16,7 @@
     <symbol id="icon-agents" viewBox="0 0 24 24"><path d="M9 4h6M12 4V2M6 7h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2ZM8 12h.01M16 12h.01M9 16h6"/></symbol>
     <symbol id="icon-trust" viewBox="0 0 24 24"><path d="m12 3 7 3v5c0 4.6-2.8 8.1-7 10-4.2-1.9-7-5.4-7-10V6l7-3Z"/></symbol>
     <symbol id="icon-device" viewBox="0 0 24 24"><path d="M4 5h16v12H4V5ZM8 21h8M12 17v4"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5M18.4 9A7 7 0 0 0 6.2 6.2L4 8M5.6 15A7 7 0 0 0 17.8 17.8L20 16"/></symbol>
     <symbol id="icon-theme" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18V3Z"/></symbol>
   </svg>
   <div class="ambient ambient-one" aria-hidden="true"></div><div class="ambient ambient-two" aria-hidden="true"></div>
@@ -31,7 +32,7 @@
       <section class="watch-card" aria-label="Cixa status"><p class="watch-state"><span class="status-dot" aria-hidden="true"></span><strong id="connection-label">Connecting</strong></p><p id="watch-copy">Checking the local broker.</p><button class="danger-outline" id="emergency-stop-button" type="button">Stop all spending</button></section>
     </aside>
     <div class="workspace">
-      <header class="topbar"><span class="local-pill"><svg class="inline-icon" aria-hidden="true"><use href="#icon-device"/></svg> This computer only</span><div class="top-actions"><time id="current-time"></time><button class="quiet-button" id="refresh-button" type="button">Refresh</button><button class="icon-button" id="theme-button" type="button" aria-label="Use dark theme" title="Change theme"><svg class="button-icon" aria-hidden="true"><use href="#icon-theme"/></svg></button></div></header>
+      <header class="topbar"><span class="local-pill"><svg class="inline-icon" aria-hidden="true"><use href="#icon-device"/></svg> This computer only</span><div class="top-actions"><time id="current-time"></time><button class="icon-button" id="refresh-button" type="button" aria-label="Refresh" title="Refresh"><svg class="button-icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button><button class="icon-button" id="theme-button" type="button" aria-label="Use dark theme" title="Change theme"><svg class="button-icon" aria-hidden="true"><use href="#icon-theme"/></svg></button></div></header>
       <div class="stop-banner" id="stop-banner" role="status" hidden><div><strong>Spending is stopped.</strong><span>Agents can keep working, but no purchase can begin.</span></div><button class="primary-button" id="resume-button" type="button">Start again</button></div>
       <div class="unsafe-banner" id="unsafe-banner" role="status" hidden></div>
       <main id="main-content" tabindex="-1">
@@ -39,7 +40,7 @@
           <div class="page-intro"><p class="eyebrow" id="today-date"></p><h1 id="today-heading">Your fortress is standing by.</h1><p id="today-summary">Cixa is checking what needs you.</p></div>
           <div class="metric-grid" id="today-metrics" aria-label="Today summary"></div>
           <section class="section-block" aria-labelledby="waiting-heading"><div class="section-heading"><h2 id="waiting-heading">Waiting on you</h2><span id="waiting-count"></span></div><div class="decision-list" id="decision-list"></div></section>
-          <section class="section-block" aria-labelledby="recent-heading"><div class="section-heading"><h2 id="recent-heading">Recent activity</h2><a href="#ledger">Full ledger</a></div><div class="ledger-list compact-list" id="recent-list"></div></section>
+          <section class="section-block" aria-labelledby="recent-heading"><div class="section-heading"><h2 id="recent-heading">Earlier today</h2><a href="#ledger">Full ledger</a></div><div class="ledger-list compact-list" id="recent-list"></div></section>
         </section>
         <section class="view" id="view-ledger" data-view="ledger" aria-labelledby="ledger-heading" hidden>
           <div class="page-intro"><h1 id="ledger-heading">Ledger</h1><p>Every purchase an agent attempted, and what Cixa did about it.</p></div>

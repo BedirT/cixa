@@ -73,6 +73,16 @@ try {
   await page.getByLabel("Dashboard access token").fill(accessToken);
   await page.getByRole("button", {name:"Unlock console"}).click();
   await assert.doesNotReject(() => page.getByRole("heading", {name:"All quiet."}).waitFor());
+  await page.evaluate(() => document.fonts.ready);
+  assert.equal((await page.evaluate(() => document.fonts.load("16px Manrope"))).length > 0, true);
+  assert.equal((await page.evaluate(() => document.fonts.load("16px Newsreader"))).length > 0, true);
+  assert.match(await page.locator("body").evaluate((element) => getComputedStyle(element).fontFamily), /Manrope/);
+  assert.match(await page.locator("#today-heading").evaluate((element) => getComputedStyle(element).fontFamily), /Newsreader/);
+  assert.equal((await page.getByRole("button", {name:"Refresh"}).textContent()).trim(), "");
+  await page.getByText("Spent today", {exact:true}).waitFor();
+  await page.getByText("Brought in", {exact:true}).waitFor();
+  await page.getByText("Still allowed today", {exact:true}).waitFor();
+  await page.getByText("Nothing needs a decision.", {exact:true}).waitFor();
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
 
   await page.getByRole("link", {name:"Agents"}).first().click();
@@ -114,6 +124,10 @@ try {
   await depositForm.getByRole("button", {name:"Record arrival"}).click();
   await dialog.getByRole("button", {name:"Record verified arrival"}).click();
   await dialog.waitFor({state:"hidden"});
+  await page.getByRole("link", {name:/Today/}).first().click();
+  await page.getByRole("button", {name:"Refresh"}).click();
+  await page.getByText("CA$8.00", {exact:true}).waitFor();
+  await page.getByText("CA$12.00 more waiting on you", {exact:true}).waitFor();
   const first = await rpc(agentSocket, agentToken, {type:"create_purchase_intent",request:purchase("approve",1800,"merchant.example.test")});
   const second = await rpc(agentSocket, agentToken, {type:"create_purchase_intent",request:purchase("deny",2200,"new.example.test")});
   assert.equal(first.state,"approval_required"); assert.equal(second.state,"approval_required");
@@ -202,10 +216,10 @@ try {
   await page.getByText("Unknown means stop and check").waitFor();
   await page.getByRole("button", {name:"Stop all spending"}).click();
   await dialog.getByRole("button", {name:"Stop all spending"}).click();
-  await page.getByText("Spending is stopped.").waitFor();
+  await page.locator("#stop-banner").getByText("Spending is stopped.", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Start again"}).click();
   await dialog.getByRole("button", {name:"Start again"}).click();
-  await page.getByText("Spending is stopped.").waitFor({state:"hidden"});
+  await page.locator("#stop-banner").getByText("Spending is stopped.", {exact:true}).waitFor({state:"hidden"});
 
   await page.getByRole("button", {name:"Use dark theme"}).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
@@ -214,9 +228,12 @@ try {
   await page.getByRole("button", {name:"Use light theme"}).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   await page.setViewportSize({width:834,height:1112});
-  assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
-  await page.setViewportSize({width:390,height:844});
   await page.getByRole("link", {name:"Today"}).last().click();
+  assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
+  assert.equal(await page.locator("#today-metrics").evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").length), 1);
+  await page.evaluate(() => scrollTo(0,0));
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-today-834.png"),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
   await page.locator("#recent-list .ledger-row").first().click();
   const drawerButtons=page.locator("#detail-drawer button:visible");await drawerButtons.last().focus();
@@ -228,6 +245,12 @@ try {
   await page.setViewportSize({width:1440,height:1000});
   await page.evaluate(() => scrollTo(0,0));
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console.png"),fullPage:true});
+  await page.setViewportSize({width:1024,height:900});
+  await page.evaluate(() => scrollTo(0,0));
+  assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
+  assert.equal(await page.locator("#today-metrics").evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").length), 3);
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-today-1024.png"),fullPage:true});
+  await page.setViewportSize({width:1440,height:1000});
   await page.getByRole("link", {name:"Agents"}).first().click();
   await page.evaluate(() => scrollTo(0,0));
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-agents-1440.png"),fullPage:true});

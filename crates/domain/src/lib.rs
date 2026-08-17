@@ -2452,6 +2452,7 @@ impl Treasury {
             .as_ref()
             .map(|balance| balance.currency.clone())
             .unwrap_or_else(|| self.state.provider.balance.currency.clone());
+        let ledger = self.ledger_snapshot(&authority_currency)?;
         Ok(json!({
             "emergency_stop": self.state.emergency_stop,
             "provider": {
@@ -2462,9 +2463,8 @@ impl Treasury {
                 "balance_evidence": self.provider_balance_evidence(),
                 "manual_card": manual_card,
             },
-            "available_authority": self
-                .ledger_snapshot(&authority_currency)?
-                .available_authority,
+            "available_authority": ledger.available_authority.clone(),
+            "ledger": ledger,
             "agents": agents,
             "policies": self.state.policies,
             "transactions": transactions,
@@ -5977,6 +5977,8 @@ mod tests {
         assert_eq!(agent["budget"]["remaining_lifetime"]["minor"], 25_000);
         assert_eq!(agent["transaction_count"], 215);
         assert_eq!(dashboard["available_authority"]["minor"], 10_000);
+        assert_eq!(dashboard["ledger"]["verified_income"]["minor"], 0);
+        assert_eq!(dashboard["ledger"]["unverified_income"]["minor"], 0);
 
         let first_page = treasury
             .handle(
