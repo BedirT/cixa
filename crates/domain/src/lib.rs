@@ -2844,6 +2844,14 @@ impl Treasury {
 
     fn owner_emergency_stop(&mut self, actor: &Actor, stopped: bool) -> Result<Value> {
         Self::require_owner(actor)?;
+        let mut invalidated_sessions = 0;
+        if stopped && !self.state.emergency_stop {
+            for agent in self.state.agents.values_mut() {
+                agent.broker_session_id = new_id("stopped-session");
+                agent.broker_session_expires_at = 0;
+                invalidated_sessions += 1;
+            }
+        }
         self.state.emergency_stop = stopped;
         self.audit(
             "owner",
@@ -2851,9 +2859,13 @@ impl Treasury {
             None,
             None,
             Some("allowed"),
-            json!({ "stopped": stopped }),
+            json!({ "stopped": stopped, "invalidated_sessions": invalidated_sessions }),
         )?;
-        Ok(json!({ "emergency_stop": stopped, "pending_operations_resume_automatically": false }))
+        Ok(json!({
+            "emergency_stop": stopped,
+            "invalidated_sessions": invalidated_sessions,
+            "pending_operations_resume_automatically": false
+        }))
     }
 
     fn owner_set_agent_mode(
@@ -4892,6 +4904,45 @@ mod tests {
         let agent_token = owner_response["capability_token"].as_str().unwrap();
         assert!(
             treasury.handle(agent_token, Request::OwnerSetEmergencyStop { stopped: true }).is_err()
+        );
+    }
+
+    #[test]
+    fn emergency_stop_invalidates_pending_intents_and_spending_sessions() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (agent_id, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let intent = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("before-stop", 500) })
+            .unwrap();
+        let stopped = treasury
+            .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped: true })
+            .unwrap();
+        assert_eq!(stopped["invalidated_sessions"], 1);
+        treasury
+            .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped: false })
+            .unwrap();
+        treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerArmAgentSession { agent_id, ttl_secs: 300 },
+            )
+            .unwrap();
+        assert!(
+            treasury
+                .handle(
+                    &token,
+                    Request::ExecutePurchaseIntent {
+                        intent_id: intent["id"].as_str().unwrap().to_string(),
+                    },
+                )
+                .is_err()
         );
     }
 
