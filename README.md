@@ -239,7 +239,7 @@ Keep these rules in mind:
 - Treat agents and merchant pages as hostile input.
 - Never place real card details, account logins, owner tokens, agent tokens, or audit keys in prompts, source, logs, screenshots, traces, or MCP output.
 - A timeout after payment submission is ambiguous. Cixa records it for owner reconciliation and does not automatically retry.
-- The default provider stores an owner-controlled credential reference and masked metadata, not the card itself.
+- The manual provider stores an owner-controlled credential reference and masked metadata, not the card itself.
 - A compromised administrator, operating-system kernel, browser runtime, issuer, merchant, or owner is outside some guarantees.
 - Passing tests is useful evidence, not a security warranty.
 
