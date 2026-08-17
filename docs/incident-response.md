@@ -31,5 +31,4 @@ Use `declined` only when the provider confirms no charge. Use `refunded` only af
 
 ## Evidence and Recovery
 
-Export the sanitized owner audit log, verify its HMAC chain, hash the exact binary and lockfiles, and record the current policy version. Reconcile every reservation before resuming. Reduce the exposed issuer balance, review merchant allowlists and fulfillment profiles, rotate tokens, and rerun the full canonical verification before a later dry run.
-
+Export the sanitized owner audit log, verify its HMAC chain, hash the exact binary and lockfiles, and record the current policy version. Reconcile every reservation before resuming. Emergency stop invalidates every broker-issued spending session, so the owner must explicitly re-arm each recovered agent after clearing the stop; old intents remain bound to the invalidated session and cannot resume. Reduce the exposed issuer balance, review merchant allowlists and fulfillment profiles, rotate tokens, and rerun the full canonical verification before a later dry run.
