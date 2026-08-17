@@ -66,7 +66,32 @@ export function parseMinorUnits(value: string): number {
   return result;
 }
 
-function privateAddress(address: string): boolean {
+function ipv6Bytes(address: string): number[] | undefined {
+  const withoutZone = address.split("%", 1)[0].toLowerCase();
+  if (isIP(withoutZone) !== 6) return undefined;
+  let normalized = withoutZone;
+  const dottedIndex = normalized.lastIndexOf(":");
+  if (normalized.includes(".") && dottedIndex >= 0) {
+    const octets = normalized.slice(dottedIndex + 1).split(".").map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+      return undefined;
+    }
+    normalized = `${normalized.slice(0, dottedIndex)}:${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  }
+  const halves = normalized.split("::");
+  if (halves.length > 2) return undefined;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return undefined;
+  const groups = [...left, ...Array(missing).fill("0"), ...right].map((group) => Number.parseInt(group, 16));
+  if (groups.length !== 8 || groups.some((group) => !Number.isInteger(group) || group < 0 || group > 0xffff)) {
+    return undefined;
+  }
+  return groups.flatMap((group) => [group >> 8, group & 0xff]);
+}
+
+export function privateAddress(address: string): boolean {
   if (isIP(address) === 4) {
     const [a, b, c] = address.split(".").map(Number);
     return a === 0 || a === 10 || a === 127 || a >= 224 ||
@@ -76,11 +101,15 @@ function privateAddress(address: string): boolean {
       (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
       (a === 203 && b === 0 && c === 113);
   }
-  const normalized = address.toLowerCase();
-  if (normalized.startsWith("::ffff:")) return privateAddress(normalized.slice(7));
-  return normalized === "::" || normalized === "::1" || normalized.startsWith("fc") ||
-    normalized.startsWith("fd") || /^fe[89ab]/.test(normalized) ||
-    normalized.startsWith("ff") || normalized.startsWith("2001:db8:");
+  const bytes = ipv6Bytes(address);
+  if (!bytes) return false;
+  const mapped = bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+  if (mapped) return privateAddress(bytes.slice(12).join("."));
+  const unspecified = bytes.every((byte) => byte === 0);
+  const loopback = bytes.slice(0, 15).every((byte) => byte === 0) && bytes[15] === 1;
+  return unspecified || loopback || (bytes[0] & 0xfe) === 0xfc ||
+    (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) || bytes[0] === 0xff ||
+    (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x0d && bytes[3] === 0xb8);
 }
 
 async function resolvePublicHost(hostname: string): Promise<string> {

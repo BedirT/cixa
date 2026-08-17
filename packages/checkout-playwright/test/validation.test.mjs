@@ -3,10 +3,26 @@ import test from "node:test";
 import {
   observeAndValidate,
   parseMinorUnits,
+  privateAddress,
   processorFrameAllowed,
   requestOriginAllowed,
   validateConfiguration,
 } from "../dist/index.js";
+
+test("rejects private IPv4-mapped and canonical IPv6 destinations", () => {
+  for (const address of [
+    "::ffff:7f00:1",
+    "::ffff:a9fe:1",
+    "::ffff:c0a8:101",
+    "::ffff:c000:200",
+    "0:0:0:0:0:0:0:1",
+    "fe80::1",
+    "2001:db8::1",
+  ]) {
+    assert.equal(privateAddress(address), true, address);
+  }
+  assert.equal(privateAddress("2606:4700:4700::1111"), false);
+});
 
 const request = {
   final_total: { minor: 1234, currency: "CAD" },
