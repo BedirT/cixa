@@ -37,6 +37,10 @@ const MAX_PURCHASE_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_INTENTS: usize = 10_000;
 const MAX_INTENTS_PER_AGENT: usize = 2_000;
 const MAX_AUDIT_ENTRIES: usize = 100_000;
+const EMERGENCY_AUDIT_RESERVE: usize = 256;
+const MAX_AGENTS: usize = 16;
+const MAX_POLICY_BYTES: usize = 2 * 1024;
+const MAX_AGENT_APPROVED_MERCHANTS: usize = 8;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -117,7 +121,9 @@ fn bounded_bytes(value: &str, field: &str, max: usize) -> Result<()> {
 }
 
 fn audit_capacity_allows(length: usize, action: &str) -> bool {
-    length < MAX_AUDIT_ENTRIES || matches!(action, "emergency_stop_on" | "emergency_stop_off")
+    length < MAX_AUDIT_ENTRIES
+        || action == "emergency_stop_on"
+        || action == "emergency_stop_off" && length < MAX_AUDIT_ENTRIES + EMERGENCY_AUDIT_RESERVE
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -325,6 +331,9 @@ impl Policy {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if serde_json::to_vec(self)?.len() > MAX_POLICY_BYTES {
+            return Err(TreasuryError::Invalid("policy exceeds the 2048-byte limit".to_string()));
+        }
         Money::zero(&self.primary_currency)?;
         if self.reinvestment_ratio_bps > 10_000 {
             return Err(TreasuryError::Invalid(
@@ -1710,13 +1719,15 @@ impl Treasury {
         if self.state.schema_version != 2 {
             return Err(TreasuryError::Invalid("unsupported persisted state schema".to_string()));
         }
-        let invalid_audit_overflow =
-            self.state.audit.get(MAX_AUDIT_ENTRIES..).is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    !matches!(entry.action.as_str(), "emergency_stop_on" | "emergency_stop_off")
-                })
+        let audit_overflow = self.state.audit.get(MAX_AUDIT_ENTRIES..).unwrap_or_default();
+        let invalid_audit_overflow = audit_overflow.len() > EMERGENCY_AUDIT_RESERVE + 1
+            || audit_overflow.iter().any(|entry| {
+                !matches!(entry.action.as_str(), "emergency_stop_on" | "emergency_stop_off")
             });
-        if self.state.intents.len() > MAX_INTENTS || invalid_audit_overflow {
+        if self.state.intents.len() > MAX_INTENTS
+            || self.state.agents.len() > MAX_AGENTS
+            || invalid_audit_overflow
+        {
             return Err(TreasuryError::Invalid(
                 "persisted treasury exceeds its durable record quota".to_string(),
             ));
@@ -1740,6 +1751,11 @@ impl Treasury {
                 || agent.broker_session_expires_at > agent.expires_at
             {
                 return Err(TreasuryError::Invalid("persisted agent invariant failed".to_string()));
+            }
+            if agent.approved_merchants.len() > MAX_AGENT_APPROVED_MERCHANTS {
+                return Err(TreasuryError::Invalid(
+                    "agent merchant approvals exceed the durable limit".to_string(),
+                ));
             }
             for merchant in &agent.approved_merchants {
                 if canonicalize_domain(merchant)? != *merchant {
@@ -2420,20 +2436,7 @@ impl Treasury {
     }
 
     fn create_intent(&mut self, actor: &Actor, mut request: PurchaseRequest) -> Result<Value> {
-        if self.state.intents.len() >= MAX_INTENTS {
-            return Err(TreasuryError::Conflict(
-                "durable transaction quota reached; archive this treasury before continuing"
-                    .to_string(),
-            ));
-        }
         let agent_id = self.require_agent_scope(actor, "purchase_intents:create")?.to_string();
-        let agent_intent_count =
-            self.state.intents.values().filter(|intent| intent.agent_id == agent_id).count();
-        if agent_intent_count >= MAX_INTENTS_PER_AGENT {
-            return Err(TreasuryError::Conflict(
-                "agent durable transaction quota reached; owner rotation is required".to_string(),
-            ));
-        }
         let agent = self.agent(&agent_id)?.clone();
         request.merchant_domain = canonicalize_domain(&request.merchant_domain)?;
         request.redirect_chain = request
@@ -2449,6 +2452,19 @@ impl Treasury {
             }
             return Err(TreasuryError::Conflict(
                 "idempotency key is already bound to another request".to_string(),
+            ));
+        }
+        if self.state.intents.len() >= MAX_INTENTS {
+            return Err(TreasuryError::Conflict(
+                "durable transaction quota reached; archive this treasury before continuing"
+                    .to_string(),
+            ));
+        }
+        let agent_intent_count =
+            self.state.intents.values().filter(|intent| intent.agent_id == agent_id).count();
+        if agent_intent_count >= MAX_INTENTS_PER_AGENT {
+            return Err(TreasuryError::Conflict(
+                "agent durable transaction quota reached; owner rotation is required".to_string(),
             ));
         }
         let policy = self.policy(&agent.policy_id)?.clone();
@@ -2919,6 +2935,11 @@ impl Treasury {
         ttl_secs: i64,
     ) -> Result<Value> {
         Self::require_owner(actor)?;
+        if self.state.agents.len() >= MAX_AGENTS {
+            return Err(TreasuryError::Conflict(
+                "agent quota reached; revoke and rotate an existing agent".to_string(),
+            ));
+        }
         bounded(&name, "agent_name", 128)?;
         policy.validate()?;
         self.validate_policy_exposure(&policy)?;
@@ -2931,6 +2952,7 @@ impl Treasury {
         let agent_id = new_id("agent");
         policy.id = format!("policy_{agent_id}");
         policy.version = 1;
+        policy.validate()?;
         let policy_id = policy.id.clone();
         let session_ttl = ttl_secs.min(policy.card_session_ttl_secs);
         let session_expires_at = if self.state.emergency_stop { 0 } else { now() + session_ttl };
@@ -3034,6 +3056,7 @@ impl Treasury {
         let current = self.policy(&agent.policy_id)?.clone();
         policy.id = agent.policy_id.clone();
         policy.version = current.version + 1;
+        policy.validate()?;
         self.state.policies.insert(policy.clone().id.clone(), policy.clone());
         self.audit(
             "owner",
@@ -3050,6 +3073,13 @@ impl Treasury {
 
     fn owner_emergency_stop(&mut self, actor: &Actor, stopped: bool) -> Result<Value> {
         Self::require_owner(actor)?;
+        if self.state.emergency_stop == stopped {
+            return Ok(json!({
+                "emergency_stop": stopped,
+                "invalidated_sessions": 0,
+                "unchanged": true,
+            }));
+        }
         let mut invalidated_sessions = 0;
         if stopped && !self.state.emergency_stop {
             for agent in self.state.agents.values_mut() {
@@ -3245,12 +3275,22 @@ impl Treasury {
     ) -> Result<Value> {
         Self::require_owner(actor)?;
         let merchant = canonicalize_domain(merchant_domain)?;
-        self.state
+        let agent = self
+            .state
             .agents
             .get_mut(agent_id)
-            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?
-            .approved_merchants
-            .insert(merchant.clone());
+            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?;
+        if agent.approved_merchants.contains(&merchant) {
+            return Ok(
+                json!({ "agent_id": agent_id, "merchant_domain": merchant, "approved": true, "unchanged": true }),
+            );
+        }
+        if agent.approved_merchants.len() >= MAX_AGENT_APPROVED_MERCHANTS {
+            return Err(TreasuryError::Conflict(
+                "agent merchant-approval quota reached; update the policy instead".to_string(),
+            ));
+        }
+        agent.approved_merchants.insert(merchant.clone());
         self.audit(
             "owner",
             "approve_merchant",
@@ -5783,10 +5823,97 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_retry_survives_agent_quota() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_transactions_per_minute = 5_000;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::ApprovalRequired,
+        );
+        let purchase = request("stable-at-quota", 1);
+        let accepted = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: purchase.clone() })
+            .unwrap();
+        let template = treasury.state.intents.values().next().unwrap().clone();
+        for index in 1..MAX_INTENTS_PER_AGENT {
+            let mut intent = template.clone();
+            intent.id = format!("intent_quota_{index}");
+            intent.request.idempotency_key = format!("quota-{index}");
+            treasury.state.intents.insert(intent.id.clone(), intent);
+        }
+        let retried =
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).unwrap();
+        assert_eq!(retried["id"], accepted["id"]);
+        assert_eq!(treasury.state.intents.len(), MAX_INTENTS_PER_AGENT);
+    }
+
+    #[test]
+    fn agent_and_policy_bounds_keep_dashboard_response_bounded() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut oversized = Policy::conservative_demo().unwrap();
+        oversized.allowed_merchants =
+            (0..32).map(|index| format!("{index}-{}.example.test", "x".repeat(80))).collect();
+        assert!(oversized.validate().is_err());
+
+        for index in 0..MAX_AGENTS {
+            let created = treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: format!("bounded-agent-{index}"),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::Observe,
+                        ttl_secs: 3600,
+                    },
+                )
+                .unwrap();
+            let agent_id = created["agent_id"].as_str().unwrap();
+            for merchant in 0..MAX_AGENT_APPROVED_MERCHANTS {
+                treasury
+                    .handle(
+                        &bootstrap.owner_token,
+                        Request::OwnerApproveMerchant {
+                            agent_id: agent_id.to_string(),
+                            merchant_domain: format!("merchant-{index}-{merchant}.example.test"),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: "one-too-many".to_string(),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::Observe,
+                        ttl_secs: 3600,
+                    }
+                )
+                .is_err()
+        );
+        let dashboard =
+            treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
+        assert!(serde_json::to_vec(&dashboard).unwrap().len() < 256 * 1024);
+    }
+
+    #[test]
     fn emergency_stop_audit_is_never_blocked_by_the_ordinary_quota() {
         assert!(!audit_capacity_allows(MAX_AUDIT_ENTRIES, "update_policy"));
         assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, "emergency_stop_on"));
-        assert!(audit_capacity_allows(usize::MAX, "emergency_stop_off"));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, "emergency_stop_off"));
+        assert!(!audit_capacity_allows(
+            MAX_AUDIT_ENTRIES + EMERGENCY_AUDIT_RESERVE,
+            "emergency_stop_off"
+        ));
     }
 
     #[test]
