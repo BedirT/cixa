@@ -2,7 +2,7 @@ use cixa_domain::{
     API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money,
     OwnerHandoffTransport, Policy, ProviderOutcome, PurchaseItem, PurchaseRequest,
     ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider, SimulatedScenario,
-    SimulatedSecretProvider, Treasury, VolatileSecret, redact_sensitive,
+    SimulatedSecretProvider, Treasury, VolatileSecret, capability_fingerprint, redact_sensitive,
 };
 #[cfg(unix)]
 use cixa_domain::{
@@ -12,8 +12,8 @@ use cixa_domain::{
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -40,6 +40,7 @@ struct AgentAdmission {
 }
 
 struct AgentAdmissionState {
+    known_capabilities: HashSet<String>,
     entries: HashMap<u64, AgentAdmissionEntry>,
     window_started: Instant,
     requests: u32,
@@ -64,9 +65,10 @@ struct AgentCapabilityGuard {
 }
 
 impl AgentAdmission {
-    fn new() -> Self {
+    fn new(known_capabilities: Vec<String>) -> Self {
         Self {
             state: Mutex::new(AgentAdmissionState {
+                known_capabilities: known_capabilities.into_iter().collect(),
                 entries: HashMap::new(),
                 window_started: Instant::now(),
                 requests: 0,
@@ -74,6 +76,19 @@ impl AgentAdmission {
                 unauthenticated_window_started: Instant::now(),
                 unauthenticated_requests: 0,
             }),
+        }
+    }
+
+    fn is_known_capability(&self, token: &str) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.known_capabilities.contains(&capability_fingerprint(token)))
+    }
+
+    fn replace_known_capabilities(&self, fingerprints: Vec<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.known_capabilities = fingerprints.into_iter().collect();
+            state.entries.retain(|_, entry| entry.in_flight);
         }
     }
 
@@ -139,6 +154,15 @@ impl AgentAdmission {
         entry.in_flight = true;
         entry.requests += 1;
         Some(AgentCapabilityGuard { admission: Arc::clone(self), fingerprint })
+    }
+
+    fn admit_authenticated(
+        self: &Arc<Self>,
+        token: &str,
+    ) -> Option<(AgentChannelGuard, AgentCapabilityGuard)> {
+        let channel = self.admit_channel()?;
+        let capability = self.admit_capability(token)?;
+        Some((channel, capability))
     }
 }
 
@@ -800,7 +824,7 @@ mod process_identity_tests {
 
     #[test]
     fn agent_admission_allows_only_one_in_flight_request_per_capability() {
-        let admission = Arc::new(AgentAdmission::new());
+        let admission = Arc::new(AgentAdmission::new(Vec::new()));
         let first = admission.admit_capability("agent-capability").expect("first request admitted");
         assert!(admission.admit_capability("agent-capability").is_none());
         assert!(admission.admit_capability("different-capability").is_some());
@@ -815,13 +839,25 @@ mod process_identity_tests {
 
     #[test]
     fn unauthenticated_channel_admission_cannot_fill_capability_entries() {
-        let admission = Arc::new(AgentAdmission::new());
+        let token = "authenticated-capability";
+        let admission = Arc::new(AgentAdmission::new(vec![capability_fingerprint(token)]));
         for _ in 0..MAX_AGENT_ADMISSION_ENTRIES {
             admission.admit_unauthenticated();
         }
         assert!(admission.state.lock().unwrap().entries.is_empty());
+        assert!(admission.is_known_capability(token));
         assert!(admission.admit_channel().is_some());
-        assert!(admission.admit_capability("authenticated-capability").is_some());
+        assert!(admission.admit_capability(token).is_some());
+    }
+
+    #[test]
+    fn authenticated_forbidden_requests_consume_capability_admission() {
+        let token = "authenticated-capability";
+        let admission = Arc::new(AgentAdmission::new(vec![capability_fingerprint(token)]));
+        for _ in 0..MAX_AGENT_REQUESTS_PER_SECOND {
+            drop(admission.admit_authenticated(token).unwrap());
+        }
+        assert!(admission.admit_authenticated(token).is_none());
     }
 
     #[test]
@@ -1656,8 +1692,9 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
     }
+    let agent_admission =
+        Arc::new(AgentAdmission::new(treasury.active_agent_capability_fingerprints()));
     let state = Arc::new(Mutex::new(treasury));
-    let agent_admission = Arc::new(AgentAdmission::new());
     let agent_listener = bind_private_socket(&agent_socket)?;
     let owner_listener = bind_private_socket(&owner_socket)?;
     if let Some(gid) = agent_gid {
@@ -1670,6 +1707,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     eprintln!("Cixa owner control listening on {}", owner_socket.display());
     let owner_state = Arc::clone(&state);
     let owner_directory = directory.clone();
+    let owner_admission = Arc::clone(&agent_admission);
     std::thread::spawn(move || {
         serve_listener(
             owner_listener,
@@ -1678,7 +1716,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
             true,
             MAX_OWNER_CONNECTIONS,
             false,
-            None,
+            Some(owner_admission),
         )
     });
     serve_listener(
@@ -1833,17 +1871,17 @@ fn handle_connection(
                     if !treasury.is_owner_token(&request.token) {
                         rejected_rpc(&request, "owner control authentication failed")
                     } else {
-                        treasury.handle_rpc_persisted(request, &directory)
+                        let response = treasury.handle_rpc_persisted(request, &directory);
+                        if let Some(admission) = agent_admission.as_ref() {
+                            admission.replace_known_capabilities(
+                                treasury.active_agent_capability_fingerprints(),
+                            );
+                        }
+                        response
                     }
-                } else {
-                    let authenticated = state
-                        .lock()
-                        .map_err(|_| "broker state lock poisoned")?
-                        .is_active_agent_token(&request.token);
-                    if !authenticated {
-                        let admitted = agent_admission
-                            .as_ref()
-                            .is_some_and(|admission| admission.admit_unauthenticated());
+                } else if let Some(admission) = agent_admission.as_ref() {
+                    if !admission.is_known_capability(&request.token) {
+                        let admitted = admission.admit_unauthenticated();
                         rejected_rpc(
                             &request,
                             if admitted {
@@ -1852,23 +1890,25 @@ fn handle_connection(
                                 "unauthenticated agent request limit exceeded"
                             },
                         )
-                    } else if request.operation.requires_owner() {
-                        rejected_rpc(&request, "owner operations require the owner control socket")
-                    } else if let Some(admission) = agent_admission.as_ref() {
-                        match (
-                            admission.admit_channel(),
-                            admission.admit_capability(&request.token),
-                        ) {
-                            (Some(_channel_guard), Some(_capability_guard)) => {
-                                let mut treasury =
-                                    state.lock().map_err(|_| "broker state lock poisoned")?;
-                                treasury.handle_rpc_persisted(request, &directory)
-                            }
-                            _ => rejected_rpc(&request, "agent request limit exceeded"),
-                        }
                     } else {
-                        rejected_rpc(&request, "agent admission is unavailable")
+                        match admission.admit_authenticated(&request.token) {
+                            Some((_channel_guard, _capability_guard)) => {
+                                if request.operation.requires_owner() {
+                                    rejected_rpc(
+                                        &request,
+                                        "owner operations require the owner control socket",
+                                    )
+                                } else {
+                                    let mut treasury =
+                                        state.lock().map_err(|_| "broker state lock poisoned")?;
+                                    treasury.handle_rpc_persisted(request, &directory)
+                                }
+                            }
+                            None => rejected_rpc(&request, "agent request limit exceeded"),
+                        }
                     }
+                } else {
+                    rejected_rpc(&request, "agent admission is unavailable")
                 }
             }
             Err(error) => RpcResponse {

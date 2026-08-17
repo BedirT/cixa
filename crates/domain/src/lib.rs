@@ -101,6 +101,10 @@ fn token_hash(token: &str) -> String {
     hex::encode(digest.finalize())
 }
 
+pub fn capability_fingerprint(token: &str) -> String {
+    token_hash(token)
+}
+
 fn hmac_hash(key: &[u8], value: &Value) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts every non-empty key");
     mac.update(value.to_string().as_bytes());
@@ -1515,8 +1519,14 @@ impl Treasury {
         self.state.owner.capability_token_hash == token_hash(token)
     }
 
-    pub fn is_active_agent_token(&self, token: &str) -> bool {
-        matches!(self.authenticate(token), Ok(Actor::Agent(_)))
+    pub fn active_agent_capability_fingerprints(&self) -> Vec<String> {
+        let at = now();
+        self.state
+            .agents
+            .values()
+            .filter(|agent| !agent.revoked && agent.expires_at > at)
+            .map(|agent| agent.capability_token_hash.clone())
+            .collect()
     }
 
     pub fn bind_approved_secret_operation(
