@@ -90,7 +90,11 @@ try {
   const dialog = page.locator("#action-dialog");
   await dialog.getByLabel("Name", {exact:true}).fill("Research Runner");
   await dialog.getByLabel("Token filename", {exact:true}).fill("research-runner.token");
-  await dialog.locator("select").selectOption("approval_required");
+  await dialog.getByRole("button", {name:"Starting mode: Approval Required"}).click();
+  const startingModeMenu=dialog.getByRole("listbox", {name:"Starting mode options"});
+  await startingModeMenu.waitFor();
+  await startingModeMenu.getByRole("option", {name:"Bounded Autonomous"}).waitFor();
+  await startingModeMenu.getByRole("option", {name:"Approval Required"}).click();
   await dialog.getByRole("button", {name:"Create agent"}).click();
   await page.getByRole("heading", {name:"Research Runner"}).waitFor();
   const agentToken = (await readFile(join(directory,"agent-tokens","research-runner.token"),"utf8")).trim();
@@ -120,7 +124,7 @@ try {
   await depositForm.getByLabel("Source").fill("Verified browser invoice");
   await depositForm.getByLabel("Provider reference").fill("browser-deposit-2");
   await depositForm.getByLabel("I checked the provider's own record").check();
-  await depositForm.getByLabel("Credit to agent").selectOption(agentId);
+  await depositForm.locator('select[name="agent_id"]').selectOption(agentId);
   await depositForm.getByRole("button", {name:"Record arrival"}).click();
   await dialog.getByRole("button", {name:"Record verified arrival"}).click();
   await dialog.waitFor({state:"hidden"});
@@ -184,7 +188,17 @@ try {
 
   await page.getByRole("link", {name:"Agents"}).first().click();
   await rpc(ownerSocket,ownerToken,{type:"owner_set_emergency_stop",stopped:true});await rpc(ownerSocket,ownerToken,{type:"owner_set_emergency_stop",stopped:false});await page.getByRole("button",{name:"Refresh"}).click();await page.getByRole("button",{name:"Let it spend"}).click();await dialog.getByRole("button",{name:"Let it spend"}).click();await page.getByText("Active",{exact:true}).waitFor();
-  await page.getByRole("button", {name:/Open Research runner settings/i}).click();
+  const researchCard=page.locator(".agent-card").filter({hasText:"Research Runner"});
+  await researchCard.locator(".fact-list").click();
+  await page.locator("#detail-drawer").getByRole("heading", {name:"Research Runner",exact:true}).waitFor();
+  const authorityMode=page.getByRole("button",{name:"Mode: Approval Required"});
+  await authorityMode.focus();await page.keyboard.press("ArrowDown");
+  const authorityMenu=page.getByRole("listbox",{name:"Mode options"});await authorityMenu.waitFor();
+  const menuBox=await authorityMenu.boundingBox();const saveBox=await page.getByRole("button",{name:"Save mode"}).boundingBox();assert.equal(menuBox.y+menuBox.height<saveBox.y,true);
+  await page.locator("#toast-region").evaluate((region)=>region.replaceChildren());
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-authority-menu.png"),fullPage:false});
+  await page.setViewportSize({width:390,height:844});const mobileMenuBox=await authorityMenu.boundingBox();assert.equal(mobileMenuBox.x>=0&&mobileMenuBox.x+mobileMenuBox.width<=390,true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-authority-menu-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
+  await page.keyboard.press("Escape");assert.equal(await authorityMenu.isHidden(),true);assert.equal(await page.locator("#detail-drawer").getByRole("heading",{name:"Research Runner",exact:true}).isVisible(),true);
   await page.getByPlaceholder("merchant.example.test").fill("trusted.example.test");
   await page.getByRole("button", {name:"Trust merchant"}).click();
   await dialog.getByRole("button", {name:"Trust merchant"}).click();
@@ -196,6 +210,11 @@ try {
   await page.locator("#agent-list").getByText("Paused", {exact:true}).waitFor();
   await page.getByRole("button", {name:/Open Research runner settings/i}).click();
   await page.getByRole("button", {name:"Edit policy"}).click();
+  const recurringCheckbox=dialog.getByLabel("Allow recurring charges",{exact:true});const recurringRow=recurringCheckbox.locator("xpath=..");
+  const checkboxStyle=await recurringRow.evaluate((element)=>({radius:getComputedStyle(element).borderRadius,box:getComputedStyle(element,"::before").width}));assert.equal(checkboxStyle.radius,"15px");assert.equal(checkboxStyle.box,"22px");
+  await recurringCheckbox.check();assert.equal(await recurringCheckbox.isChecked(),true);await recurringCheckbox.uncheck();
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-policy-checkboxes.png"),fullPage:false});
+  await page.setViewportSize({width:390,height:844});assert.equal(await dialog.locator(".dialog-card").evaluate((card)=>card.scrollWidth<=card.clientWidth),true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-policy-checkboxes-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
   await dialog.getByLabel("Most per purchase").fill("20.00");
   await dialog.getByRole("button", {name:"Save policy"}).click();
   await page.getByRole("button", {name:/Open Research runner settings/i}).click();

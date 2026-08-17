@@ -29,6 +29,42 @@ function svgIcon(symbolId) {
 }
 function replace(target, children) { target.replaceChildren(...[].concat(children)); }
 function title(value) { return String(value ?? "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
+function selectLabel(select) {
+  const label=select.closest("label");
+  if(!label)return select.getAttribute("aria-label")??title(select.name||"Selection");
+  const parts=[];for(const child of label.childNodes){if(child===select||child.classList?.contains("custom-select"))break;if(child.textContent?.trim())parts.push(child.textContent.trim());}
+  return parts.join(" ")||title(select.name||"Selection");
+}
+function closeSelect(wrapper, restoreFocus=false) {
+  if(!wrapper?.classList.contains("open"))return;
+  wrapper.classList.remove("open");wrapper.querySelector(".select-trigger").setAttribute("aria-expanded","false");wrapper.querySelector(".select-menu").hidden=true;
+  if(restoreFocus)wrapper.querySelector(".select-trigger").focus();
+}
+function closeOtherSelects(except) { $$(".custom-select.open").filter((item)=>item!==except).forEach((item)=>closeSelect(item)); }
+function syncSelect(select) {
+  const wrapper=select.closest(".custom-select");if(!wrapper)return;
+  const trigger=wrapper.querySelector(".select-trigger");const menu=wrapper.querySelector(".select-menu");const label=wrapper.dataset.label;const selected=select.selectedOptions[0];
+  trigger.textContent=selected?.textContent??"Choose an option";trigger.disabled=select.disabled;trigger.setAttribute("aria-label",`${label}: ${trigger.textContent}`);
+  replace(menu,[...select.options].map((option,index)=>node("button",{
+    type:"button",class:"select-option",text:option.textContent,disabled:option.disabled,
+    attrs:{role:"option","aria-selected":String(option.selected)},
+    onclick:()=>{select.selectedIndex=index;select.dispatchEvent(new Event("change",{bubbles:true}));closeSelect(wrapper,true);},
+    onkeydown:(event)=>{
+      const options=[...menu.querySelectorAll('.select-option:not([disabled])')];const current=options.indexOf(event.currentTarget);
+      if(event.key==="Escape"){event.preventDefault();event.stopPropagation();closeSelect(wrapper,true);}
+      else if(["ArrowDown","ArrowUp","Home","End"].includes(event.key)){event.preventDefault();const next=event.key==="Home"?0:event.key==="End"?options.length-1:(current+(event.key==="ArrowDown"?1:-1)+options.length)%options.length;options[next]?.focus();}
+    },
+  })));
+}
+function enhanceSelect(select) {
+  if(select.closest(".custom-select")){syncSelect(select);return;}
+  const label=selectLabel(select);const wrapper=node("span",{class:"custom-select",dataset:{label}});const trigger=node("button",{type:"button",class:"select-trigger",attrs:{"aria-haspopup":"listbox","aria-expanded":"false"}});const menu=node("span",{class:"select-menu",attrs:{role:"listbox","aria-label":`${label} options`}});menu.hidden=true;
+  select.before(wrapper);wrapper.append(select,trigger,menu);select.classList.add("native-select");select.tabIndex=-1;select.setAttribute("aria-hidden","true");
+  trigger.addEventListener("click",()=>{const opening=!wrapper.classList.contains("open");closeOtherSelects(wrapper);wrapper.classList.toggle("open",opening);trigger.setAttribute("aria-expanded",String(opening));menu.hidden=!opening;if(opening){syncSelect(select);menu.querySelector('[aria-selected="true"]')?.focus();}});
+  trigger.addEventListener("keydown",(event)=>{if(event.key==="Escape"&&wrapper.classList.contains("open")){event.preventDefault();event.stopPropagation();closeSelect(wrapper,true);}else if(["ArrowDown","ArrowUp"].includes(event.key)&&!wrapper.classList.contains("open")){event.preventDefault();trigger.click();}});
+  wrapper.addEventListener("focusout",(event)=>{if(!wrapper.contains(event.relatedTarget))closeSelect(wrapper);});select.addEventListener("change",()=>syncSelect(select));syncSelect(select);
+}
+function enhanceSelects(root=document) { root.querySelectorAll("select").forEach(enhanceSelect); }
 function money(value) {
   if (!value || !Number.isSafeInteger(value.minor) || typeof value.currency !== "string") return "Unavailable";
   try { return new Intl.NumberFormat(undefined, { style: "currency", currency: value.currency }).format(value.minor / 100); }
@@ -190,7 +226,7 @@ function renderAgents() {
   const agents = state.overview.agents; replace($("#agent-list"), agents.length ? agents.map(agentCard) : empty("No agents yet. Create one to issue a scoped capability."));
   const depositAgent = $("#deposit-agent"); const selected = depositAgent.value;
   replace(depositAgent, [node("option", { value:"", text:"No agent" }), ...agents.filter((agent) => !agent.revoked).map((agent) => node("option", { value:agent.id, text:agent.name }))]);
-  depositAgent.value = selected;
+  depositAgent.value = selected; syncSelect(depositAgent);
 }
 function agentDescription(mode) {
   return ({ bounded_autonomous:"Spends quietly inside its standing limits", approval_required:"Asks before spending when your decision is needed", observe:"Reads only, never buys", disabled:"Spending is paused" })[mode] ?? "Works inside the boundaries you set";
@@ -221,7 +257,7 @@ function agentCard(agent) {
   const identity=node("button",{type:"button",class:"agent-identity",onclick:()=>openAgent(agent),attrs:{"aria-label":`Open ${agent.name} settings`}},[avatar,node("span",{class:"agent-copy"},[node("h2",{text:agent.name}),node("span",{class:"agent-subtitle",text:agentDescription(agent.mode)})])]);
   const allowance=button("Halve today's allowance","quiet-button agent-halve",()=>halveAgentAllowance(agent,policy));
   const toggle=button(active?"Pause spending":"Let it spend",active?"secondary-button agent-toggle":"quiet-button agent-toggle",()=>active?setAgentMode(agent,"disabled"):restoreAgentSpending(agent,sessionExpired,sessionTtl));
-  return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [identity,node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"agent-spend" }, [node("div", { class:"progress-row" }, [node("span", { text:"Used in the last 24 hours" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } })]), node("div", { class:"fact-list" }, [fact("Most it may spend at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session ends", sessionExpired ? "Not armed" : when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [allowance,toggle])]);
+  return node("article", { class:"agent-card",onclick:(event)=>{if(!event.target.closest("button,a,input,select,label"))openAgent(agent);} }, [node("div", { class:"agent-head" }, [identity,node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"agent-spend" }, [node("div", { class:"progress-row" }, [node("span", { text:"Used in the last 24 hours" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } })]), node("div", { class:"fact-list" }, [fact("Most it may spend at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session ends", sessionExpired ? "Not armed" : when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [allowance,toggle])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
 function renderTrust() {
@@ -235,7 +271,7 @@ function renderTrust() {
     replace($("#audit-list"), state.audit.entries.length ? state.audit.entries.map((entry) => node("article", { class:"audit-entry" }, [node("h3", { text:title(entry.action) }), node("p", { text:`${entry.actor} · ${when(entry.at)}${entry.intent_id ? ` · ${entry.intent_id}` : ""}` }), node("details", {}, [node("summary", { text:"Technical evidence" }), node("p", { text:`Sequence ${entry.sequence} · hash ${entry.hash} · previous ${entry.previous_hash}` }), node("pre", { text:JSON.stringify(entry.details, null, 2) })])])) : empty("No audit events yet."));
     $("#audit-load-more").hidden = !state.auditCursor;
   }
-  const instructions = state.overview.receive_instructions; if (instructions) { const form = $("#receive-form"); form.elements.method.value = instructions.method; form.elements.address.value = instructions.address; form.elements.memo_template.value = instructions.memo_template; }
+  const instructions = state.overview.receive_instructions; if (instructions) { const form = $("#receive-form"); form.elements.method.value = instructions.method; syncSelect(form.elements.method); form.elements.address.value = instructions.address; form.elements.memo_template.value = instructions.memo_template; }
 }
 
 function navigate() {
@@ -246,7 +282,7 @@ function navigate() {
 }
 function selectTrust(tab) { $$('[data-trust-tab]').forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.trustTab === tab))); $$('[data-trust-panel]').forEach((panel) => panel.hidden = panel.dataset.trustPanel !== tab); }
 function closeDrawer() { const drawer=$("#detail-drawer"); drawer.classList.remove("open");drawer.setAttribute("aria-hidden","true"); document.body.classList.remove("drawer-open"); $(".app-shell").inert=false; $(".mobile-nav").inert=false; state.lastFocus?.focus(); }
-function openDrawer(content) { state.lastFocus=document.activeElement; replace($("#drawer-content"),content); const drawer=$("#detail-drawer");drawer.classList.add("open");drawer.setAttribute("aria-hidden","false");document.body.classList.add("drawer-open");$(".app-shell").inert=true;$(".mobile-nav").inert=true;$(".drawer-close").focus(); }
+function openDrawer(content) { state.lastFocus=document.activeElement; replace($("#drawer-content"),content);enhanceSelects($("#drawer-content")); const drawer=$("#detail-drawer");drawer.classList.add("open");drawer.setAttribute("aria-hidden","false");document.body.classList.add("drawer-open");$(".app-shell").inert=true;$(".mobile-nav").inert=true;$(".drawer-close").focus(); }
 function detailSection(heading, contents) { return node("section", { class:"drawer-section" }, [node("h3", { text:heading }), ...[].concat(contents)]); }
 async function openIntent(summary) {
   let intent = summary; let receipt = null;
@@ -309,7 +345,7 @@ function openReconcile(intent) {
   confirmAction({title:"What did the provider say?",copy:"Check the provider's own app or website. Leaving this unresolved is safer than guessing.",facts:[["Amount",money(intent.amount)],["Merchant",intent.merchant_domain],["Attempted",when(intent.updated_at)]],custom:[node("div",{class:"dialog-fields"},[node("label",{},["Outcome",outcome]),node("label",{},["Provider reference",reference])])],label:"Record outcome",action:()=>post("/api/reconcile",{intent_id:intent.id,outcome:outcome.value,provider_reference:reference.value.trim()},"Provider outcome recorded.")});
 }
 function confirmAction({title:heading,copy,facts=[],custom=[],label,danger=false,action}) {
-  state.dialogAction=action; state.lastFocus=document.activeElement; $("#dialog-title").textContent=heading; const contents=[node("p",{text:copy})]; if(facts.length)contents.push(node("div",{class:"fact-list"},facts.map(([key,value])=>fact(key,value)))); contents.push(...custom);replace($("#dialog-body"),contents);const confirm=$("#dialog-confirm");confirm.textContent=label;confirm.className=danger?"secondary-button":"primary-button";$("#action-dialog").showModal();
+  state.dialogAction=action; state.lastFocus=document.activeElement; $("#dialog-title").textContent=heading; const contents=[node("p",{text:copy})]; if(facts.length)contents.push(node("div",{class:"fact-list"},facts.map(([key,value])=>fact(key,value)))); contents.push(...custom);replace($("#dialog-body"),contents);enhanceSelects($("#dialog-body"));const confirm=$("#dialog-confirm");confirm.textContent=label;confirm.className=danger?"secondary-button":"primary-button";$("#action-dialog").showModal();
 }
 async function exportAudit(){const value=await api("/api/export");const blob=new Blob([JSON.stringify(value,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const link=node("a",{href:url,download:"cixa-sanitized-export.json"});link.click();window.setTimeout(()=>URL.revokeObjectURL(url),0);toast("Sanitized audit export prepared.");}
 
@@ -320,7 +356,8 @@ $("#ledger-load-more").addEventListener("click",()=>loadLedger().catch((error)=>
 $("#audit-load-more").addEventListener("click",()=>loadAudit().catch((error)=>toast(error.message,true)));
 $$('[data-trust-tab]').forEach((buttonItem)=>buttonItem.addEventListener("click",()=>selectTrust(buttonItem.dataset.trustTab)));
 $$('[data-close-drawer]').forEach((item)=>item.addEventListener("click",closeDrawer));
-document.addEventListener("keydown",(event)=>{const drawer=$("#detail-drawer");if(!drawer.classList.contains("open"))return;if(event.key==="Escape")closeDrawer();if(event.key==="Tab"){const focusable=$$("#detail-drawer button:not([disabled]),#detail-drawer input:not([disabled]),#detail-drawer select:not([disabled]),#detail-drawer a[href]").filter((item)=>item.offsetParent!==null);if(!focusable.length)return;const first=focusable[0],last=focusable.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+document.addEventListener("keydown",(event)=>{const drawer=$("#detail-drawer");if(!drawer.classList.contains("open"))return;if(event.key==="Escape")closeDrawer();if(event.key==="Tab"){const focusable=$$("#detail-drawer button:not([disabled]),#detail-drawer input:not([disabled]),#detail-drawer select:not([disabled]):not(.native-select),#detail-drawer a[href]").filter((item)=>item.offsetParent!==null);if(!focusable.length)return;const first=focusable[0],last=focusable.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+document.addEventListener("pointerdown",(event)=>{$$(".custom-select.open").filter((item)=>!item.contains(event.target)).forEach((item)=>closeSelect(item));});
 $("#action-dialog").addEventListener("close",()=>{state.dialogAction=null;state.lastFocus?.focus();});
 $("#dialog-form").addEventListener("submit",async(event)=>{if(event.submitter?.value!=="confirm")return;event.preventDefault();if(!event.currentTarget.reportValidity())return;const action=state.dialogAction;try{await action?.();$("#action-dialog").close();}catch{}});
 $("#emergency-stop-button").addEventListener("click",()=>confirmAction({title:"Stop all spending?",copy:"Every agent stops buying immediately. Requests already invalidated will not restart later.",label:"Stop all spending",danger:true,action:()=>post("/api/emergency-stop",{stopped:true},"Spending stopped.")}));
@@ -333,6 +370,7 @@ $("#receive-form").addEventListener("submit",(event)=>{event.preventDefault();co
 $("#deposit-form").addEventListener("submit",(event)=>{event.preventDefault();const form=new FormData(event.currentTarget);const verified=form.get("verified")==="on";confirmAction({title:verified?"Confirm this money arrived?":"Record this as unverified?",copy:verified?"You are asserting that the provider's own record shows this money cleared. It may increase the linked agent's spending authority.":"Cixa will keep this arrival outside spending authority until an owner verifies it.",label:verified?"Record verified arrival":"Keep unverified",action:()=>post("/api/deposits/record",{amount:{minor:Math.round(Number(form.get("amount"))*100),currency:String(form.get("currency")).toUpperCase()},source:String(form.get("source")),verified,agent_id:String(form.get("agent_id"))||null,external_reference:String(form.get("external_reference"))},verified?"Verified arrival recorded.":"Unverified arrival recorded and kept outside spending authority.")});});
 $("#theme-button").addEventListener("click",()=>{const dark=document.documentElement.dataset.theme!=="dark";document.documentElement.dataset.theme=dark?"dark":"light";localStorage.setItem("cixa-theme",dark?"dark":"light");$("#theme-button").setAttribute("aria-label",dark?"Use light theme":"Use dark theme");});
 if(localStorage.getItem("cixa-theme")==="dark") { document.documentElement.dataset.theme="dark"; $("#theme-button").setAttribute("aria-label", "Use light theme"); }
+enhanceSelects();
 navigate();
 $("#unlock-form").addEventListener("submit",async(event)=>{event.preventDefault();const token=$("#unlock-token").value;$("#unlock-error").textContent="";try{const response=await fetch("/api/session",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({access_token:token})});if(!response.ok)throw new Error("That access token was not accepted.");$("#unlock-token").value="";readCsrf();$("#unlock-dialog").close();await refresh();}catch(error){$("#unlock-error").textContent=error.message;}});
 if (csrf) refresh().catch((error)=>{if(error.message.includes("session required")){$("#unlock-dialog").showModal();$("#unlock-token").focus();return;}$("#connection-label").textContent="Cixa is offline";$("#watch-copy").textContent="The local broker did not answer.";toast(error.message,true);});
