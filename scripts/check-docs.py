@@ -25,6 +25,7 @@ REQUIRED = [
     "docs/coverage.md",
     "docs/deployment.md",
     "docs/koho-setup.md",
+    "docs/owner-console-plan.md",
     "docs/adr/0001-core-boundary.md",
     "docs/adr/0002-secret-handling.md",
     "docs/adr/0003-checkout-trust.md",
