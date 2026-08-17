@@ -74,6 +74,7 @@ PYTHONPATH="$ROOT/packages/sdk-python" python3 tests/integration.py
 python3 tests/handoff.py
 printf '%s\n' '[10/14] Owner dashboard integration'
 python3 tests/dashboard.py
+node tests/dashboard-ui.mjs
 printf '%s\n' '[11/14] Adversarial demo'
 python3 tests/adversarial.py
 printf '%s\n' '[12/14] Documentation and supply chain'

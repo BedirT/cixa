@@ -37,19 +37,60 @@ The demo walks through a valid bounded purchase, duplicate protection, over-budg
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/assets/owner-dashboard.png" alt="Cixa owner dashboard showing local controls and provider status">
+      <img src="docs/assets/owner-dashboard.png" alt="Cixa owner console showing two purchase decisions and local provider evidence">
     </td>
     <td width="50%">
       <img src="docs/assets/checkout-lab.png" alt="Cixa hostile checkout laboratory used for local security tests">
     </td>
   </tr>
   <tr>
-    <td align="center"><sub>Owner-only dashboard on loopback</sub></td>
+    <td align="center"><sub>The real owner console, running against a local broker</sub></td>
     <td align="center"><sub>Hostile local checkout fixture</sub></td>
   </tr>
 </table>
 
 Both screens are local test surfaces. The dashboard loads no CDN assets, analytics, or third-party scripts, and the checkout lab never accepts real payment details.
+
+## Meet The Owner Console
+
+The console is where a person stays in charge. It is not an admin dashboard full of decorative charts. It is the useful bit between an agent asking to spend and money actually moving.
+
+- **Today** keeps decisions, uncertain provider outcomes, and the emergency stop in one place.
+- **Ledger** shows every attempt, including purchases Cixa stopped or could not safely confirm.
+- **Agents** is where you create and revoke capabilities, pause spending, arm short sessions, trust a merchant, and edit limits.
+- **Trust** explains the local security boundary and holds provider references, receiving instructions, verified or unverified arrivals, and the tamper-evident audit trail.
+
+Purchase details show what Cixa checked without dumping raw JSON into the main workflow. A one-time approval never silently turns into permanent merchant trust, and an unknown payment offers reconciliation rather than a retry button.
+
+<p align="center">
+  <img src="docs/assets/owner-dashboard-mobile.png" width="390" alt="Cixa owner console on a narrow mobile viewport">
+</p>
+
+The mobile layout keeps monitoring, decisions, reconciliation, and the stop control close at hand. Policy editing still works there, but it is more comfortable on a larger screen.
+
+### Run It Locally
+
+Start the persisted broker first, then make a separate password for the browser console:
+
+```bash
+mkdir -p .local
+umask 077
+openssl rand -hex 24 > .local/dashboard.token
+
+target/debug/cixa serve --data-dir .local
+```
+
+In another terminal:
+
+```bash
+python3 apps/owner-dashboard/server.py \
+  --socket-path .local/owner.sock \
+  --owner-token-file .local/owner.token \
+  --access-token-file .local/dashboard.token \
+  --port 8765
+```
+
+Open `http://127.0.0.1:8765`. The browser will ask for HTTP Basic credentials. Use `owner` as the username and the contents of `.local/dashboard.token` as the password. The console binds to loopback, requires an authenticated session plus CSRF and Origin checks for changes, and keeps the browser password separate from the broker owner token.
 
 ## What Cixa Actually Does
 

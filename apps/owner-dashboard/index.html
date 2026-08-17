@@ -3,85 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cixa owner dashboard</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Cixa owner console</title>
+  <link rel="icon" href="/cixa-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="hero">
-    <p class="eyebrow">Local owner control</p>
-    <h1>Cixa</h1>
-    <p class="tagline">The fortress between your agents and real money.</p>
-  </header>
-  <p class="warning"><strong>Owner control:</strong> emergency stop is immediate for new spending. Pending or ambiguous payments never resume automatically.</p>
-  <p class="primary-actions"><button id="stop" type="button">Emergency stop</button> <button id="resume" type="button">Resume new spending</button></p>
-  <p id="verification" class="verification">Loading provider verification status...</p>
-  <p id="unsafe" class="unsafe" hidden></p>
-
-  <nav>
-    <button class="refresh" type="button">Refresh overview</button>
-    <button id="export" type="button">Sanitized audit export</button>
-  </nav>
-  <h2>Owner Overview</h2>
-  <pre id="status">Loading...</pre>
-
-  <h2>Agent Management</h2>
-  <form data-endpoint="/api/agents/create">
-    <label>Create agent JSON<textarea>{"name":"dashboard-agent","token_filename":"dashboard-agent.token","policy":{},"mode":"approval_required","ttl_secs":3600}</textarea></label>
-    <button type="submit">Create agent</button>
-  </form>
-  <form data-endpoint="/api/agents/revoke">
-    <label>Revoke agent JSON<textarea>{"agent_id":"agent_id"}</textarea></label>
-    <button type="submit">Revoke agent</button>
-  </form>
-  <form data-endpoint="/api/agents/mode">
-    <label>Pause or change mode JSON<textarea>{"agent_id":"agent_id","mode":"disabled"}</textarea></label>
-    <button type="submit">Set mode</button>
-  </form>
-  <form data-endpoint="/api/agents/arm-session">
-    <label>Arm session JSON<textarea>{"agent_id":"agent_id","ttl_secs":600}</textarea></label>
-    <button type="submit">Arm session</button>
-  </form>
-
-  <h2>Policy And Merchant Trust</h2>
-  <form data-endpoint="/api/policies/update">
-    <label>Versioned policy update JSON<textarea>{"agent_id":"agent_id","policy":{}}</textarea></label>
-    <button type="submit">Update policy</button>
-  </form>
-  <form data-endpoint="/api/merchants/approve">
-    <label>Durable merchant approval JSON<textarea>{"agent_id":"agent_id","merchant_domain":"merchant.example.test"}</textarea></label>
-    <button type="submit">Approve merchant</button>
-  </form>
-
-  <h2>Pending Approvals And Reconciliation</h2>
-  <form data-endpoint="/api/approvals/approve">
-    <label>Approve immutable intent JSON<textarea>{"intent_id":"intent_id"}</textarea></label>
-    <button type="submit">Approve intent</button>
-  </form>
-  <form data-endpoint="/api/reconcile">
-    <label>Reconcile ambiguous transaction JSON<textarea>{"intent_id":"intent_id","outcome":"settled","provider_reference":"owner-verified-reference"}</textarea></label>
-    <button type="submit">Reconcile</button>
-  </form>
-
-  <h2>Provider And Receiving Setup</h2>
-  <p class="unsafe">Experimental manual provider mode never submits card details. It requires owner handoff and reconciliation. Never enter PAN or CVV here.</p>
-  <form data-endpoint="/api/provider/manual">
-    <label>Manual provider JSON<textarea>{"credential_reference":"keychain://cixa/card","provider_kind":"os-credential-store","last_four":"1111","balance":{"minor":5000,"currency":"CAD"},"balance_status":"owner_confirmed","balance_ttl_secs":900}</textarea></label>
-    <button type="submit">Configure manual provider</button>
-  </form>
-  <form data-endpoint="/api/receive">
-    <label>Receive instructions JSON<textarea>{"method":"interac_e_transfer","address":"public-inbox@example.invalid","memo_template":"AGENT-{agent_id}-{intent_id}"}</textarea></label>
-    <button type="submit">Configure receiving</button>
-  </form>
-  <form data-endpoint="/api/deposits/record">
-    <label>Record deposit JSON<textarea>{"amount":{"minor":500,"currency":"CAD"},"source":"owner-reconciliation","verified":false,"agent_id":null,"external_reference":"external-reference"}</textarea></label>
-    <button type="submit">Record deposit</button>
-  </form>
-
-  <h2>Audit Inspection</h2>
-  <button id="audit" type="button">Load sanitized audit</button>
-  <pre id="audit-output">Not loaded.</pre>
-  <h2>Last Owner Operation</h2>
-  <pre id="result">No operation yet.</pre>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="ambient ambient-one" aria-hidden="true"></div><div class="ambient ambient-two" aria-hidden="true"></div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="#today" aria-label="Cixa home"><img src="/cixa-mark.svg" alt="" width="38" height="38"><span>Cixa</span></a>
+      <nav class="primary-nav">
+        <a href="#today" data-route="today"><span class="nav-icon" aria-hidden="true">◒</span>Today <span class="nav-count" id="decision-count" hidden>0</span></a>
+        <a href="#ledger" data-route="ledger"><span class="nav-icon" aria-hidden="true">▤</span>Ledger</a>
+        <a href="#agents" data-route="agents"><span class="nav-icon" aria-hidden="true">◇</span>Agents</a>
+        <a href="#trust" data-route="trust"><span class="nav-icon" aria-hidden="true">▽</span>Trust</a>
+      </nav>
+      <section class="watch-card" aria-label="Cixa status"><p class="watch-state"><span class="status-dot" aria-hidden="true"></span><strong id="connection-label">Connecting</strong></p><p id="watch-copy">Checking the local broker.</p><button class="danger-outline" id="emergency-stop-button" type="button">Stop all spending</button></section>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><span class="local-pill"><span aria-hidden="true">⌂</span> This computer only</span><div class="top-actions"><time id="current-time"></time><button class="quiet-button" id="refresh-button" type="button">Refresh</button><button class="icon-button" id="theme-button" type="button" aria-label="Use dark theme" title="Change theme">◐</button></div></header>
+      <div class="stop-banner" id="stop-banner" role="status" hidden><div><strong>Spending is stopped.</strong><span>Agents can keep working, but no purchase can begin.</span></div><button class="primary-button" id="resume-button" type="button">Start again</button></div>
+      <div class="unsafe-banner" id="unsafe-banner" role="status" hidden></div>
+      <main id="main-content" tabindex="-1">
+        <section class="view" id="view-today" data-view="today" aria-labelledby="today-heading">
+          <div class="page-intro"><p class="eyebrow" id="today-date"></p><h1 id="today-heading">Your fortress is standing by.</h1><p id="today-summary">Cixa is checking what needs you.</p></div>
+          <div class="metric-grid" id="today-metrics" aria-label="Today summary"></div>
+          <section class="section-block" aria-labelledby="waiting-heading"><div class="section-heading"><h2 id="waiting-heading">Waiting on you</h2><span id="waiting-count"></span></div><div class="decision-list" id="decision-list"></div></section>
+          <section class="section-block" aria-labelledby="recent-heading"><div class="section-heading"><h2 id="recent-heading">Recent activity</h2><a href="#ledger">Full ledger</a></div><div class="ledger-list compact-list" id="recent-list"></div></section>
+        </section>
+        <section class="view" id="view-ledger" data-view="ledger" aria-labelledby="ledger-heading" hidden>
+          <div class="page-intro"><h1 id="ledger-heading">Ledger</h1><p>Every purchase an agent attempted, and what Cixa did about it.</p></div>
+          <div class="toolbar"><div class="segmented" id="ledger-filters" aria-label="Filter ledger"><button type="button" data-filter="all" aria-pressed="true">All</button><button type="button" data-filter="waiting" aria-pressed="false">Waiting</button><button type="button" data-filter="paid" aria-pressed="false">Paid</button><button type="button" data-filter="stopped" aria-pressed="false">Stopped</button></div><label class="search-field"><span class="sr-only">Search ledger</span><input id="ledger-search" type="search" placeholder="Search purchases"></label></div>
+          <div class="ledger-list" id="ledger-list"></div>
+        </section>
+        <section class="view" id="view-agents" data-view="agents" aria-labelledby="agents-heading" hidden>
+          <div class="page-intro intro-with-action"><div><h1 id="agents-heading">Agents</h1><p>Each one spends only what you allow. Nothing carries over to tomorrow.</p></div><button class="primary-button" id="create-agent-button" type="button">Create agent</button></div><div class="agent-grid" id="agent-list"></div>
+        </section>
+        <section class="view" id="view-trust" data-view="trust" aria-labelledby="trust-heading" hidden>
+          <div class="page-intro"><h1 id="trust-heading">Trust</h1><p>Cixa runs on this computer only. Nothing here holds a card number.</p></div>
+          <div class="trust-tabs segmented" aria-label="Trust sections"><button type="button" data-trust-tab="boundaries" aria-pressed="true">Boundaries</button><button type="button" data-trust-tab="provider" aria-pressed="false">Provider</button><button type="button" data-trust-tab="receiving" aria-pressed="false">Receiving</button><button type="button" data-trust-tab="audit" aria-pressed="false">Audit</button></div>
+          <div id="trust-boundaries" data-trust-panel="boundaries"><div class="trust-grid"><section class="glass-card"><h2>The card Cixa may use</h2><p>Cixa stores a credential-helper reference, never the number itself.</p><div class="fact-list" id="provider-summary"></div></section><section class="glass-card"><h2>This computer</h2><div class="fact-list" id="system-summary"></div></section></div><section class="glass-card rules-card"><h2>Standing boundaries</h2><p>These apply to every agent and every purchase.</p><ul class="rule-list"><li><strong>Never let a shop keep the card</strong><span>Stored-card checkboxes are refused unless an owner changes policy.</span></li><li><strong>Refuse anything that repeats</strong><span>Subscriptions and trials need explicit policy permission.</span></li><li><strong>Stop if the total changes</strong><span>The checkout total must match the approved request.</span></li><li><strong>Unknown means stop and check</strong><span>Cixa never retries an ambiguous payment automatically.</span></li></ul><p class="safety-note">There is nowhere in this console to type a card number, expiry date, security code, or provider password.</p></section></div>
+          <div id="trust-provider" data-trust-panel="provider" hidden><section class="glass-card form-card"><h2>Manual provider reference</h2><p>Save a pointer to an owner-controlled credential entry and a balance you confirmed yourself.</p><form id="provider-form" class="stacked-form"><label>Credential reference<input name="credential_reference" required maxlength="4096" placeholder="keychain://cixa/card"></label><div class="form-row"><label>Provider kind<select name="provider_kind"><option value="os-credential-store">OS credential store</option><option value="interactive-owner-entry">Interactive owner entry</option></select></label><label>Last four<input name="last_four" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1111"></label></div><div class="form-row"><label>Confirmed balance<input name="balance" type="number" min="0.01" step="0.01" required></label><label>Currency<input name="currency" value="CAD" pattern="[A-Z]{3}" maxlength="3" required></label></div><div class="form-row"><label>Evidence<select name="balance_status"><option value="owner_confirmed">Owner confirmed</option><option value="estimated">Estimated</option></select></label><label>Fresh for minutes<input name="balance_ttl_minutes" type="number" min="1" max="1440" value="15" required></label></div><button class="primary-button" type="submit">Save provider reference</button></form></section></div>
+          <div id="trust-receiving" data-trust-panel="receiving" hidden><div class="trust-grid"><section class="glass-card form-card"><h2>Receiving instructions</h2><p>These are public instructions an agent may share. They are not proof that money arrived.</p><form id="receive-form" class="stacked-form"><label>Method<select name="method"><option value="interac_e_transfer">Interac e-Transfer</option><option value="manual">Manual instructions</option></select></label><label>Public receiving address<input name="address" maxlength="320" required placeholder="public-inbox@example.invalid"></label><label>Memo template<input name="memo_template" maxlength="256" required value="AGENT-{agent_id}-{intent_id}"></label><button class="primary-button" type="submit">Save receiving instructions</button></form></section><section class="glass-card form-card"><h2>Record money received</h2><p>Check the provider first. Unverified arrivals never become spending authority.</p><form id="deposit-form" class="stacked-form"><div class="form-row"><label>Amount<input name="amount" type="number" min="0.01" step="0.01" required></label><label>Currency<input name="currency" value="CAD" pattern="[A-Z]{3}" maxlength="3" required></label></div><label>Source<input name="source" maxlength="256" required placeholder="Client invoice 0031"></label><label>Provider reference<input name="external_reference" maxlength="256" required></label><label class="checkbox-row"><input name="verified" type="checkbox"> I checked the provider's own record</label><label>Credit to agent<select name="agent_id" id="deposit-agent"><option value="">No agent</option></select></label><button class="primary-button" type="submit">Record arrival</button></form></section></div></div>
+          <div id="trust-audit" data-trust-panel="audit" hidden><div class="audit-toolbar"><div class="audit-verification" id="audit-verification" role="status">Checking the audit chain.</div><button class="quiet-button" id="export-button" type="button">Export sanitized audit</button></div><div class="timeline" id="audit-list"></div></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <nav class="mobile-nav" aria-label="Mobile navigation"><a href="#today" data-route="today">Today</a><a href="#ledger" data-route="ledger">Ledger</a><a href="#agents" data-route="agents">Agents</a><a href="#trust" data-route="trust">Trust</a></nav>
+  <aside class="drawer" id="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true"><div class="drawer-backdrop" data-close-drawer></div><div class="drawer-panel"><button class="drawer-close icon-button" type="button" data-close-drawer aria-label="Close details">×</button><div id="drawer-content"></div></div></aside>
+  <dialog id="action-dialog" aria-labelledby="dialog-title"><form method="dialog" class="dialog-card" id="dialog-form"><button class="dialog-close icon-button" value="cancel" aria-label="Close dialog">×</button><p class="eyebrow" id="dialog-eyebrow">Owner confirmation</p><h2 id="dialog-title">Confirm action</h2><div id="dialog-body"></div><div class="dialog-actions"><button class="quiet-button" value="cancel">Cancel</button><button class="primary-button" id="dialog-confirm" value="confirm">Confirm</button></div></form></dialog>
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div><div class="sr-only" id="operation-status" aria-live="assertive"></div>
   <script src="/app.js"></script>
 </body>
 </html>
