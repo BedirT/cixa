@@ -1519,13 +1519,13 @@ impl Treasury {
         self.state.owner.capability_token_hash == token_hash(token)
     }
 
-    pub fn active_agent_capability_fingerprints(&self) -> Vec<String> {
+    pub fn active_agent_capabilities(&self) -> Vec<(String, i64)> {
         let at = now();
         self.state
             .agents
             .values()
             .filter(|agent| !agent.revoked && agent.expires_at > at)
-            .map(|agent| agent.capability_token_hash.clone())
+            .map(|agent| (agent.capability_token_hash.clone(), agent.expires_at))
             .collect()
     }
 

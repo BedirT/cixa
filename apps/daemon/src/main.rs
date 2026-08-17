@@ -40,7 +40,7 @@ struct AgentAdmission {
 }
 
 struct AgentAdmissionState {
-    known_capabilities: HashSet<String>,
+    known_capabilities: HashMap<String, i64>,
     entries: HashMap<u64, AgentAdmissionEntry>,
     window_started: Instant,
     requests: u32,
@@ -64,8 +64,20 @@ struct AgentCapabilityGuard {
     fingerprint: u64,
 }
 
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(i64::MAX, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn admission_fingerprint(fingerprint: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    fingerprint.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl AgentAdmission {
-    fn new(known_capabilities: Vec<String>) -> Self {
+    fn new(known_capabilities: Vec<(String, i64)>) -> Self {
         Self {
             state: Mutex::new(AgentAdmissionState {
                 known_capabilities: known_capabilities.into_iter().collect(),
@@ -80,15 +92,26 @@ impl AgentAdmission {
     }
 
     fn is_known_capability(&self, token: &str) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| state.known_capabilities.contains(&capability_fingerprint(token)))
+        let at = unix_timestamp();
+        self.state.lock().is_ok_and(|state| {
+            state
+                .known_capabilities
+                .get(&capability_fingerprint(token))
+                .is_some_and(|expires_at| *expires_at > at)
+        })
     }
 
-    fn replace_known_capabilities(&self, fingerprints: Vec<String>) {
+    fn replace_known_capabilities(&self, capabilities: Vec<(String, i64)>) {
         if let Ok(mut state) = self.state.lock() {
-            state.known_capabilities = fingerprints.into_iter().collect();
-            state.entries.retain(|_, entry| entry.in_flight);
+            state.known_capabilities = capabilities.into_iter().collect();
+            let active_keys: HashSet<u64> = state
+                .known_capabilities
+                .keys()
+                .map(|fingerprint| admission_fingerprint(fingerprint))
+                .collect();
+            state
+                .entries
+                .retain(|fingerprint, entry| entry.in_flight || active_keys.contains(fingerprint));
         }
     }
 
@@ -126,9 +149,7 @@ impl AgentAdmission {
     }
 
     fn admit_capability(self: &Arc<Self>, token: &str) -> Option<AgentCapabilityGuard> {
-        let mut hasher = DefaultHasher::new();
-        token.hash(&mut hasher);
-        let fingerprint = hasher.finish();
+        let fingerprint = admission_fingerprint(&capability_fingerprint(token));
         let now = Instant::now();
         let mut state = self.state.lock().ok()?;
         state.entries.retain(|_, entry| {
@@ -840,7 +861,10 @@ mod process_identity_tests {
     #[test]
     fn unauthenticated_channel_admission_cannot_fill_capability_entries() {
         let token = "authenticated-capability";
-        let admission = Arc::new(AgentAdmission::new(vec![capability_fingerprint(token)]));
+        let admission = Arc::new(AgentAdmission::new(vec![(
+            capability_fingerprint(token),
+            unix_timestamp() + 60,
+        )]));
         for _ in 0..MAX_AGENT_ADMISSION_ENTRIES {
             admission.admit_unauthenticated();
         }
@@ -853,11 +877,27 @@ mod process_identity_tests {
     #[test]
     fn authenticated_forbidden_requests_consume_capability_admission() {
         let token = "authenticated-capability";
-        let admission = Arc::new(AgentAdmission::new(vec![capability_fingerprint(token)]));
+        let admission = Arc::new(AgentAdmission::new(vec![(
+            capability_fingerprint(token),
+            unix_timestamp() + 60,
+        )]));
         for _ in 0..MAX_AGENT_REQUESTS_PER_SECOND {
             drop(admission.admit_authenticated(token).unwrap());
         }
         assert!(admission.admit_authenticated(token).is_none());
+        admission.replace_known_capabilities(vec![(
+            capability_fingerprint(token),
+            unix_timestamp() + 60,
+        )]);
+        assert!(admission.admit_authenticated(token).is_none());
+    }
+
+    #[test]
+    fn expired_capabilities_are_not_classified_as_known() {
+        let token = "expired-capability";
+        let admission =
+            AgentAdmission::new(vec![(capability_fingerprint(token), unix_timestamp() - 1)]);
+        assert!(!admission.is_known_capability(token));
     }
 
     #[test]
@@ -1692,8 +1732,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
     }
-    let agent_admission =
-        Arc::new(AgentAdmission::new(treasury.active_agent_capability_fingerprints()));
+    let agent_admission = Arc::new(AgentAdmission::new(treasury.active_agent_capabilities()));
     let state = Arc::new(Mutex::new(treasury));
     let agent_listener = bind_private_socket(&agent_socket)?;
     let owner_listener = bind_private_socket(&owner_socket)?;
@@ -1873,9 +1912,8 @@ fn handle_connection(
                     } else {
                         let response = treasury.handle_rpc_persisted(request, &directory);
                         if let Some(admission) = agent_admission.as_ref() {
-                            admission.replace_known_capabilities(
-                                treasury.active_agent_capability_fingerprints(),
-                            );
+                            admission
+                                .replace_known_capabilities(treasury.active_agent_capabilities());
                         }
                         response
                     }
