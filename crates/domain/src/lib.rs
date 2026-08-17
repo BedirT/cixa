@@ -2848,7 +2848,6 @@ impl Treasury {
         if stopped && !self.state.emergency_stop {
             for agent in self.state.agents.values_mut() {
                 agent.broker_session_id = new_id("stopped-session");
-                agent.broker_session_expires_at = 0;
                 invalidated_sessions += 1;
             }
         }
