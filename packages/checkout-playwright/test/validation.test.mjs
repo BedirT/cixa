@@ -35,7 +35,13 @@ test("rejects private IPv4-mapped and canonical IPv6 destinations", () => {
     "::ffff:c000:200",
     "0:0:0:0:0:0:0:1",
     "fe80::1",
+    "fec0::1",
+    "100::1",
+    "64:ff9b:1::c0a8:101",
+    "2001:20::1",
     "2001:db8::1",
+    "2002:c0a8:101::",
+    "3fff::1",
   ]) {
     assert.equal(privateAddress(address), true, address);
   }
