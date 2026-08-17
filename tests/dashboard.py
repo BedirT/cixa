@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import json
 import os
 import signal
@@ -18,6 +19,91 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "cixa"
+
+
+def exercise_capability_handoff() -> None:
+    module_path = ROOT / "apps" / "owner-dashboard" / "server.py"
+    spec = importlib.util.spec_from_file_location("cixa_dashboard_server", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory(prefix="cixa-capability-") as raw_directory:
+        directory = Path(raw_directory)
+        owner_file = directory / "owner.token"
+        access_file = directory / "access.token"
+        owner_file.write_text("owner-secret\n", encoding="utf-8")
+        access_file.write_text("access-secret\n", encoding="utf-8")
+        os.chmod(owner_file, 0o600)
+        os.chmod(access_file, 0o600)
+        state = module.DashboardState(
+            str(directory / "unused.sock"),
+            str(owner_file),
+            str(access_file),
+            0,
+            str(directory / "agent-tokens"),
+        )
+
+        def broker_call(operation: dict) -> dict:
+            token_file = directory / "agent-tokens" / "prepared.token"
+            assert token_file.exists()
+            assert token_file.read_text(encoding="ascii").strip() == operation["capability_token"]
+            return {"agent_id": "agent-prepared"}
+
+        state.call = broker_call
+        result = state.write_capability(
+            {"type": "owner_create_agent_prepared"}, "prepared.token"
+        )
+        assert result["agent_token_file"].endswith("prepared.token")
+
+        broker_called = False
+
+        def unexpected_call(_operation: dict) -> dict:
+            nonlocal broker_called
+            broker_called = True
+            return {}
+
+        state.call = unexpected_call
+        original_fsync = module.os.fsync
+        fail_once = True
+
+        def failing_fsync(descriptor: int) -> None:
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise OSError("injected durability failure")
+            original_fsync(descriptor)
+
+        module.os.fsync = failing_fsync
+        try:
+            try:
+                state.write_capability(
+                    {"type": "owner_rotate_agent_capability"}, "failed.token"
+                )
+                raise AssertionError("durability failure was not propagated")
+            except OSError as error:
+                assert "injected durability failure" in str(error)
+        finally:
+            module.os.fsync = original_fsync
+        assert not broker_called
+        assert not (directory / "agent-tokens" / "failed.token").exists()
+
+        def uncertain_broker_call(operation: dict) -> dict:
+            token_file = directory / "agent-tokens" / "uncertain.token"
+            assert token_file.read_text(encoding="ascii").strip() == operation["capability_token"]
+            raise RuntimeError("injected response loss after activation may have started")
+
+        state.call = uncertain_broker_call
+        try:
+            state.write_capability(
+                {"type": "owner_rotate_agent_capability"}, "uncertain.token"
+            )
+            raise AssertionError("broker response loss was not propagated")
+        except RuntimeError as error:
+            assert "response loss" in str(error)
+        assert (directory / "agent-tokens" / "uncertain.token").exists()
+
+
+exercise_capability_handoff()
 
 
 def run(*args: str) -> dict:

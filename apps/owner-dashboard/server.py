@@ -66,6 +66,13 @@ class DashboardState:
         if metadata.st_mode & 0o077:
             raise ValueError("agent token directory permissions are too broad")
 
+    def _sync_agent_token_directory(self) -> None:
+        descriptor = os.open(self.agent_token_directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def write_capability(self, operation: dict[str, Any], token_filename: Any) -> Any:
         if not isinstance(token_filename, str) or not 1 <= len(token_filename) <= 64:
             raise ValueError("token_filename must be a short string")
@@ -79,18 +86,30 @@ class DashboardState:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(token_path, flags, 0o600)
+        token = secrets.token_hex(32)
+        payload = (token + "\n").encode("ascii")
+        activation_started = False
         try:
-            value = self.call(operation)
-            token = value.pop("capability_token", None)
-            if not isinstance(token, str) or not token:
-                raise RuntimeError("broker did not return an agent capability")
-            os.write(descriptor, (token + "\n").encode("utf-8"))
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("agent capability write made no progress")
+                written += count
             os.fsync(descriptor)
-        except BaseException:
             os.close(descriptor)
-            token_path.unlink(missing_ok=True)
+            descriptor = -1
+            self._sync_agent_token_directory()
+            operation["capability_token"] = token
+            activation_started = True
+            value = self.call(operation)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if not activation_started:
+                token_path.unlink(missing_ok=True)
+                self._sync_agent_token_directory()
             raise
-        os.close(descriptor)
         value["agent_token_file"] = str(token_path)
         return value
 
@@ -182,7 +201,7 @@ def make_handler(state: DashboardState):
             schemas: dict[str, tuple[str, set[str]]] = {
                 "/api/emergency-stop": ("owner_set_emergency_stop", {"stopped"}),
                 "/api/agents/create": (
-                    "owner_create_agent",
+                    "owner_create_agent_prepared",
                     {"name", "policy", "mode", "ttl_secs", "token_filename"},
                 ),
                 "/api/agents/revoke": ("owner_revoke_agent", {"agent_id"}),
@@ -351,7 +370,10 @@ def make_handler(state: DashboardState):
                     operation["stopped"], bool
                 ):
                     raise ValueError("stopped must be boolean")
-                if operation["type"] in {"owner_create_agent", "owner_rotate_agent_capability"}:
+                if operation["type"] in {
+                    "owner_create_agent_prepared",
+                    "owner_rotate_agent_capability",
+                }:
                     token_filename = operation.pop("token_filename")
                     value = state.write_capability(operation, token_filename)
                 else:

@@ -12,8 +12,11 @@ use cixa_domain::{
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -26,6 +29,98 @@ type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_OWNER_CONNECTIONS: usize = 8;
+const MAX_AGENT_ADMISSION_ENTRIES: usize = 128;
+const MAX_AGENT_REQUESTS_PER_SECOND: u32 = 20;
+const MAX_AGENT_CHANNEL_REQUESTS_PER_SECOND: u32 = 80;
+const MAX_AGENT_CHANNEL_IN_FLIGHT: u32 = 4;
+
+struct AgentAdmission {
+    state: Mutex<AgentAdmissionState>,
+}
+
+struct AgentAdmissionState {
+    entries: HashMap<u64, AgentAdmissionEntry>,
+    window_started: Instant,
+    requests: u32,
+    in_flight: u32,
+}
+
+struct AgentAdmissionEntry {
+    window_started: Instant,
+    requests: u32,
+    in_flight: bool,
+}
+
+struct AgentAdmissionGuard {
+    admission: Arc<AgentAdmission>,
+    fingerprint: u64,
+}
+
+impl AgentAdmission {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(AgentAdmissionState {
+                entries: HashMap::new(),
+                window_started: Instant::now(),
+                requests: 0,
+                in_flight: 0,
+            }),
+        }
+    }
+
+    fn admit(self: &Arc<Self>, token: &str) -> Option<AgentAdmissionGuard> {
+        let mut hasher = DefaultHasher::new();
+        token.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let now = Instant::now();
+        let mut state = self.state.lock().ok()?;
+        state.entries.retain(|_, entry| {
+            entry.in_flight || now.duration_since(entry.window_started) < Duration::from_secs(2)
+        });
+        if now.duration_since(state.window_started) >= Duration::from_secs(1) {
+            state.window_started = now;
+            state.requests = 0;
+        }
+        if state.in_flight >= MAX_AGENT_CHANNEL_IN_FLIGHT
+            || state.requests >= MAX_AGENT_CHANNEL_REQUESTS_PER_SECOND
+        {
+            return None;
+        }
+        if !state.entries.contains_key(&fingerprint)
+            && state.entries.len() >= MAX_AGENT_ADMISSION_ENTRIES
+        {
+            return None;
+        }
+        let entry = state.entries.entry(fingerprint).or_insert(AgentAdmissionEntry {
+            window_started: now,
+            requests: 0,
+            in_flight: false,
+        });
+        if now.duration_since(entry.window_started) >= Duration::from_secs(1) {
+            entry.window_started = now;
+            entry.requests = 0;
+        }
+        if entry.in_flight || entry.requests >= MAX_AGENT_REQUESTS_PER_SECOND {
+            return None;
+        }
+        entry.in_flight = true;
+        entry.requests += 1;
+        state.in_flight += 1;
+        state.requests += 1;
+        Some(AgentAdmissionGuard { admission: Arc::clone(self), fingerprint })
+    }
+}
+
+impl Drop for AgentAdmissionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock()
+            && let Some(entry) = state.entries.get_mut(&self.fingerprint)
+        {
+            entry.in_flight = false;
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+}
 
 struct DataDirLock(fs::File);
 
@@ -597,6 +692,42 @@ impl DescendantTracker {
 #[cfg(all(test, unix, any(target_os = "macos", target_os = "linux")))]
 mod process_identity_tests {
     use super::*;
+
+    #[test]
+    fn oversized_responses_are_replaced_with_a_bounded_error() {
+        let response = RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: "large-response".to_string(),
+            ok: true,
+            data: Some(json!({ "payload": "x".repeat(MAX_FRAME_BYTES) })),
+            error: None,
+        };
+        let mut encoded = Vec::new();
+
+        write_response(&mut encoded, &response).unwrap();
+
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let decoded: RpcResponse = serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
+        assert!(!decoded.ok);
+        assert_eq!(decoded.request_id, "large-response");
+        assert_eq!(decoded.error.as_deref(), Some("response exceeds the broker frame limit"));
+    }
+
+    #[test]
+    fn agent_admission_allows_only_one_in_flight_request_per_capability() {
+        let admission = Arc::new(AgentAdmission::new());
+        let first = admission.admit("agent-capability").expect("first request admitted");
+        assert!(admission.admit("agent-capability").is_none());
+        assert!(admission.admit("different-capability").is_some());
+        drop(first);
+        assert!(admission.admit("agent-capability").is_some());
+
+        let guards: Vec<_> = (0..MAX_AGENT_CHANNEL_IN_FLIGHT)
+            .map(|index| admission.admit(&format!("channel-{index}")).unwrap())
+            .collect();
+        assert!(admission.admit("one-too-many").is_none());
+        drop(guards);
+    }
 
     #[test]
     fn stale_process_identity_is_rejected_before_signaling() {
@@ -1421,6 +1552,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
         treasury.save_to(&directory)?;
     }
     let state = Arc::new(Mutex::new(treasury));
+    let agent_admission = Arc::new(AgentAdmission::new());
     let agent_listener = bind_private_socket(&agent_socket)?;
     let owner_listener = bind_private_socket(&owner_socket)?;
     if let Some(gid) = agent_gid {
@@ -1441,6 +1573,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
             true,
             MAX_OWNER_CONNECTIONS,
             false,
+            None,
         )
     });
     serve_listener(
@@ -1450,6 +1583,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
         false,
         MAX_CONNECTIONS,
         require_separate_agent,
+        Some(agent_admission),
     );
     Ok(())
 }
@@ -1482,6 +1616,7 @@ fn serve_listener(
     owner_channel: bool,
     connection_limit: usize,
     reject_broker_uid: bool,
+    agent_admission: Option<Arc<AgentAdmission>>,
 ) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -1504,8 +1639,11 @@ fn serve_listener(
                 let state = Arc::clone(&state);
                 let directory = directory.clone();
                 let active_connections = Arc::clone(&active_connections);
+                let agent_admission = agent_admission.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, state, directory, owner_channel) {
+                    if let Err(error) =
+                        handle_connection(stream, state, directory, owner_channel, agent_admission)
+                    {
                         eprintln!("connection error: {}", redact_sensitive(&error.to_string()));
                     }
                     active_connections.fetch_sub(1, Ordering::AcqRel);
@@ -1563,6 +1701,7 @@ fn handle_connection(
     state: Arc<Mutex<Treasury>>,
     directory: PathBuf,
     owner_channel: bool,
+    agent_admission: Option<Arc<AgentAdmission>>,
 ) -> CliResult<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -1584,6 +1723,18 @@ fn handle_connection(
     } else {
         match serde_json::from_slice::<RpcRequest>(&frame) {
             Ok(request) => {
+                let _admission = if let Some(admission) = agent_admission.as_ref() {
+                    match admission.admit(&request.token) {
+                        Some(guard) => Some(guard),
+                        None => {
+                            let response = rejected_rpc(&request, "agent request limit exceeded");
+                            write_response(&mut writer, &response)?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    None
+                };
                 let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
                 if owner_channel && !treasury.is_owner_token(&request.token) {
                     rejected_rpc(&request, "owner control authentication failed")
@@ -1602,7 +1753,23 @@ fn handle_connection(
             },
         }
     };
-    writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+    write_response(&mut writer, &response)?;
+    Ok(())
+}
+
+fn write_response(writer: &mut impl Write, response: &RpcResponse) -> CliResult<()> {
+    let mut encoded = serde_json::to_vec(response)?;
+    if encoded.len() + 1 > MAX_FRAME_BYTES {
+        encoded = serde_json::to_vec(&RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: response.request_id.clone(),
+            ok: false,
+            data: None,
+            error: Some("response exceeds the broker frame limit".to_string()),
+        })?;
+    }
+    writer.write_all(&encoded)?;
+    writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
 }
