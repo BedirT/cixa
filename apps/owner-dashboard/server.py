@@ -304,11 +304,11 @@ def make_handler(state: DashboardState):
                     elif self.path == "/api/transactions":
                         value = state.call({"type": "list_transactions"})
                     elif self.path == "/api/audit":
-                        value = state.call({"type": "owner_list_audit"})
+                        value = state.call({"type": "owner_list_audit_recent"})
                     else:
                         value = {
                             "overview": state.call({"type": "owner_get_dashboard"}),
-                            "audit": state.call({"type": "owner_list_audit"}),
+                            "audit": state.call({"type": "owner_list_audit_recent"}),
                             "sanitized": True,
                         }
                     self._send_json(200, value)

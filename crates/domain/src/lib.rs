@@ -1258,6 +1258,7 @@ pub enum Request {
         memo_template: String,
     },
     OwnerListAudit,
+    OwnerListAuditRecent,
 }
 
 impl Request {
@@ -1280,6 +1281,7 @@ impl Request {
                 | Self::OwnerConfigureManualProvider { .. }
                 | Self::OwnerConfigureReceiveInstructions { .. }
                 | Self::OwnerListAudit
+                | Self::OwnerListAuditRecent
                 | Self::OwnerGetDashboard
         )
     }
@@ -1322,6 +1324,7 @@ where
         | "get_receive_instructions"
         | "list_transactions"
         | "owner_list_audit"
+        | "owner_list_audit_recent"
         | "owner_get_dashboard" => &[],
         "create_purchase_intent" => &["request"],
         "get_purchase_intent"
@@ -2077,6 +2080,7 @@ impl Treasury {
                 self.owner_configure_receive(&actor, method, address, memo_template)
             }
             Request::OwnerListAudit => self.owner_list_audit(&actor),
+            Request::OwnerListAuditRecent => self.owner_list_audit_recent(&actor),
         }
     }
 
@@ -3531,6 +3535,16 @@ impl Treasury {
     }
 
     fn owner_list_audit(&self, actor: &Actor) -> Result<Value> {
+        Self::require_owner(actor)?;
+        Ok(json!({
+            "entries": self.state.audit,
+            "entries_total": self.state.audit.len(),
+            "truncated": false,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
+    }
+
+    fn owner_list_audit_recent(&self, actor: &Actor) -> Result<Value> {
         Self::require_owner(actor)?;
         let total = self.state.audit.len();
         let start = total.saturating_sub(DASHBOARD_AUDIT_LIMIT);
@@ -5465,7 +5479,7 @@ mod tests {
                 .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped })
                 .unwrap();
         }
-        let audit = treasury.handle(&bootstrap.owner_token, Request::OwnerListAudit).unwrap();
+        let audit = treasury.handle(&bootstrap.owner_token, Request::OwnerListAuditRecent).unwrap();
         assert_eq!(audit["entries"].as_array().unwrap().len(), 25);
         assert_eq!(audit["truncated"], true);
         assert!(audit["entries_total"].as_u64().unwrap() > 500);
