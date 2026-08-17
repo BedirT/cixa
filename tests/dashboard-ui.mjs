@@ -210,11 +210,14 @@ try {
   await page.locator("#agent-list").getByText("Paused", {exact:true}).waitFor();
   await page.getByRole("button", {name:/Open Research runner settings/i}).click();
   await page.getByRole("button", {name:"Edit policy"}).click();
-  const recurringCheckbox=dialog.getByLabel("Allow recurring charges",{exact:true});const recurringRow=recurringCheckbox.locator("xpath=..");
+  assert.equal(await page.locator("#dialog-eyebrow").textContent(),"Agent policy");assert.equal(await dialog.getByRole("heading",{name:"Research Runner policy",exact:true}).isVisible(),true);
+  assert.equal(await page.locator("#action-dialog").getAttribute("class"),"policy-dialog");assert.equal(await page.locator("#dialog-form").getAttribute("class"),"dialog-card policy-editor");
+  assert.equal((await dialog.locator(".policy-limit-grid").evaluate((element)=>getComputedStyle(element).gridTemplateColumns.split(" ").length)),2);assert.equal((await dialog.locator(".policy-permission-grid").evaluate((element)=>getComputedStyle(element).gridTemplateColumns.split(" ").length)),2);
+  const recurringCheckbox=dialog.getByLabel("Recurring charges",{exact:true});const recurringRow=recurringCheckbox.locator("xpath=..");
   const checkboxStyle=await recurringRow.evaluate((element)=>({radius:getComputedStyle(element).borderRadius,box:getComputedStyle(element,"::before").width}));assert.equal(checkboxStyle.radius,"15px");assert.equal(checkboxStyle.box,"22px");
   await recurringCheckbox.check();assert.equal(await recurringCheckbox.isChecked(),true);await recurringCheckbox.uncheck();
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-policy-checkboxes.png"),fullPage:false});
-  await page.setViewportSize({width:390,height:844});assert.equal(await dialog.locator(".dialog-card").evaluate((card)=>card.scrollWidth<=card.clientWidth),true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-policy-checkboxes-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
+  await page.setViewportSize({width:390,height:844});assert.equal(await dialog.locator(".dialog-card").evaluate((card)=>card.scrollWidth<=card.clientWidth),true);assert.equal((await dialog.locator(".policy-limit-grid").evaluate((element)=>getComputedStyle(element).gridTemplateColumns.split(" ").length)),1);assert.equal(await dialog.getByRole("button",{name:"Save policy"}).isVisible(),true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-policy-checkboxes-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
   await dialog.getByLabel("Most per purchase").fill("20.00");
   await dialog.getByRole("button", {name:"Save policy"}).click();
   await page.getByRole("button", {name:/Open Research runner settings/i}).click();
@@ -234,6 +237,7 @@ try {
   await page.getByRole("button", {name:"Boundaries"}).click();
   await page.getByText("Unknown means stop and check").waitFor();
   await page.getByRole("button", {name:"Stop all spending"}).click();
+  assert.equal(await page.locator("#dialog-eyebrow").textContent(),"Owner confirmation");assert.equal(await page.locator("#action-dialog").evaluate((element)=>element.classList.contains("policy-dialog")),false);
   await dialog.getByRole("button", {name:"Stop all spending"}).click();
   await page.locator("#stop-banner").getByText("Spending is stopped.", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Start again"}).click();
