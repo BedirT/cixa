@@ -92,12 +92,13 @@ impl AgentAdmission {
     }
 
     fn is_known_capability(&self, token: &str) -> bool {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
         let at = unix_timestamp();
+        let fingerprint = capability_fingerprint(token);
         self.state.lock().is_ok_and(|state| {
-            state
-                .known_capabilities
-                .get(&capability_fingerprint(token))
-                .is_some_and(|expires_at| *expires_at > at)
+            state.known_capabilities.get(&fingerprint).is_some_and(|expires_at| *expires_at > at)
         })
     }
 
@@ -860,44 +861,45 @@ mod process_identity_tests {
 
     #[test]
     fn unauthenticated_channel_admission_cannot_fill_capability_entries() {
-        let token = "authenticated-capability";
+        let token = "a".repeat(64);
         let admission = Arc::new(AgentAdmission::new(vec![(
-            capability_fingerprint(token),
+            capability_fingerprint(&token),
             unix_timestamp() + 60,
         )]));
         for _ in 0..MAX_AGENT_ADMISSION_ENTRIES {
             admission.admit_unauthenticated();
         }
         assert!(admission.state.lock().unwrap().entries.is_empty());
-        assert!(admission.is_known_capability(token));
+        assert!(admission.is_known_capability(&token));
         assert!(admission.admit_channel().is_some());
-        assert!(admission.admit_capability(token).is_some());
+        assert!(admission.admit_capability(&token).is_some());
     }
 
     #[test]
     fn authenticated_forbidden_requests_consume_capability_admission() {
-        let token = "authenticated-capability";
+        let token = "b".repeat(64);
         let admission = Arc::new(AgentAdmission::new(vec![(
-            capability_fingerprint(token),
+            capability_fingerprint(&token),
             unix_timestamp() + 60,
         )]));
         for _ in 0..MAX_AGENT_REQUESTS_PER_SECOND {
-            drop(admission.admit_authenticated(token).unwrap());
+            drop(admission.admit_authenticated(&token).unwrap());
         }
-        assert!(admission.admit_authenticated(token).is_none());
+        assert!(admission.admit_authenticated(&token).is_none());
         admission.replace_known_capabilities(vec![(
-            capability_fingerprint(token),
+            capability_fingerprint(&token),
             unix_timestamp() + 60,
         )]);
-        assert!(admission.admit_authenticated(token).is_none());
+        assert!(admission.admit_authenticated(&token).is_none());
     }
 
     #[test]
     fn expired_capabilities_are_not_classified_as_known() {
-        let token = "expired-capability";
+        let token = "c".repeat(64);
         let admission =
-            AgentAdmission::new(vec![(capability_fingerprint(token), unix_timestamp() - 1)]);
-        assert!(!admission.is_known_capability(token));
+            AgentAdmission::new(vec![(capability_fingerprint(&token), unix_timestamp() - 1)]);
+        assert!(!admission.is_known_capability(&token));
+        assert!(!admission.is_known_capability(&"x".repeat(MAX_FRAME_BYTES)));
     }
 
     #[test]
