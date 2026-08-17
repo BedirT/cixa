@@ -2734,6 +2734,7 @@ impl Treasury {
         policy.version = 1;
         let policy_id = policy.id.clone();
         let session_ttl = ttl_secs.min(policy.card_session_ttl_secs);
+        let session_expires_at = if self.state.emergency_stop { 0 } else { now() + session_ttl };
         let scopes = [
             "status:read",
             "capabilities:read",
@@ -2757,7 +2758,7 @@ impl Treasury {
             policy_id: policy_id.clone(),
             approved_merchants: BTreeSet::new(),
             broker_session_id: new_id("session"),
-            broker_session_expires_at: now() + session_ttl,
+            broker_session_expires_at: session_expires_at,
             mode,
             created_at: now(),
             expires_at: now() + ttl_secs,
@@ -2785,6 +2786,12 @@ impl Treasury {
         ttl_secs: i64,
     ) -> Result<Value> {
         Self::require_owner(actor)?;
+        if self.state.emergency_stop {
+            return Err(TreasuryError::Forbidden(
+                "agent spending sessions cannot be armed while emergency stop is active"
+                    .to_string(),
+            ));
+        }
         let agent = self.agent(agent_id)?.clone();
         let policy = self.policy(&agent.policy_id)?;
         let policy_version = policy.version;
@@ -4925,6 +4932,27 @@ mod tests {
             .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped: true })
             .unwrap();
         assert_eq!(stopped["invalidated_sessions"], 1);
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerArmAgentSession { agent_id: agent_id.clone(), ttl_secs: 300 },
+                )
+                .is_err()
+        );
+        let stopped_agent = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerCreateAgent {
+                    name: "stopped-agent".to_string(),
+                    policy: Policy::conservative_demo().unwrap(),
+                    mode: AutonomyMode::BoundedAutonomous,
+                    ttl_secs: 3600,
+                },
+            )
+            .unwrap();
+        let stopped_token = stopped_agent["capability_token"].as_str().unwrap().to_string();
+        assert_eq!(stopped_agent["broker_session_expires_at"], 0);
         treasury
             .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped: false })
             .unwrap();
@@ -4933,6 +4961,14 @@ mod tests {
                 .handle(
                     &token,
                     Request::CreatePurchaseIntent { request: request("after-resume", 500) },
+                )
+                .is_err()
+        );
+        assert!(
+            treasury
+                .handle(
+                    &stopped_token,
+                    Request::CreatePurchaseIntent { request: request("stopped-era-agent", 500) },
                 )
                 .is_err()
         );
