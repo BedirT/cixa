@@ -5,12 +5,43 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VERIFY_LOCK="$(git rev-parse --git-path agent-treasury-verify.lock 2>/dev/null || printf '%s' "$ROOT/.verify.lock")"
+VERIFY_OWNER="$VERIFY_LOCK/owner"
 if ! mkdir "$VERIFY_LOCK" 2>/dev/null; then
-  printf '%s\n' 'another local verification run owns this checkout; retry after it completes' >&2
-  exit 1
+  owner_pid="$(sed -n '1p' "$VERIFY_OWNER" 2>/dev/null || true)"
+  owner_command="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null \
+      && [[ "$owner_command" == *"scripts/verify"* ]]; then
+    printf '%s\n' 'another local verification run owns this checkout; retry after it completes' >&2
+    exit 1
+  fi
+  stale_lock="$VERIFY_LOCK.stale.$$"
+  if ! mv "$VERIFY_LOCK" "$stale_lock" 2>/dev/null; then
+    printf '%s\n' 'verification lock changed while checking its owner; retry' >&2
+    exit 1
+  fi
+  rm -rf "$stale_lock"
+  mkdir "$VERIFY_LOCK"
 fi
-trap 'rmdir "$VERIFY_LOCK"' EXIT
+printf '%s\n' "$$" > "$VERIFY_OWNER"
+
+CANARY_SCAN_COMPLETED=0
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [[ "$CANARY_SCAN_COMPLETED" == "0" && -d build/handoff-artifacts ]]; then
+    if ! python3 scripts/secret-canary-scan.py build; then
+      status=1
+    fi
+  fi
+  if [[ "$(sed -n '1p' "$VERIFY_OWNER" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$VERIFY_LOCK"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 
 if [[ "$(python3 -c 'import sys; print(sys.flags.optimize)')" != "0" ]]; then
@@ -52,6 +83,7 @@ python3 scripts/license-check.py
 python3 scripts/sbom.py
 printf '%s\n' '[13/14] Secret-canary scan'
 python3 scripts/secret-canary-scan.py build --require handoff-artifacts/helper-success.stdout --require handoff-artifacts/helper-success.stderr --require handoff-artifacts/helper-timeout.stdout --require handoff-artifacts/helper-timeout.stderr --require handoff-artifacts/execute-timeout.stdout --require handoff-artifacts/execute-timeout.stderr
+CANARY_SCAN_COMPLETED=1
 if ! command -v gitleaks >/dev/null 2>&1; then
   printf '%s\n' 'gitleaks 8.30.1 is required for source-tree secret scanning' >&2
   exit 1
