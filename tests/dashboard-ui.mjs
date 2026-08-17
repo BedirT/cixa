@@ -189,7 +189,7 @@ try {
   await page.getByRole("button", {name:"Audit"}).click();
   await page.getByText(/Audit chain verified/).waitFor();
   const olderAudit = page.getByRole("button", {name:"Load older audit events"});
-  if (await olderAudit.isVisible()) { await olderAudit.click(); const loadedAuditCount=await page.locator("#audit-list .audit-entry").count();await page.getByRole("button",{name:"Refresh"}).click();assert.equal(await page.locator("#audit-list .audit-entry").count(),loadedAuditCount); }
+  if (await olderAudit.isVisible()) { const firstAuditCount=await page.locator("#audit-list .audit-entry").count();await olderAudit.click();await waitFor(async()=>await page.locator("#audit-list .audit-entry").count()>firstAuditCount,"older audit page did not load");const loadedAuditCount=await page.locator("#audit-list .audit-entry").count();await page.getByRole("button",{name:"Refresh"}).click();assert.equal(await page.locator("#audit-list .audit-entry").count(),loadedAuditCount); }
   await page.getByText("Technical evidence", {exact:true}).first().click();
   assert.equal(await page.locator("#audit-list details").first().getAttribute("open"), "");
   const download = page.waitForEvent("download");
