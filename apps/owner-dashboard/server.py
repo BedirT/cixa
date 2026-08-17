@@ -9,7 +9,6 @@ an Origin check plus a synchronizer token.
 from __future__ import annotations
 
 import argparse
-import base64
 import http.server
 import json
 import os
@@ -18,6 +17,7 @@ import socket
 import stat
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 
 MAX_BODY = 32 * 1024
@@ -150,17 +150,6 @@ def make_handler(state: DashboardState):
             origin = self.headers.get("Origin", "")
             return origin in {f"http://127.0.0.1:{state.port}", f"http://localhost:{state.port}"}
 
-        def _authorized(self) -> bool:
-            header = self.headers.get("Authorization", "")
-            if not header.startswith("Basic "):
-                return False
-            try:
-                decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
-                username, password = decoded.split(":", 1)
-            except (ValueError, UnicodeDecodeError):
-                return False
-            return username == "owner" and secrets.compare_digest(password, state.access_token)
-
         def _session_ok(self) -> bool:
             cookie = self.headers.get("Cookie", "")
             session_cookie = next(
@@ -169,16 +158,10 @@ def make_handler(state: DashboardState):
             )
             return secrets.compare_digest(session_cookie, state.session)
 
-        def _require_owner(self, require_session: bool = True) -> bool:
-            if self._authorized() and (not require_session or self._session_ok()):
+        def _require_owner(self) -> bool:
+            if self._session_ok():
                 return True
-            self.send_response(401)
-            self._headers("application/json; charset=utf-8")
-            self.send_header("WWW-Authenticate", 'Basic realm="cixa owner"')
-            body = b'{"error":"owner authentication required"}'
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(401, {"error": "owner session required"})
             return False
 
         def _csrf_ok(self) -> bool:
@@ -234,23 +217,14 @@ def make_handler(state: DashboardState):
                 self._send_json(400, {"error": "untrusted Host"})
                 return
             if self.path == "/":
-                if not self._require_owner(require_session=False):
-                    return
                 body = Path(__file__).with_name("index.html").read_bytes()
                 self.send_response(200)
                 self._headers("text/html; charset=utf-8")
-                self.send_header("Set-Cookie", f"csrf={state.csrf}; Path=/; SameSite=Strict")
-                self.send_header(
-                    "Set-Cookie",
-                    f"session={state.session}; Path=/; HttpOnly; SameSite=Strict",
-                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
             if self.path in {"/app.js", "/style.css", "/cixa-mark.svg"}:
-                if not self._require_owner():
-                    return
                 name = self.path.removeprefix("/")
                 body = Path(__file__).with_name(name).read_bytes()
                 if name.endswith(".js"):
@@ -265,10 +239,12 @@ def make_handler(state: DashboardState):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path.startswith("/api/intents/") or self.path.startswith("/api/receipts/"):
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            if path.startswith("/api/intents/") or path.startswith("/api/receipts/"):
                 if not self._require_owner():
                     return
-                intent_id = self.path.rsplit("/", 1)[-1]
+                intent_id = path.rsplit("/", 1)[-1]
                 if not 1 <= len(intent_id) <= 128 or not all(
                     character.isalnum() or character in "_-" for character in intent_id
                 ):
@@ -276,7 +252,7 @@ def make_handler(state: DashboardState):
                     return
                 operation_type = (
                     "get_purchase_intent"
-                    if self.path.startswith("/api/intents/")
+                    if path.startswith("/api/intents/")
                     else "get_receipt"
                 )
                 try:
@@ -287,7 +263,7 @@ def make_handler(state: DashboardState):
                 except (OSError, RuntimeError, ValueError):
                     self._send_json(404, {"error": "intent detail is unavailable"})
                 return
-            if self.path == "/api/status":
+            if path == "/api/status":
                 if not self._require_owner():
                     return
                 try:
@@ -295,16 +271,31 @@ def make_handler(state: DashboardState):
                 except (OSError, RuntimeError, ValueError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
-            if self.path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
+            if path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
                 if not self._require_owner():
                     return
                 try:
-                    if self.path == "/api/overview":
+                    if path == "/api/overview":
                         value = state.call({"type": "owner_get_dashboard"})
-                    elif self.path == "/api/transactions":
-                        value = state.call({"type": "list_transactions"})
-                    elif self.path == "/api/audit":
-                        value = state.call({"type": "owner_list_audit_recent"})
+                    elif path in {"/api/transactions", "/api/audit"}:
+                        query = parse_qs(parsed.query, strict_parsing=True)
+                        if set(query) - {"cursor", "limit"} or any(len(values) != 1 for values in query.values()):
+                            raise ValueError("invalid page query")
+                        limit = int(query.get("limit", ["25"])[0])
+                        if not 1 <= limit <= 50:
+                            raise ValueError("invalid page limit")
+                        raw_cursor = query.get("cursor", [None])[0]
+                        if path == "/api/transactions" and raw_cursor is not None and (
+                            not 1 <= len(raw_cursor) <= 128
+                            or not all(character.isalnum() or character in "_-" for character in raw_cursor)
+                        ):
+                            raise ValueError("invalid transaction cursor")
+                        operation = {
+                            "type": "owner_list_transactions_page" if path == "/api/transactions" else "owner_list_audit_page",
+                            "cursor": int(raw_cursor) if path == "/api/audit" and raw_cursor is not None else raw_cursor,
+                            "limit": limit,
+                        }
+                        value = state.call(operation)
                     else:
                         value = {
                             "overview": state.call({"type": "owner_get_dashboard"}),
@@ -312,13 +303,39 @@ def make_handler(state: DashboardState):
                             "sanitized": True,
                         }
                     self._send_json(200, value)
-                except (OSError, RuntimeError, ValueError):
+                except ValueError:
+                    self._send_json(400, {"error": "invalid page request"})
+                except (OSError, RuntimeError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self._host_allowed() or not self._require_owner():
+            if not self._host_allowed():
+                return
+            if self.path == "/api/session":
+                if not self._same_origin():
+                    self._send_json(403, {"error": "origin validation failed"})
+                    return
+                try:
+                    body = self._read_json()
+                    if set(body) != {"access_token"} or not isinstance(body["access_token"], str):
+                        raise ValueError("invalid session request")
+                    if not secrets.compare_digest(body["access_token"], state.access_token):
+                        self._send_json(401, {"error": "access credential rejected"})
+                        return
+                    response = b'{"ok":true}'
+                    self.send_response(200)
+                    self._headers("application/json; charset=utf-8")
+                    self.send_header("Set-Cookie", f"csrf={state.csrf}; Path=/; SameSite=Strict")
+                    self.send_header("Set-Cookie", f"session={state.session}; Path=/; HttpOnly; SameSite=Strict")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                except (ValueError, json.JSONDecodeError):
+                    self._send_json(400, {"error": "request rejected"})
+                return
+            if not self._require_owner():
                 return
             if not self._same_origin() or not self._csrf_ok():
                 self._send_json(403, {"error": "origin or CSRF validation failed"})

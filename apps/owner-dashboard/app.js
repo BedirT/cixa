@@ -1,7 +1,7 @@
 "use strict";
 
-const csrf = document.cookie.split("; ").find((part) => part.startsWith("csrf="))?.split("=")[1] ?? "";
-const state = { overview: null, audit: null, route: "today", ledgerFilter: "all", search: "", busy: false, dialogAction: null, lastFocus: null, lastSuccessfulRefresh: null, offline:false };
+let csrf = "";
+const state = { overview: null, audit: null, ledgerTransactions:[], ledgerCursor:null, ledgerTotal:0, auditCursor:null, route: "today", ledgerFilter: "all", search: "", busy: false, dialogAction: null, lastFocus: null, lastSuccessfulRefresh: null, offline:false };
 const waitingStates = new Set(["approval_required", "provider_pending", "unknown", "reconciliation_required"]);
 const paidStates = new Set(["settled", "refunded"]);
 const stoppedStates = new Set(["declined", "failed", "cancelled"]);
@@ -50,6 +50,20 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status}).`);
   return value;
 }
+function readCsrf() { csrf = document.cookie.split("; ").find((part) => part.startsWith("csrf="))?.split("=")[1] ?? ""; }
+readCsrf();
+async function loadLedger(reset = false) {
+  const cursor = reset ? null : state.ledgerCursor;
+  const page = await api(`/api/transactions?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+  state.ledgerTransactions = reset ? page.transactions : [...state.ledgerTransactions, ...page.transactions];
+  state.ledgerCursor = page.next_cursor; state.ledgerTotal = page.transactions_total; renderLedger();
+}
+async function loadAudit(reset = false) {
+  const cursor = reset ? null : state.auditCursor;
+  const page = await api(`/api/audit?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+  state.audit = reset ? page : {...page, entries:[...(state.audit?.entries ?? []), ...page.entries]};
+  state.auditCursor = page.next_cursor; renderTrust();
+}
 async function post(path, body, success) {
   if (state.busy) return;
   state.busy = true; document.body.classList.add("busy"); $("main").setAttribute("aria-busy", "true");
@@ -66,8 +80,9 @@ function toast(message, error = false) {
 async function refresh() {
   try {
     state.overview = await api("/api/overview");
+    await loadLedger(true);
     state.lastSuccessfulRefresh = new Date(); state.offline = false; render();
-    try { state.audit = await api("/api/audit"); renderTrust(); }
+    try { await loadAudit(true); }
     catch { state.audit = null; renderTrust(); }
   } catch (error) {
     state.offline = true; renderChrome(); throw error;
@@ -101,10 +116,10 @@ function renderToday() {
   $("#today-heading").textContent = pendingCount ? "A few things need you." : "All quiet.";
   $("#today-summary").textContent = pendingCount ? `${pendingCount} ${pendingCount === 1 ? "decision is" : "decisions are"} waiting. Everything else stays inside your rules.` : "Nothing needs a decision. Cixa is reading every checkout as it comes in.";
   const currency = data.provider.balance?.currency ?? "CAD";
-  const active = data.agents.filter((agent) => !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000 && agent.budget?.usage?.rolling_24h_amount?.currency === currency);
-  const spent = active.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const remaining = active.reduce((sum, agent) => sum + agent.budget.remaining_rolling_24h.minor, 0); const allowance = spent + remaining;
+  const active = data.agents.filter((agent) => !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000 && agent.broker_session_expires_at > Date.now()/1000 && agent.budget?.usage?.rolling_24h_amount?.currency === currency);
+  const spent = active.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const policyRemaining = active.reduce((sum, agent) => sum + agent.budget.remaining_rolling_24h.minor, 0); const providerRemaining = data.provider.balance_evidence?.stale ? 0 : data.provider.balance?.minor ?? 0; const authorityRemaining = data.available_authority?.currency === currency ? data.available_authority.minor : 0; const remaining = Math.max(0, Math.min(policyRemaining, providerRemaining, authorityRemaining)); const allowance = spent + remaining;
   const evidence = data.provider.balance_evidence?.stale ? "Expired evidence" : title(data.provider.balance_status);
-  replace($("#today-metrics"), [metric("Spent in 24 hours", money({ minor:spent, currency }), "Authoritative broker ledger usage", allowance ? spent / allowance * 100 : 0), metric("Provider reports", money(data.provider.balance), evidence, data.provider.balance_evidence?.stale ? 0 : 100, data.provider.balance_evidence?.stale ? "" : "green"), metric("Still allowed", money({ minor:remaining, currency }), "Across active agent limits", allowance ? remaining / allowance * 100 : 0)]);
+  replace($("#today-metrics"), [metric("Spent in 24 hours", money({ minor:spent, currency }), "Authoritative broker ledger usage", allowance ? spent / allowance * 100 : 0), metric("Provider reports", money(data.provider.balance), evidence, data.provider.balance_evidence?.stale ? 0 : 100, data.provider.balance_evidence?.stale ? "" : "green"), metric("Available now", money({ minor:remaining, currency }), "Capped by shared funds, ledger authority, and active agent limits", allowance ? remaining / allowance * 100 : 0)]);
   $("#waiting-count").textContent = `${pendingCount} ${pendingCount === 1 ? "item" : "items"}`; replace($("#decision-list"), pending.length ? pending.map(decisionCard) : empty("Nothing needs you right now."));
   const recent = [...data.transactions].sort((a,b) => b.updated_at - a.updated_at).slice(0,4); replace($("#recent-list"), recent.length ? recent.map(ledgerRow) : empty("No purchases have been attempted yet."));
 }
@@ -131,10 +146,12 @@ function ledgerRow(intent) {
   return node("button", { type:"button", class:"ledger-row", onclick:() => openIntent(intent) }, [node("span", { class:`ledger-state ${statusTone(intent.state)}`, text:statusCopy(intent.state) }), node("span", {}, [node("span", { class:"ledger-title", text:purchaseTitle(intent) }), node("span", { class:"ledger-meta", text:`${agentName(intent.agent_id)} · ${intent.merchant_domain} · ${when(intent.updated_at)}` }), reason ? node("span", { class:"ledger-reason", text:humanReason(reason) }) : null]), node("span", { class:"ledger-amount", text:money(intent.amount) })]);
 }
 function renderLedger() {
-  let list = [...state.overview.transactions].sort((a,b) => b.updated_at - a.updated_at); const query = state.search.trim().toLowerCase();
+  let list = [...state.ledgerTransactions].sort((a,b) => b.updated_at - a.updated_at); const query = state.search.trim().toLowerCase();
   if (state.ledgerFilter === "waiting") list = list.filter((item) => waitingStates.has(item.state)); else if (state.ledgerFilter === "paid") list = list.filter((item) => paidStates.has(item.state)); else if (state.ledgerFilter === "stopped") list = list.filter((item) => stoppedStates.has(item.state));
   if (query) list = list.filter((item) => [purchaseTitle(item), item.merchant_domain, agentName(item.agent_id), item.provider_reference].filter(Boolean).some((value) => String(value).toLowerCase().includes(query)));
   replace($("#ledger-list"), list.length ? list.map(ledgerRow) : empty("No purchases match this filter."));
+  $("#ledger-page-status").textContent = `Showing ${state.ledgerTransactions.length} of ${state.ledgerTotal} attempts`;
+  $("#ledger-load-more").hidden = !state.ledgerCursor;
 }
 function renderAgents() {
   const agents = state.overview.agents; replace($("#agent-list"), agents.length ? agents.map(agentCard) : empty("No agents yet. Create one to issue a scoped capability."));
@@ -143,8 +160,8 @@ function renderAgents() {
   depositAgent.value = selected;
 }
 function agentCard(agent) {
-  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const active = !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000;
-  return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [node("div", {}, [node("h2", { text:agent.name }), node("p", { class:"agent-subtitle", text:title(agent.mode) })]), node("span", { class:`state-badge ${active ? "success" : ""}`, text:agent.revoked ? "Revoked" : active ? "Active" : "Paused" })]), node("div", { class:"progress-row" }, [node("span", { text:"Spent against rolling limit" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } }), node("div", { class:"fact-list" }, [fact("Most at once", money(policy?.max_per_transaction)), fact("Purchases", String(state.overview.transactions.filter((item) => item.agent_id === agent.id).length)), fact("Session expires", when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [button(active ? "Pause spending" : "Allow with approval", active ? "secondary-button" : "quiet-button", () => setAgentMode(agent, active ? "disabled" : "approval_required")), button("Manage limits", "quiet-button", () => openAgent(agent))])]);
+  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const active = !agent.revoked && agent.mode !== "disabled" && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":sessionExpired?"Session expired":active?"Active":"Paused"; const primaryAction=sessionExpired&&!agent.revoked&&!capabilityExpired?button("Arm spending", "quiet-button",()=>confirmAction({title:"Arm this agent again?",copy:"This starts a new local spending session. Existing limits and approval rules still apply.",label:"Arm spending",action:()=>post("/api/agents/arm-session",{agent_id:agent.id,ttl_secs:3600},"Agent session armed for one hour.")})):button(active ? "Pause spending" : "Allow with approval", active ? "secondary-button" : "quiet-button", () => setAgentMode(agent, active ? "disabled" : "approval_required"));
+  return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [node("div", {}, [node("h2", { text:agent.name }), node("p", { class:"agent-subtitle", text:title(agent.mode) })]), node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"progress-row" }, [node("span", { text:"Spent against rolling limit" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } }), node("div", { class:"fact-list" }, [fact("Most at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session expires", when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [primaryAction, button("Manage limits", "quiet-button", () => openAgent(agent))])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
 function renderTrust() {
@@ -154,7 +171,8 @@ function renderTrust() {
   if (!state.audit) { $("#audit-verification").textContent = "Audit history is temporarily unavailable. Other owner controls still work."; replace($("#audit-list"), empty("Refresh to try loading audit history again.")); }
   else {
     $("#audit-verification").textContent = state.audit.chain_valid ? `Audit chain verified · showing ${state.audit.entries.length} of ${state.audit.entries_total ?? state.audit.entries.length} events` : "Audit chain verification failed";
-    replace($("#audit-list"), state.audit.entries.length ? [...state.audit.entries].reverse().map((entry) => node("article", { class:"audit-entry" }, [node("h3", { text:title(entry.action) }), node("p", { text:`${entry.actor} · ${when(entry.at)}${entry.intent_id ? ` · ${entry.intent_id}` : ""}` }), node("details", {}, [node("summary", { text:"Technical evidence" }), node("p", { text:`Sequence ${entry.sequence} · hash ${entry.hash} · previous ${entry.previous_hash}` }), node("pre", { text:JSON.stringify(entry.details, null, 2) })])])) : empty("No audit events yet."));
+    replace($("#audit-list"), state.audit.entries.length ? state.audit.entries.map((entry) => node("article", { class:"audit-entry" }, [node("h3", { text:title(entry.action) }), node("p", { text:`${entry.actor} · ${when(entry.at)}${entry.intent_id ? ` · ${entry.intent_id}` : ""}` }), node("details", {}, [node("summary", { text:"Technical evidence" }), node("p", { text:`Sequence ${entry.sequence} · hash ${entry.hash} · previous ${entry.previous_hash}` }), node("pre", { text:JSON.stringify(entry.details, null, 2) })])])) : empty("No audit events yet."));
+    $("#audit-load-more").hidden = !state.auditCursor;
   }
   const instructions = state.overview.receive_instructions; if (instructions) { const form = $("#receive-form"); form.elements.method.value = instructions.method; form.elements.address.value = instructions.address; form.elements.memo_template.value = instructions.memo_template; }
 }
@@ -236,6 +254,8 @@ async function exportAudit(){const value=await api("/api/export");const blob=new
 window.addEventListener("hashchange",navigate);
 $$('[data-filter]').forEach((buttonItem)=>buttonItem.addEventListener("click",()=>{state.ledgerFilter=buttonItem.dataset.filter;$$('[data-filter]').forEach((item)=>item.setAttribute("aria-pressed",String(item===buttonItem)));renderLedger();}));
 $("#ledger-search").addEventListener("input",(event)=>{state.search=event.target.value;renderLedger();});
+$("#ledger-load-more").addEventListener("click",()=>loadLedger().catch((error)=>toast(error.message,true)));
+$("#audit-load-more").addEventListener("click",()=>loadAudit().catch((error)=>toast(error.message,true)));
 $$('[data-trust-tab]').forEach((buttonItem)=>buttonItem.addEventListener("click",()=>selectTrust(buttonItem.dataset.trustTab)));
 $$('[data-close-drawer]').forEach((item)=>item.addEventListener("click",closeDrawer));
 document.addEventListener("keydown",(event)=>{const drawer=$("#detail-drawer");if(!drawer.classList.contains("open"))return;if(event.key==="Escape")closeDrawer();if(event.key==="Tab"){const focusable=$$("#detail-drawer button:not([disabled]),#detail-drawer input:not([disabled]),#detail-drawer select:not([disabled]),#detail-drawer a[href]").filter((item)=>item.offsetParent!==null);if(!focusable.length)return;const first=focusable[0],last=focusable.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
@@ -251,6 +271,9 @@ $("#receive-form").addEventListener("submit",(event)=>{event.preventDefault();co
 $("#deposit-form").addEventListener("submit",(event)=>{event.preventDefault();const form=new FormData(event.currentTarget);const verified=form.get("verified")==="on";confirmAction({title:verified?"Confirm this money arrived?":"Record this as unverified?",copy:verified?"You are asserting that the provider's own record shows this money cleared. It may increase the linked agent's spending authority.":"Cixa will keep this arrival outside spending authority until an owner verifies it.",label:verified?"Record verified arrival":"Keep unverified",action:()=>post("/api/deposits/record",{amount:{minor:Math.round(Number(form.get("amount"))*100),currency:String(form.get("currency")).toUpperCase()},source:String(form.get("source")),verified,agent_id:String(form.get("agent_id"))||null,external_reference:String(form.get("external_reference"))},verified?"Verified arrival recorded.":"Unverified arrival recorded and kept outside spending authority.")});});
 $("#theme-button").addEventListener("click",()=>{const dark=document.documentElement.dataset.theme!=="dark";document.documentElement.dataset.theme=dark?"dark":"light";localStorage.setItem("cixa-theme",dark?"dark":"light");$("#theme-button").setAttribute("aria-label",dark?"Use light theme":"Use dark theme");});
 if(localStorage.getItem("cixa-theme")==="dark") { document.documentElement.dataset.theme="dark"; $("#theme-button").setAttribute("aria-label", "Use light theme"); }
-navigate(); refresh().catch((error)=>{$("#connection-label").textContent="Cixa is offline";$("#watch-copy").textContent="The local broker did not answer.";toast(error.message,true);});
+navigate();
+$("#unlock-form").addEventListener("submit",async(event)=>{event.preventDefault();const token=$("#unlock-token").value;$("#unlock-error").textContent="";try{const response=await fetch("/api/session",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({access_token:token})});if(!response.ok)throw new Error("That access token was not accepted.");$("#unlock-token").value="";readCsrf();$("#unlock-dialog").close();await refresh();}catch(error){$("#unlock-error").textContent=error.message;}});
+if (csrf) refresh().catch((error)=>{if(error.message.includes("session required")){$("#unlock-dialog").showModal();$("#unlock-token").focus();return;}$("#connection-label").textContent="Cixa is offline";$("#watch-copy").textContent="The local broker did not answer.";toast(error.message,true);});
+else { $("#unlock-dialog").showModal(); $("#unlock-token").focus(); }
 window.setInterval(() => refresh().catch(() => {}), 15000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh().catch(() => {}); });

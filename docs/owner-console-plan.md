@@ -10,7 +10,7 @@ The console follows the delivered `cixa_design.html` direction: an airy blue-gra
 
 The implementation intentionally differs from the design brief in these places:
 
-- Browser HTTP Basic authentication remains the unlock boundary. Rebuilding the credential form in page JavaScript would put the dashboard secret into the DOM and browser state without improving the security boundary.
+- A local unlock form exchanges the separate dashboard token once for a random, per-process session. This avoids leaving a reusable Basic credential in the browser authentication cache, where a local process taking over the port could collect it from polling.
 - There is no fake provider-health integration or live bank balance. The UI labels simulated, owner-confirmed, estimated, and stale evidence exactly as the broker reports them.
 - Mobile supports monitoring, request decisions, emergency stop, and reconciliation. Dense policy editing remains usable but is optimized for desktop and tablet.
 - The hostile checkout laboratory remains a test fixture and is not presented as product UI.

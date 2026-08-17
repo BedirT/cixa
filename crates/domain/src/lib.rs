@@ -32,6 +32,10 @@ pub const AUDIT_KEY_FILE: &str = "audit.key";
 pub const LOCK_FILE: &str = "cixa.lock";
 const DASHBOARD_HISTORY_LIMIT: usize = 10;
 const DASHBOARD_AUDIT_LIMIT: usize = 25;
+const OWNER_PAGE_LIMIT: usize = 50;
+const MAX_PURCHASE_REQUEST_BYTES: usize = 4 * 1024;
+const MAX_INTENTS: usize = 10_000;
+const MAX_AUDIT_ENTRIES: usize = 100_000;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -100,6 +104,13 @@ fn bounded(value: &str, field: &str, max: usize) -> Result<()> {
     }
     if value.chars().any(|c| c.is_control()) {
         return Err(TreasuryError::Invalid(format!("{field} contains a control character")));
+    }
+    Ok(())
+}
+
+fn bounded_bytes(value: &str, field: &str, max: usize) -> Result<()> {
+    if value.is_empty() || value.len() > max {
+        return Err(TreasuryError::Invalid(format!("{field} must contain 1..{max} bytes")));
     }
     Ok(())
 }
@@ -538,6 +549,11 @@ pub struct PurchaseRequest {
 
 impl PurchaseRequest {
     fn validate(&self, policy: &Policy, at: i64) -> Result<()> {
+        if serde_json::to_vec(self)?.len() > MAX_PURCHASE_REQUEST_BYTES {
+            return Err(TreasuryError::Invalid(
+                "purchase request exceeds the 4096-byte limit".to_string(),
+            ));
+        }
         bounded(&self.idempotency_key, "idempotency_key", 128)?;
         bounded(&self.merchant_domain, "merchant_domain", 253)?;
         bounded(&self.category, "category", 64)?;
@@ -554,6 +570,7 @@ impl PurchaseRequest {
         let mut item_total = 0_i64;
         for item in &self.items {
             bounded(&item.label, "item_label", 160)?;
+            bounded_bytes(&item.label, "item_label", 640)?;
             if item.quantity == 0 || item.quantity > 10_000 || item.unit_price_minor < 0 {
                 return Err(TreasuryError::Invalid("purchase line item is invalid".to_string()));
             }
@@ -593,6 +610,9 @@ impl PurchaseRequest {
         }
         if self.redirect_chain.len() > policy.max_redirects {
             return Err(TreasuryError::Invalid("redirect chain is too long".to_string()));
+        }
+        for redirect in &self.redirect_chain {
+            bounded_bytes(redirect, "redirect_url", 2048)?;
         }
         if self.idempotency_key.len() > 128 {
             return Err(TreasuryError::Invalid("idempotency key is too long".to_string()));
@@ -1189,6 +1209,10 @@ pub enum Request {
         intent_id: String,
     },
     ListTransactions,
+    OwnerListTransactionsPage {
+        cursor: Option<String>,
+        limit: u32,
+    },
     GetReceipt {
         intent_id: String,
     },
@@ -1259,6 +1283,10 @@ pub enum Request {
     },
     OwnerListAudit,
     OwnerListAuditRecent,
+    OwnerListAuditPage {
+        cursor: Option<u64>,
+        limit: u32,
+    },
 }
 
 impl Request {
@@ -1282,6 +1310,8 @@ impl Request {
                 | Self::OwnerConfigureReceiveInstructions { .. }
                 | Self::OwnerListAudit
                 | Self::OwnerListAuditRecent
+                | Self::OwnerListAuditPage { .. }
+                | Self::OwnerListTransactionsPage { .. }
                 | Self::OwnerGetDashboard
         )
     }
@@ -1326,6 +1356,7 @@ where
         | "owner_list_audit"
         | "owner_list_audit_recent"
         | "owner_get_dashboard" => &[],
+        "owner_list_transactions_page" | "owner_list_audit_page" => &["cursor", "limit"],
         "create_purchase_intent" => &["request"],
         "get_purchase_intent"
         | "execute_purchase_intent"
@@ -1674,6 +1705,11 @@ impl Treasury {
         if self.state.schema_version != 2 {
             return Err(TreasuryError::Invalid("unsupported persisted state schema".to_string()));
         }
+        if self.state.intents.len() > MAX_INTENTS || self.state.audit.len() > MAX_AUDIT_ENTRIES {
+            return Err(TreasuryError::Invalid(
+                "persisted treasury exceeds its durable record quota".to_string(),
+            ));
+        }
         if self.state.owner.capability_token_hash.len() != 64 {
             return Err(TreasuryError::Invalid("owner token hash is invalid".to_string()));
         }
@@ -2013,6 +2049,9 @@ impl Treasury {
             Request::ExecutePurchaseIntent { intent_id } => self.execute_intent(&actor, &intent_id),
             Request::CancelPurchaseIntent { intent_id } => self.cancel_intent(&actor, &intent_id),
             Request::ListTransactions => self.list_transactions(&actor),
+            Request::OwnerListTransactionsPage { cursor, limit } => {
+                self.owner_list_transactions_page(&actor, cursor.as_deref(), limit)
+            }
             Request::GetReceipt { intent_id } => self.get_receipt(&actor, &intent_id),
             Request::OwnerCreateAgent { name, policy, mode, ttl_secs } => {
                 self.owner_create_agent(&actor, name, policy, mode, ttl_secs)
@@ -2081,6 +2120,9 @@ impl Treasury {
             }
             Request::OwnerListAudit => self.owner_list_audit(&actor),
             Request::OwnerListAuditRecent => self.owner_list_audit_recent(&actor),
+            Request::OwnerListAuditPage { cursor, limit } => {
+                self.owner_list_audit_page(&actor, cursor, limit)
+            }
         }
     }
 
@@ -2160,6 +2202,8 @@ impl Treasury {
         for agent in self.state.agents.values() {
             let policy = self.policy(&agent.policy_id)?;
             let usage = self.usage(&agent.id, &policy.primary_currency)?;
+            let transaction_count =
+                self.state.intents.values().filter(|intent| intent.agent_id == agent.id).count();
             agents.push(json!({
                 "id": agent.id,
                 "name": agent.name,
@@ -2170,6 +2214,7 @@ impl Treasury {
                 "revoked": agent.revoked,
                 "broker_session_expires_at": agent.broker_session_expires_at,
                 "approved_merchants": agent.approved_merchants,
+                "transaction_count": transaction_count,
                 "budget": {
                     "usage": usage,
                     "remaining_rolling_24h": remaining_money(
@@ -2243,6 +2288,9 @@ impl Treasury {
                 "balance_evidence": self.provider_balance_evidence(),
                 "manual_card": manual_card,
             },
+            "available_authority": self
+                .ledger_snapshot(&self.state.provider.balance.currency)?
+                .available_authority,
             "agents": agents,
             "policies": self.state.policies,
             "transactions": transactions,
@@ -2338,6 +2386,12 @@ impl Treasury {
     }
 
     fn create_intent(&mut self, actor: &Actor, mut request: PurchaseRequest) -> Result<Value> {
+        if self.state.intents.len() >= MAX_INTENTS {
+            return Err(TreasuryError::Conflict(
+                "durable transaction quota reached; archive this treasury before continuing"
+                    .to_string(),
+            ));
+        }
         let agent_id = self.require_agent_scope(actor, "purchase_intents:create")?.to_string();
         let agent = self.agent(&agent_id)?.clone();
         request.merchant_domain = canonicalize_domain(&request.merchant_domain)?;
@@ -2726,6 +2780,49 @@ impl Treasury {
             })
             .collect();
         Ok(json!({ "transactions": values }))
+    }
+
+    fn owner_list_transactions_page(
+        &self,
+        actor: &Actor,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if limit == 0 || limit > OWNER_PAGE_LIMIT {
+            return Err(TreasuryError::Invalid(format!(
+                "page limit must be between 1 and {OWNER_PAGE_LIMIT}"
+            )));
+        }
+        let mut intents: Vec<&PurchaseIntent> = self.state.intents.values().collect();
+        intents.sort_by_key(|intent| std::cmp::Reverse((intent.created_at, intent.id.as_str())));
+        let start = match cursor {
+            Some(value) => intents
+                .iter()
+                .position(|intent| intent.id == value)
+                .map(|position| position + 1)
+                .ok_or_else(|| {
+                    TreasuryError::Invalid("transaction cursor is invalid".to_string())
+                })?,
+            None => 0,
+        };
+        let page: Vec<Value> = intents
+            .iter()
+            .skip(start)
+            .take(limit)
+            .map(|intent| self.owner_intent(intent))
+            .collect();
+        let has_more = start + page.len() < intents.len();
+        let next_cursor = has_more
+            .then(|| page.last().and_then(|value| value["id"].as_str()).map(str::to_string))
+            .flatten();
+        Ok(json!({
+            "transactions": page,
+            "transactions_total": intents.len(),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }))
     }
 
     fn get_receipt(&self, actor: &Actor, intent_id: &str) -> Result<Value> {
@@ -3556,6 +3653,38 @@ impl Treasury {
         }))
     }
 
+    fn owner_list_audit_page(
+        &self,
+        actor: &Actor,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if limit == 0 || limit > OWNER_PAGE_LIMIT {
+            return Err(TreasuryError::Invalid(format!(
+                "page limit must be between 1 and {OWNER_PAGE_LIMIT}"
+            )));
+        }
+        let entries: Vec<&AuditEntry> = self
+            .state
+            .audit
+            .iter()
+            .rev()
+            .filter(|entry| cursor.is_none_or(|sequence| entry.sequence < sequence))
+            .take(limit)
+            .collect();
+        let has_more = entries.last().is_some_and(|entry| entry.sequence > 1);
+        let next_cursor = has_more.then(|| entries.last().map(|entry| entry.sequence)).flatten();
+        Ok(json!({
+            "entries": entries,
+            "entries_total": self.state.audit.len(),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
+    }
+
     fn agent(&self, agent_id: &str) -> Result<&AgentRecord> {
         self.state
             .agents
@@ -3904,6 +4033,11 @@ impl Treasury {
         decision: Option<&str>,
         details: Value,
     ) -> Result<()> {
+        if self.state.audit.len() >= MAX_AUDIT_ENTRIES {
+            return Err(TreasuryError::Conflict(
+                "durable audit quota reached; archive this treasury before continuing".to_string(),
+            ));
+        }
         self.state.generation = self
             .state
             .generation
@@ -5459,10 +5593,20 @@ mod tests {
                 )
                 .unwrap();
         }
+        for index in 0..10 {
+            let mut purchase = request(&format!("wide-history-{index}"), 1);
+            purchase.items[0].label = "x".repeat(160);
+            purchase.redirect_chain = (0..2)
+                .map(|_| format!("https://merchant.example.test/{}", "y".repeat(1650)))
+                .collect();
+            let request_size = serde_json::to_vec(&purchase).unwrap().len();
+            assert!(request_size > 3_800 && request_size <= MAX_PURCHASE_REQUEST_BYTES);
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).unwrap();
+        }
         let dashboard =
             treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
         assert_eq!(dashboard["transactions"].as_array().unwrap().len(), 10);
-        assert_eq!(dashboard["transactions_total"], 205);
+        assert_eq!(dashboard["transactions_total"], 215);
         assert_eq!(dashboard["transactions_truncated"], true);
         assert!(serde_json::to_vec(&dashboard).unwrap().len() < 256 * 1024);
         let agent = dashboard["agents"]
@@ -5473,6 +5617,37 @@ mod tests {
             .unwrap();
         assert_eq!(agent["budget"]["usage"]["rolling_24h_amount"]["minor"], 0);
         assert_eq!(agent["budget"]["remaining_rolling_24h"]["minor"], 10_000);
+        assert_eq!(agent["transaction_count"], 215);
+        assert_eq!(dashboard["available_authority"]["minor"], 10_000);
+
+        let first_page = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerListTransactionsPage { cursor: None, limit: 50 },
+            )
+            .unwrap();
+        assert_eq!(first_page["transactions"].as_array().unwrap().len(), 50);
+        assert_eq!(first_page["transactions_total"], 215);
+        assert_eq!(first_page["has_more"], true);
+        let second_page = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerListTransactionsPage {
+                    cursor: first_page["next_cursor"].as_str().map(str::to_string),
+                    limit: 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(second_page["transactions"].as_array().unwrap().len(), 50);
+        assert_ne!(first_page["transactions"][49]["id"], second_page["transactions"][0]["id"]);
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerListTransactionsPage { cursor: None, limit: 51 }
+                )
+                .is_err()
+        );
 
         for stopped in (0..510).map(|index| index % 2 == 0) {
             treasury
@@ -5485,6 +5660,30 @@ mod tests {
         assert!(audit["entries_total"].as_u64().unwrap() > 500);
         assert_eq!(audit["chain_valid"], true);
         assert!(serde_json::to_vec(&audit).unwrap().len() < 256 * 1024);
+        let audit_page = treasury
+            .handle(&bootstrap.owner_token, Request::OwnerListAuditPage { cursor: None, limit: 50 })
+            .unwrap();
+        assert_eq!(audit_page["entries"].as_array().unwrap().len(), 50);
+        assert_eq!(audit_page["has_more"], true);
+    }
+
+    #[test]
+    fn purchase_request_rejects_byte_heavy_redirects_and_oversized_payloads() {
+        let policy = Policy::conservative_demo().unwrap();
+        let mut purchase = request("oversized-redirect", 1);
+        purchase.redirect_chain =
+            vec![format!("https://merchant.example.test/{}", "x".repeat(2049))];
+        assert!(purchase.validate(&policy, now()).is_err());
+
+        let mut purchase = request("oversized-payload", 1);
+        purchase.items = (0..30)
+            .map(|_| PurchaseItem {
+                label: "wide-label".repeat(16),
+                quantity: 1,
+                unit_price_minor: 0,
+            })
+            .collect();
+        assert!(purchase.validate(&policy, now()).is_err());
     }
 
     #[test]

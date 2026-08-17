@@ -67,7 +67,7 @@ Run the agent with a read-only root filesystem, no host network, no Docker socke
 
 ## Owner Dashboard
 
-The dashboard requires two private files: the broker owner token, which remains server-side, and a separate dashboard access token that the owner enters through the browser's HTTP Basic prompt. Generate the latter under `umask 077`, pass it with `--access-token-file`, and never mount it into the agent sandbox. Authentication is required before the HTML, static assets, status API, or emergency endpoint are served. The HTTP-only session cookie, readable CSRF cookie, Host allowlist, and exact Origin check are secondary controls. Stop the dashboard when it is not needed.
+The dashboard requires two private files: the broker owner token, which remains server-side, and a separate dashboard access token entered into the local unlock screen. Generate the latter under `umask 077`, pass it with `--access-token-file`, and never mount it into the agent sandbox. The HTML and bundled static assets contain no private data and load before unlock. The access token is exchanged once for an HTTP-only, random, per-process session plus a readable CSRF cookie, then cleared from the form. API data and owner controls require that session, the Host allowlist, and exact Origin and CSRF checks. A session captured after a loopback port takeover is invalid against a restarted dashboard. Stop the dashboard when it is not needed.
 
 ## TCP
 
@@ -76,3 +76,7 @@ No TCP mode is shipped. If a future deployment adds one, it must require explici
 ## Local Verification Policy
 
 This solo-developer repository intentionally has no hosted GitHub Actions workflow. The owner runs `./scripts/verify` locally before each push. This is an explicit resource and workflow choice, not evidence that hosted checks passed; a future multi-contributor or public release should reassess hosted branch protection and independent build infrastructure.
+
+## Durable Record Quotas
+
+Cixa accepts at most 10,000 purchase intents and 100,000 audit events in one treasury. Purchase requests are limited to 4 KiB and individual redirect URLs to 2 KiB. These fail-closed limits keep a compromised agent from growing `state.json` or dashboard responses without bound. Before a treasury reaches a quota, stop agents, keep an owner-only backup of the complete data directory and audit export, then initialize a new data directory and issue new capabilities. Do not delete individual records from an active treasury because that invalidates its authenticated state and audit chain.

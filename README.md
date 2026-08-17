@@ -90,7 +90,7 @@ python3 apps/owner-dashboard/server.py \
   --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. The browser will ask for HTTP Basic credentials. Use `owner` as the username and the contents of `.local/dashboard.token` as the password. The console binds to loopback, requires an authenticated session plus CSRF and Origin checks for changes, and keeps the browser password separate from the broker owner token.
+Open `http://127.0.0.1:8765` and paste the contents of `.local/dashboard.token` into the unlock screen. Cixa exchanges it once for a random, per-process session and clears the field. The reusable token is never placed in the browser's HTTP authentication cache, so a different process taking over the port cannot collect it from background requests. The console stays on loopback, checks the exact Origin and CSRF token for changes, and keeps dashboard access separate from the broker owner token.
 
 ## What Cixa Actually Does
 

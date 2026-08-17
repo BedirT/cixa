@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 import http.client
 import json
 import os
@@ -138,25 +137,41 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         for _ in range(100):
             try:
                 status, _, _ = request(port, "GET", "/")
-                if status == 401:
+                if status == 200:
                     break
             except OSError:
                 time.sleep(0.05)
         else:
-            raise SystemExit("dashboard did not start with owner authentication")
+            raise SystemExit("dashboard did not start")
 
         status, _, _ = request(port, "GET", "/")
-        assert status == 401
-        authorization = "Basic " + base64.b64encode(
-            f"owner:{access_token}".encode("utf-8")
-        ).decode("ascii")
-        status, headers, body = request(
-            port,
-            "GET",
-            "/",
-            {"Authorization": authorization},
-        )
+        assert status == 200
+        status, _, body = request(port, "GET", "/")
         assert status == 200 and b"Stop all spending" in body and b"Cixa" in body
+        assert access_token.encode() not in body
+        assert request(port, "GET", "/api/status")[0] == 401
+        assert request(
+            port,
+            "POST",
+            "/api/session",
+            {"Origin": "http://attacker.example", "Content-Type": "application/json"},
+            json.dumps({"access_token": access_token}).encode(),
+        )[0] == 403
+        assert request(
+            port,
+            "POST",
+            "/api/session",
+            {"Origin": f"http://127.0.0.1:{port}", "Content-Type": "application/json"},
+            b'{"access_token":"wrong"}',
+        )[0] == 401
+        status, headers, _ = request(
+            port,
+            "POST",
+            "/api/session",
+            {"Origin": f"http://127.0.0.1:{port}", "Content-Type": "application/json"},
+            json.dumps({"access_token": access_token}).encode(),
+        )
+        assert status == 200
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         cookie_header = "; ".join(value.split(";", 1)[0] for value in cookies)
         csrf = next(
@@ -164,7 +179,7 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
             for value in cookie_header.split("; ")
             if value.startswith("csrf=")
         )
-        authenticated = {"Authorization": authorization, "Cookie": cookie_header}
+        authenticated = {"Cookie": cookie_header}
         assert request(port, "GET", "/app.js", authenticated)[0] == 200
         assert request(port, "GET", "/style.css", authenticated)[0] == 200
         mark_status, mark_headers, mark_body = request(
@@ -175,7 +190,6 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         assert request(port, "GET", "/api/status", authenticated)[0] == 200
         unauthenticated_attack = {
             "Origin": f"http://127.0.0.1:{port}",
-            "Cookie": cookie_header,
             "X-CSRF-Token": csrf,
             "Content-Type": "application/json",
         }
@@ -186,7 +200,7 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
             unauthenticated_attack,
             b'{"stopped":false}',
         )[0] == 401
-        owner_headers = dict(unauthenticated_attack, Authorization=authorization)
+        owner_headers = dict(unauthenticated_attack, Cookie=cookie_header)
         assert request(
             port,
             "GET",
@@ -376,12 +390,53 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
                 "external_reference": "dashboard-deposit-1",
             },
         )
-        assert request(port, "GET", "/api/transactions", authenticated)[0] == 200
-        assert request(port, "GET", "/api/audit", authenticated)[0] == 200
+        transaction_status, _, transaction_body = request(
+            port, "GET", "/api/transactions?limit=1", authenticated
+        )
+        transaction_page = json.loads(transaction_body)
+        assert transaction_status == 200 and len(transaction_page["transactions"]) == 1
+        if transaction_page["next_cursor"]:
+            assert request(
+                port,
+                "GET",
+                f"/api/transactions?limit=1&cursor={transaction_page['next_cursor']}",
+                authenticated,
+            )[0] == 200
+        assert request(port, "GET", "/api/transactions?limit=51", authenticated)[0] == 400
+        assert request(port, "GET", "/api/transactions?unexpected=1", authenticated)[0] == 400
+        assert request(port, "GET", "/api/audit?limit=1", authenticated)[0] == 200
         export_status, _, export_body = request(port, "GET", "/api/export", authenticated)
         assert export_status == 200 and json.loads(export_body)["sanitized"] is True
         owner_post("/api/agents/revoke", {"agent_id": agent_id})
         assert rpc(owner_socket_path, owner_file.read_text().strip(), {"type": "owner_get_dashboard"})["agents"][0]["revoked"] is True
+
+        dashboard.send_signal(signal.SIGTERM)
+        dashboard.wait(timeout=5)
+        dashboard = subprocess.Popen(
+            [
+                "python3",
+                str(ROOT / "apps" / "owner-dashboard" / "server.py"),
+                "--socket-path",
+                str(owner_socket_path),
+                "--owner-token-file",
+                str(owner_file),
+                "--access-token-file",
+                str(access_file),
+                "--port",
+                str(port),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(100):
+            try:
+                if request(port, "GET", "/")[0] == 200:
+                    break
+            except OSError:
+                time.sleep(0.05)
+        assert request(port, "GET", "/api/status", authenticated)[0] == 401
         print("owner dashboard full-workflow assertions passed")
     finally:
         if dashboard is not None:

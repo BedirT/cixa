@@ -63,13 +63,15 @@ try {
   const probe = await import("node:net");
   const port = await new Promise((resolvePort, reject) => { const server=probe.createServer();server.listen(0,"127.0.0.1",()=>{const address=server.address();server.close(()=>resolvePort(address.port));});server.on("error",reject); });
   dashboard = spawn("python3", [join(root,"apps","owner-dashboard","server.py"),"--socket-path",ownerSocket,"--owner-token-file",ownerFile,"--access-token-file",accessFile,"--port",String(port)], { cwd:root, stdio:["ignore","pipe","pipe"] });
-  await waitFor(async () => { try { const response=await fetch(`http://127.0.0.1:${port}/`);return response.status===401; } catch { return false; } }, "dashboard did not start");
+  await waitFor(async () => { try { const response=await fetch(`http://127.0.0.1:${port}/`);return response.status===200; } catch { return false; } }, "dashboard did not start");
   browser = await chromium.launch({ headless:true, executablePath:chrome });
-  const context = await browser.newContext({ viewport:{width:1440,height:1000}, httpCredentials:{username:"owner",password:accessToken}, reducedMotion:"reduce" });
+  const context = await browser.newContext({ viewport:{width:1440,height:1000}, reducedMotion:"reduce" });
   const page = await context.newPage(); const errors=[];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type()==="error") errors.push(message.text()); });
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil:"networkidle" });
+  await page.getByLabel("Dashboard access token").fill(accessToken);
+  await page.getByRole("button", {name:"Unlock console"}).click();
   await assert.doesNotReject(() => page.getByRole("heading", {name:"All quiet."}).waitFor());
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
 
@@ -156,6 +158,12 @@ try {
   await page.getByRole("button", {name:"Close details"}).click();
   await page.getByRole("button", {name:"Stopped"}).click();
   await page.locator("#ledger-list").getByText("Cancelled", {exact:true}).waitFor();
+  for (let index=0;index<26;index+=1) await rpc(agentSocket,agentToken,{type:"create_purchase_intent",request:purchase(`history-${index}`,100,"merchant.example.test")});
+  await page.getByRole("button", {name:"Refresh"}).click();
+  await page.getByRole("button", {name:"All",exact:true}).click();
+  await page.getByText("Showing 25 of 28 attempts", {exact:true}).waitFor();
+  await page.getByRole("button", {name:"Load older attempts"}).click();
+  await page.getByText("Showing 28 of 28 attempts", {exact:true}).waitFor();
 
   await page.getByRole("link", {name:"Agents"}).first().click();
   await page.getByRole("button", {name:"Manage limits"}).click();
@@ -176,6 +184,8 @@ try {
   await page.getByRole("link", {name:"Trust"}).first().click();
   await page.getByRole("button", {name:"Audit"}).click();
   await page.getByText(/Audit chain verified/).waitFor();
+  const olderAudit = page.getByRole("button", {name:"Load older audit events"});
+  if (await olderAudit.isVisible()) await olderAudit.click();
   await page.getByText("Technical evidence", {exact:true}).first().click();
   assert.equal(await page.locator("#audit-list details").first().getAttribute("open"), "");
   const download = page.waitForEvent("download");

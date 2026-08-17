@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 import http.client
 import json
 import os
@@ -42,10 +41,9 @@ def wait_path(path: Path) -> None:
     raise RuntimeError(f"service path was not created: {path}")
 
 
-def http_status(port: int, authorization: str | None = None) -> int:
+def http_status(port: int) -> int:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    headers = {"Authorization": authorization} if authorization else {}
-    connection.request("GET", "/", headers=headers)
+    connection.request("GET", "/")
     status = connection.getresponse().status
     connection.close()
     return status
@@ -62,11 +60,11 @@ def http_body(port: int) -> str:
     return body
 
 
-def wait_http(port: int, authorization: str | None = None) -> None:
+def wait_http(port: int) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
-            if http_status(port, authorization) == 200:
+            if http_status(port) == 200:
                 return
         except OSError:
             pass
@@ -238,8 +236,7 @@ with tempfile.TemporaryDirectory(prefix="cixa-system-demo-") as raw_directory:
         ):
             if scenario_name not in merchant_fixture:
                 raise RuntimeError(f"test merchant is missing scenario {scenario_name}")
-        auth = base64.b64encode(f"owner:{access_token}".encode()).decode()
-        wait_http(dashboard_port, f"Basic {auth}")
+        wait_http(dashboard_port)
 
         mcp_result = subprocess.run(
             ["node", str(ROOT / "scripts" / "demo-mcp.mjs"),
