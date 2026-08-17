@@ -112,6 +112,29 @@ export function privateAddress(address: string): boolean {
     (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x0d && bytes[3] === 0xb8);
 }
 
+export async function installBrowserNetworkGuards(
+  context: Pick<BrowserContext, "routeWebSocket" | "addInitScript">,
+): Promise<void> {
+  await context.routeWebSocket("**/*", async (webSocket) => {
+    await webSocket.close({ code: 1008, reason: "checkout WebSockets are disabled" });
+  });
+  await context.addInitScript(() => {
+    const blocked = class {
+      constructor() {
+        throw new DOMException("network primitive disabled in controlled checkout", "SecurityError");
+      }
+    };
+    for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport"]) {
+      Object.defineProperty(globalThis, name, {
+        configurable: false,
+        enumerable: false,
+        value: blocked,
+        writable: false,
+      });
+    }
+  });
+}
+
 async function resolvePublicHost(hostname: string): Promise<string> {
   const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
   if (addresses.length === 0 || addresses.some(({ address }) => privateAddress(address))) {
@@ -262,6 +285,7 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
   for (const host of allowedHosts) {
     resolverRules.push(`MAP ${host} ${await resolvePublicHost(host)}`);
   }
+  resolverRules.push("MAP * ~NOTFOUND");
   resolverRules.push("EXCLUDE localhost");
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
@@ -273,6 +297,8 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
         "--disable-extensions",
         "--disable-sync",
         "--disable-background-networking",
+        "--disable-features=WebTransport",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         `--host-resolver-rules=${resolverRules.join(",")}`,
       ],
     });
@@ -281,6 +307,7 @@ async function run(config: AdapterConfig, input: AdapterInput): Promise<object> 
       serviceWorkers: "block",
       permissions: [],
     });
+    await installBrowserNetworkGuards(context);
     let page: Page;
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());

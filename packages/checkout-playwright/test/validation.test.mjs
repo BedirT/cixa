@@ -4,10 +4,28 @@ import {
   observeAndValidate,
   parseMinorUnits,
   privateAddress,
+  installBrowserNetworkGuards,
   processorFrameAllowed,
   requestOriginAllowed,
   validateConfiguration,
 } from "../dist/index.js";
+
+test("blocks WebSockets and installs pre-page peer-network guards", async () => {
+  let websocketPattern;
+  let websocketClose;
+  let initScript;
+  await installBrowserNetworkGuards({
+    routeWebSocket: async (pattern, handler) => {
+      websocketPattern = pattern;
+      await handler({ close: async (options) => { websocketClose = options; } });
+    },
+    addInitScript: async (script) => { initScript = script; },
+  });
+  assert.equal(websocketPattern, "**/*");
+  assert.equal(websocketClose.code, 1008);
+  assert.match(initScript.toString(), /RTCPeerConnection/);
+  assert.match(initScript.toString(), /WebTransport/);
+});
 
 test("rejects private IPv4-mapped and canonical IPv6 destinations", () => {
   for (const address of [
