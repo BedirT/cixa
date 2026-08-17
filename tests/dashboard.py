@@ -187,6 +187,40 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
             b'{"stopped":false}',
         )[0] == 401
         owner_headers = dict(unauthenticated_attack, Authorization=authorization)
+        assert request(
+            port,
+            "GET",
+            "/api/overview",
+            dict(authenticated, Host="attacker.example"),
+        )[0] == 400
+        assert request(
+            port,
+            "POST",
+            "/api/emergency-stop",
+            dict(owner_headers, Origin="http://attacker.example"),
+            b'{"stopped":true}',
+        )[0] == 403
+        assert request(
+            port,
+            "POST",
+            "/api/emergency-stop",
+            dict(owner_headers, **{"X-CSRF-Token": "wrong"}),
+            b'{"stopped":true}',
+        )[0] == 403
+        assert request(
+            port,
+            "POST",
+            "/api/emergency-stop",
+            owner_headers,
+            b'{"stopped":true,"extra":false}',
+        )[0] == 400
+        assert request(
+            port,
+            "POST",
+            "/api/emergency-stop",
+            owner_headers,
+            b" " * (32 * 1024 + 1),
+        )[0] == 400
 
         def owner_post(path: str, value: dict) -> dict:
             status, _, response_body = request(
@@ -303,6 +337,13 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         assert request(port, "GET", "/api/intents/not%2Fsafe", authenticated)[0] == 400
         denied = owner_post("/api/approvals/deny", {"intent_id": intent["id"]})
         assert denied["state"] == "cancelled" and denied["last_error"] == "owner_denied"
+        assert request(
+            port,
+            "POST",
+            "/api/approvals/deny",
+            owner_headers,
+            json.dumps({"intent_id": intent["id"]}).encode(),
+        )[0] == 400
 
         purchase["idempotency_key"] = "dashboard-purchase-handoff"
         intent = rpc(

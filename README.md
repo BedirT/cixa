@@ -21,7 +21,7 @@ The name comes from Laz. **Cixa** means fortress or castle, and appears in the n
 
 ## Take It For A Spin
 
-You only need Rust stable, Node.js 20+, npm, and Python 3.11+ for the local demo. It uses synthetic data and a simulated provider, so there is no account, API key, paid service, or real transaction involved.
+You need Rust stable, Node.js 20+, npm, Python 3.11+, and Chrome or Chromium for the browser verification. Set `CIXA_BROWSER_EXECUTABLE` when the browser is not in a standard install location. The demo uses synthetic data and a simulated provider, so there is no account, API key, paid service, or real transaction involved.
 
 ```bash
 git clone https://github.com/BedirT/cixa.git

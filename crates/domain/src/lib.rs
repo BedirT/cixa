@@ -30,6 +30,8 @@ pub const API_VERSION: &str = "v1";
 pub const STATE_FILE: &str = "state.json";
 pub const AUDIT_KEY_FILE: &str = "audit.key";
 pub const LOCK_FILE: &str = "cixa.lock";
+const DASHBOARD_HISTORY_LIMIT: usize = 10;
+const DASHBOARD_AUDIT_LIMIT: usize = 25;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -2150,37 +2152,49 @@ impl Treasury {
 
     fn owner_get_dashboard(&self, actor: &Actor) -> Result<Value> {
         Self::require_owner(actor)?;
-        let agents: Vec<Value> = self
-            .state
-            .agents
-            .values()
-            .map(|agent| {
-                json!({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "policy_id": agent.policy_id,
-                    "mode": agent.mode,
-                    "created_at": agent.created_at,
-                    "expires_at": agent.expires_at,
-                    "revoked": agent.revoked,
-                    "broker_session_expires_at": agent.broker_session_expires_at,
-                    "approved_merchants": agent.approved_merchants,
-                })
-            })
-            .collect();
-        let transactions: Vec<Value> =
-            self.state.intents.values().map(|intent| self.owner_intent(intent)).collect();
-        let pending_approvals: Vec<Value> = self
-            .state
-            .intents
-            .values()
-            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+        let mut agents = Vec::with_capacity(self.state.agents.len());
+        for agent in self.state.agents.values() {
+            let policy = self.policy(&agent.policy_id)?;
+            let usage = self.usage(&agent.id, &policy.primary_currency)?;
+            agents.push(json!({
+                "id": agent.id,
+                "name": agent.name,
+                "policy_id": agent.policy_id,
+                "mode": agent.mode,
+                "created_at": agent.created_at,
+                "expires_at": agent.expires_at,
+                "revoked": agent.revoked,
+                "broker_session_expires_at": agent.broker_session_expires_at,
+                "approved_merchants": agent.approved_merchants,
+                "budget": {
+                    "usage": usage,
+                    "remaining_rolling_24h": remaining_money(
+                        &policy.max_rolling_24h,
+                        &usage.rolling_24h_amount,
+                    )?,
+                },
+            }));
+        }
+        let mut intents: Vec<&PurchaseIntent> = self.state.intents.values().collect();
+        intents.sort_by_key(|intent| std::cmp::Reverse((intent.updated_at, intent.created_at)));
+        let transactions_total = intents.len();
+        let transactions: Vec<Value> = intents
+            .iter()
+            .take(DASHBOARD_HISTORY_LIMIT)
             .map(|intent| self.owner_intent(intent))
             .collect();
-        let reconciliation_required: Vec<Value> = self
-            .state
-            .intents
-            .values()
+        let pending_total = intents
+            .iter()
+            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+            .count();
+        let pending_approvals: Vec<Value> = intents
+            .iter()
+            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+            .take(DASHBOARD_HISTORY_LIMIT)
+            .map(|intent| self.owner_intent(intent))
+            .collect();
+        let reconciliation_total = intents
+            .iter()
             .filter(|intent| {
                 matches!(
                     intent.state,
@@ -2189,6 +2203,18 @@ impl Treasury {
                         | TransactionState::ReconciliationRequired
                 )
             })
+            .count();
+        let reconciliation_required: Vec<Value> = intents
+            .iter()
+            .filter(|intent| {
+                matches!(
+                    intent.state,
+                    TransactionState::ProviderPending
+                        | TransactionState::Unknown
+                        | TransactionState::ReconciliationRequired
+                )
+            })
+            .take(DASHBOARD_HISTORY_LIMIT)
             .map(|intent| self.owner_intent(intent))
             .collect();
         let manual_card = self.state.manual_provider.as_ref().map(|provider| {
@@ -2216,8 +2242,14 @@ impl Treasury {
             "agents": agents,
             "policies": self.state.policies,
             "transactions": transactions,
+            "transactions_total": transactions_total,
+            "transactions_truncated": transactions_total > DASHBOARD_HISTORY_LIMIT,
             "pending_approvals": pending_approvals,
+            "pending_approvals_total": pending_total,
+            "pending_approvals_truncated": pending_total > DASHBOARD_HISTORY_LIMIT,
             "reconciliation_required": reconciliation_required,
+            "reconciliation_required_total": reconciliation_total,
+            "reconciliation_required_truncated": reconciliation_total > DASHBOARD_HISTORY_LIMIT,
             "receive_instructions": self.state.receive_instructions,
             "audit_entry_count": self.state.audit.len(),
             "unsafe_modes": unsafe_modes,
@@ -3500,7 +3532,14 @@ impl Treasury {
 
     fn owner_list_audit(&self, actor: &Actor) -> Result<Value> {
         Self::require_owner(actor)?;
-        Ok(json!({ "entries": self.state.audit, "chain_valid": self.verify_audit_chain().is_ok() }))
+        let total = self.state.audit.len();
+        let start = total.saturating_sub(DASHBOARD_AUDIT_LIMIT);
+        Ok(json!({
+            "entries": &self.state.audit[start..],
+            "entries_total": total,
+            "truncated": start > 0,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
     }
 
     fn agent(&self, agent_id: &str) -> Result<&AgentRecord> {
@@ -5381,6 +5420,57 @@ mod tests {
         assert_eq!(event.actor, "owner");
         assert_eq!(event.action, "deny_intent");
         assert_eq!(event.decision.as_deref(), Some("denied"));
+    }
+
+    #[test]
+    fn owner_dashboard_history_is_bounded_and_budget_usage_is_authoritative() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_transactions_per_minute = 1_000;
+        let (agent_id, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::ApprovalRequired,
+        );
+        for index in 0..205 {
+            treasury
+                .handle(
+                    &token,
+                    Request::CreatePurchaseIntent {
+                        request: request(&format!("history-{index}"), 1),
+                    },
+                )
+                .unwrap();
+        }
+        let dashboard =
+            treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
+        assert_eq!(dashboard["transactions"].as_array().unwrap().len(), 10);
+        assert_eq!(dashboard["transactions_total"], 205);
+        assert_eq!(dashboard["transactions_truncated"], true);
+        assert!(serde_json::to_vec(&dashboard).unwrap().len() < 256 * 1024);
+        let agent = dashboard["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["id"] == agent_id)
+            .unwrap();
+        assert_eq!(agent["budget"]["usage"]["rolling_24h_amount"]["minor"], 0);
+        assert_eq!(agent["budget"]["remaining_rolling_24h"]["minor"], 10_000);
+
+        for stopped in (0..510).map(|index| index % 2 == 0) {
+            treasury
+                .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped })
+                .unwrap();
+        }
+        let audit = treasury.handle(&bootstrap.owner_token, Request::OwnerListAudit).unwrap();
+        assert_eq!(audit["entries"].as_array().unwrap().len(), 25);
+        assert_eq!(audit["truncated"], true);
+        assert!(audit["entries_total"].as_u64().unwrap() > 500);
+        assert_eq!(audit["chain_valid"], true);
+        assert!(serde_json::to_vec(&audit).unwrap().len() < 256 * 1024);
     }
 
     #[test]

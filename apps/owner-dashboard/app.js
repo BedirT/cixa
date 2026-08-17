@@ -1,7 +1,7 @@
 "use strict";
 
 const csrf = document.cookie.split("; ").find((part) => part.startsWith("csrf="))?.split("=")[1] ?? "";
-const state = { overview: null, audit: null, route: "today", ledgerFilter: "all", search: "", busy: false, dialogAction: null, lastFocus: null };
+const state = { overview: null, audit: null, route: "today", ledgerFilter: "all", search: "", busy: false, dialogAction: null, lastFocus: null, lastSuccessfulRefresh: null, offline:false };
 const waitingStates = new Set(["approval_required", "provider_pending", "unknown", "reconciliation_required"]);
 const paidStates = new Set(["settled", "refunded"]);
 const stoppedStates = new Set(["declined", "failed", "cancelled"]);
@@ -53,7 +53,7 @@ async function api(path, options = {}) {
 async function post(path, body, success) {
   if (state.busy) return;
   state.busy = true; document.body.classList.add("busy"); $("main").setAttribute("aria-busy", "true");
-  try { await api(path, { method:"POST", body:JSON.stringify(body) }); toast(success); await refresh(); }
+  try { const value = await api(path, { method:"POST", body:JSON.stringify(body) }); toast(success); await refresh(); return value; }
   catch (error) { toast(error.message, true); throw error; }
   finally { state.busy = false; document.body.classList.remove("busy"); $("main").removeAttribute("aria-busy"); }
 }
@@ -64,19 +64,31 @@ function toast(message, error = false) {
 }
 
 async function refresh() {
-  const [overview, audit] = await Promise.all([api("/api/overview"), api("/api/audit")]);
-  state.overview = overview; state.audit = audit; render();
+  try {
+    state.overview = await api("/api/overview");
+    state.lastSuccessfulRefresh = new Date(); state.offline = false; render();
+    try { state.audit = await api("/api/audit"); renderTrust(); }
+    catch { state.audit = null; renderTrust(); }
+  } catch (error) {
+    state.offline = true; renderChrome(); throw error;
+  }
 }
 function render() {
   renderChrome(); renderToday(); renderLedger(); renderAgents(); renderTrust();
 }
 function renderChrome() {
-  const data = state.overview; const count = data.pending_approvals.length + data.reconciliation_required.length;
-  $("#connection-label").textContent = data.emergency_stop ? "Spending stopped" : "Watching";
-  $("#watch-copy").textContent = data.emergency_stop ? "No new purchase can begin." : "Every checkout is read before money moves.";
+  if (!state.overview) return;
+  const data = state.overview; const count = (data.pending_approvals_total ?? data.pending_approvals.length) + (data.reconciliation_required_total ?? data.reconciliation_required.length);
+  $("#connection-label").textContent = state.offline ? "Cixa is offline" : data.emergency_stop ? "Spending stopped" : "Watching";
+  $("#watch-copy").textContent = state.offline ? `Showing the last update from ${state.lastSuccessfulRefresh?.toLocaleTimeString() ?? "an unknown time"}.` : data.emergency_stop ? "No new purchase can begin." : `Every checkout is read before money moves. Updated ${state.lastSuccessfulRefresh?.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}.`;
+  $(".status-dot").classList.toggle("offline", state.offline);
   $("#decision-count").hidden = count === 0; $("#decision-count").textContent = String(count);
   $("#emergency-stop-button").hidden = data.emergency_stop; $("#stop-banner").hidden = !data.emergency_stop;
-  $("#unsafe-banner").hidden = data.unsafe_modes.length === 0; $("#unsafe-banner").textContent = data.unsafe_modes.map((mode) => mode.includes("manual prepaid-card") ? "Manual card mode is on. You will finish each checkout and confirm what happened." : humanReason(mode)).join(" ");
+  const warnings = data.unsafe_modes.map((mode) => mode.includes("manual prepaid-card") ? "Manual card mode is on. You will finish each checkout and confirm what happened." : humanReason(mode));
+  if (data.provider.balance_evidence?.stale) warnings.push(`The provider balance expired ${when(data.provider.balance_evidence.expires_at)}. Refresh it before relying on available funds.`);
+  if (data.transactions_truncated || data.pending_approvals_truncated || data.reconciliation_required_truncated) warnings.push("This view shows the newest 10 records. Older history remains in Cixa's local ledger.");
+  if (state.offline) warnings.unshift("The local broker did not answer. Financial data and spending status may be stale.");
+  $("#unsafe-banner").hidden = warnings.length === 0; $("#unsafe-banner").textContent = warnings.join(" ");
   const now = new Date(); $("#current-time").dateTime = now.toISOString(); $("#current-time").textContent = now.toLocaleString(undefined, { weekday:"short", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
 }
 function metric(label, value, note, percent, tone = "") {
@@ -84,13 +96,16 @@ function metric(label, value, note, percent, tone = "") {
 }
 function renderToday() {
   const data = state.overview; const pending = [...data.pending_approvals, ...data.reconciliation_required.filter((item) => !data.pending_approvals.some((pendingItem) => pendingItem.id === item.id))];
+  const pendingCount = (data.pending_approvals_total ?? data.pending_approvals.length) + (data.reconciliation_required_total ?? data.reconciliation_required.length);
   $("#today-date").textContent = new Date().toLocaleDateString(undefined, { weekday:"long", month:"long", day:"numeric" });
-  $("#today-heading").textContent = pending.length ? "A few things need you." : "All quiet.";
-  $("#today-summary").textContent = pending.length ? `${pending.length} ${pending.length === 1 ? "decision is" : "decisions are"} waiting. Everything else stays inside your rules.` : "Nothing needs a decision. Cixa is reading every checkout as it comes in.";
-  const settled = data.transactions.filter((item) => item.state === "settled"); const spent = settled.reduce((sum, item) => sum + (item.amount?.minor ?? 0), 0); const currency = settled[0]?.amount?.currency ?? data.provider.balance?.currency ?? "CAD";
-  const limits = data.agents.filter((agent) => !agent.revoked).map((agent) => data.policies[agent.policy_id]?.max_rolling_24h?.minor ?? 0); const allowance = limits.reduce((sum, value) => sum + value, 0);
-  replace($("#today-metrics"), [metric("Settled purchases", money({ minor:spent, currency }), `${settled.length} completed ${settled.length === 1 ? "purchase" : "purchases"}`, allowance ? spent / allowance * 100 : 0), metric("Provider reports", money(data.provider.balance), title(data.provider.balance_status), 100, "green"), metric("Still allowed", money({ minor:Math.max(0, allowance - spent), currency }), "Across active agent limits", allowance ? (allowance - spent) / allowance * 100 : 0)]);
-  $("#waiting-count").textContent = `${pending.length} ${pending.length === 1 ? "item" : "items"}`; replace($("#decision-list"), pending.length ? pending.map(decisionCard) : empty("Nothing needs you right now."));
+  $("#today-heading").textContent = pendingCount ? "A few things need you." : "All quiet.";
+  $("#today-summary").textContent = pendingCount ? `${pendingCount} ${pendingCount === 1 ? "decision is" : "decisions are"} waiting. Everything else stays inside your rules.` : "Nothing needs a decision. Cixa is reading every checkout as it comes in.";
+  const currency = data.provider.balance?.currency ?? "CAD";
+  const active = data.agents.filter((agent) => !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000 && agent.budget?.usage?.rolling_24h_amount?.currency === currency);
+  const spent = active.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const remaining = active.reduce((sum, agent) => sum + agent.budget.remaining_rolling_24h.minor, 0); const allowance = spent + remaining;
+  const evidence = data.provider.balance_evidence?.stale ? "Expired evidence" : title(data.provider.balance_status);
+  replace($("#today-metrics"), [metric("Spent in 24 hours", money({ minor:spent, currency }), "Authoritative broker ledger usage", allowance ? spent / allowance * 100 : 0), metric("Provider reports", money(data.provider.balance), evidence, data.provider.balance_evidence?.stale ? 0 : 100, data.provider.balance_evidence?.stale ? "" : "green"), metric("Still allowed", money({ minor:remaining, currency }), "Across active agent limits", allowance ? remaining / allowance * 100 : 0)]);
+  $("#waiting-count").textContent = `${pendingCount} ${pendingCount === 1 ? "item" : "items"}`; replace($("#decision-list"), pending.length ? pending.map(decisionCard) : empty("Nothing needs you right now."));
   const recent = [...data.transactions].sort((a,b) => b.updated_at - a.updated_at).slice(0,4); replace($("#recent-list"), recent.length ? recent.map(ledgerRow) : empty("No purchases have been attempted yet."));
 }
 function empty(message) { return node("div", { class:"empty-state", text:message }); }
@@ -128,7 +143,7 @@ function renderAgents() {
   depositAgent.value = selected;
 }
 function agentCard(agent) {
-  const policy = state.overview.policies[agent.policy_id]; const used = state.overview.transactions.filter((item) => item.agent_id === agent.id && item.state === "settled").reduce((sum,item) => sum + (item.amount?.minor ?? 0),0); const limit = policy?.max_rolling_24h?.minor ?? 0; const active = !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000;
+  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const active = !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000;
   return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [node("div", {}, [node("h2", { text:agent.name }), node("p", { class:"agent-subtitle", text:title(agent.mode) })]), node("span", { class:`state-badge ${active ? "success" : ""}`, text:agent.revoked ? "Revoked" : active ? "Active" : "Paused" })]), node("div", { class:"progress-row" }, [node("span", { text:"Spent against rolling limit" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } }), node("div", { class:"fact-list" }, [fact("Most at once", money(policy?.max_per_transaction)), fact("Purchases", String(state.overview.transactions.filter((item) => item.agent_id === agent.id).length)), fact("Session expires", when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [button(active ? "Pause spending" : "Allow with approval", active ? "secondary-button" : "quiet-button", () => setAgentMode(agent, active ? "disabled" : "approval_required")), button("Manage limits", "quiet-button", () => openAgent(agent))])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
@@ -136,8 +151,11 @@ function renderTrust() {
   const provider = state.overview.provider; const card = provider.manual_card;
   replace($("#provider-summary"), [fact("Mode", title(provider.mode)), fact("Held as", card?.credential_reference_configured ? "Credential reference configured" : "No manual reference"), fact("Ends in", card?.last_four ?? "Not stored"), fact("Evidence", title(provider.balance_status))]);
   replace($("#system-summary"), [fact("Runs", "On this computer"), fact("Sends analytics", "Nothing"), fact("Records kept", "On this disk"), fact("Audit events", String(state.overview.audit_entry_count)), fact("Sanitized", state.overview.sanitized ? "Yes" : "No")]);
-  $("#audit-verification").textContent = state.audit.chain_valid ? `Audit chain verified · ${state.audit.entries.length} events` : "Audit chain verification failed";
-  replace($("#audit-list"), state.audit.entries.length ? [...state.audit.entries].reverse().map((entry) => node("article", { class:"audit-entry" }, [node("h3", { text:title(entry.action) }), node("p", { text:`${entry.actor} · ${when(entry.at)}${entry.intent_id ? ` · ${entry.intent_id}` : ""}` }), node("details", {}, [node("summary", { text:"Technical evidence" }), node("p", { text:`Sequence ${entry.sequence} · hash ${entry.hash} · previous ${entry.previous_hash}` }), node("pre", { text:JSON.stringify(entry.details, null, 2) })])])) : empty("No audit events yet."));
+  if (!state.audit) { $("#audit-verification").textContent = "Audit history is temporarily unavailable. Other owner controls still work."; replace($("#audit-list"), empty("Refresh to try loading audit history again.")); }
+  else {
+    $("#audit-verification").textContent = state.audit.chain_valid ? `Audit chain verified · showing ${state.audit.entries.length} of ${state.audit.entries_total ?? state.audit.entries.length} events` : "Audit chain verification failed";
+    replace($("#audit-list"), state.audit.entries.length ? [...state.audit.entries].reverse().map((entry) => node("article", { class:"audit-entry" }, [node("h3", { text:title(entry.action) }), node("p", { text:`${entry.actor} · ${when(entry.at)}${entry.intent_id ? ` · ${entry.intent_id}` : ""}` }), node("details", {}, [node("summary", { text:"Technical evidence" }), node("p", { text:`Sequence ${entry.sequence} · hash ${entry.hash} · previous ${entry.previous_hash}` }), node("pre", { text:JSON.stringify(entry.details, null, 2) })])])) : empty("No audit events yet."));
+  }
   const instructions = state.overview.receive_instructions; if (instructions) { const form = $("#receive-form"); form.elements.method.value = instructions.method; form.elements.address.value = instructions.address; form.elements.memo_template.value = instructions.memo_template; }
 }
 
@@ -148,14 +166,26 @@ function navigate() {
   document.title = `${title(state.route)} · Cixa`; window.scrollTo({ top:0 });
 }
 function selectTrust(tab) { $$('[data-trust-tab]').forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.trustTab === tab))); $$('[data-trust-panel]').forEach((panel) => panel.hidden = panel.dataset.trustPanel !== tab); }
-function closeDrawer() { const drawer=$("#detail-drawer"); drawer.classList.remove("open");drawer.setAttribute("aria-hidden","true"); document.body.classList.remove("drawer-open"); $(".app-shell").inert=false; state.lastFocus?.focus(); }
-function openDrawer(content) { state.lastFocus=document.activeElement; replace($("#drawer-content"),content); const drawer=$("#detail-drawer");drawer.classList.add("open");drawer.setAttribute("aria-hidden","false");document.body.classList.add("drawer-open");$(".app-shell").inert=true;$(".drawer-close").focus(); }
+function closeDrawer() { const drawer=$("#detail-drawer"); drawer.classList.remove("open");drawer.setAttribute("aria-hidden","true"); document.body.classList.remove("drawer-open"); $(".app-shell").inert=false; $(".mobile-nav").inert=false; state.lastFocus?.focus(); }
+function openDrawer(content) { state.lastFocus=document.activeElement; replace($("#drawer-content"),content); const drawer=$("#detail-drawer");drawer.classList.add("open");drawer.setAttribute("aria-hidden","false");document.body.classList.add("drawer-open");$(".app-shell").inert=true;$(".mobile-nav").inert=true;$(".drawer-close").focus(); }
 function detailSection(heading, contents) { return node("section", { class:"drawer-section" }, [node("h3", { text:heading }), ...[].concat(contents)]); }
-function openIntent(intent) {
+async function openIntent(summary) {
+  let intent = summary; let receipt = null;
+  try { intent = await api(`/api/intents/${encodeURIComponent(summary.id)}`); if (intent.receipt_hash) receipt = await api(`/api/receipts/${encodeURIComponent(intent.id)}`); }
+  catch (error) { toast(`Could not load current details: ${error.message}`, true); }
   const facts=intent.checkout_facts ?? {}; const flags=[facts.recurring&&"Recurring",facts.trial_auto_renew&&"Auto-renewing trial",facts.stored_card&&"Stored card",facts.tip_minor&&"Tip",facts.preauthorization&&"Preauthorization",facts.installments&&"Installments"].filter(Boolean);
-  const actions=[]; if(intent.state==="approval_required"){actions.push(button("Allow once","primary-button",()=>{closeDrawer();return post("/api/approvals/approve",{intent_id:intent.id},"Purchase allowed once.");}),button("Decline","secondary-button",()=>{closeDrawer();return post("/api/approvals/deny",{intent_id:intent.id},"Purchase declined.");}));} if(waitingStates.has(intent.state)&&intent.state!=="approval_required") actions.push(button("Reconcile","primary-button",()=>{closeDrawer();openReconcile(intent);})); if(intent.state==="approved"&&state.overview.provider.mode==="manual_prepaid_card") actions.push(button("Begin owner handoff","primary-button",()=>post("/api/handoff/begin",{intent_id:intent.id},"Owner handoff is ready."))); if(intent.state==="executing"&&state.overview.provider.mode==="manual_prepaid_card") actions.push(button("Complete handoff","primary-button",()=>post("/api/handoff/complete",{intent_id:intent.id},"Handoff recorded. Check the provider outcome.")));
-  openDrawer([node("p",{class:"eyebrow",text:statusCopy(intent.state)}),node("h2",{id:"drawer-title",text:money(intent.amount)}),node("p",{class:"decision-title",text:purchaseTitle(intent)}),node("p",{class:"decision-meta",text:`${agentName(intent.agent_id)} · ${intent.merchant_domain}`}),detailSection("Why Cixa decided this",intent.decision?.reasons?.length?intent.decision.reasons.map((reason)=>node("p",{text:humanReason(reason)})):node("p",{text:"No policy exception was recorded."})),detailSection("Checkout facts",[fact("Payment form",title(facts.payment_form)),fact("Scenario",title(facts.scenario)),fact("Redirects",String(facts.redirect_chain?.length??0)),fact("Risk flags",flags.join(", ")||"None")]),detailSection("Evidence",[fact("Intent",intent.id),fact("Policy version",String(intent.policy_version)),fact("Created",when(intent.created_at)),fact("Updated",when(intent.updated_at)),fact("Provider reference",intent.provider_reference??"Not available"),fact("Receipt hash",intent.receipt_hash??"Not issued")]),actions.length?node("div",{class:"card-actions"},actions):null]);
+  const actions=[];
+  if(intent.state==="approval_required") actions.push(button("Allow once","primary-button",()=>confirmIntentDecision(intent,true)),button("Decline","secondary-button",()=>confirmIntentDecision(intent,false)));
+  if(waitingStates.has(intent.state)&&intent.state!=="approval_required") actions.push(button("Reconcile","primary-button",()=>{closeDrawer();openReconcile(intent);}));
+  if(intent.state==="approved"&&state.overview.provider.mode==="manual_prepaid_card") actions.push(button("Begin owner handoff","primary-button",()=>beginManualHandoff(intent)));
+  if(intent.state==="executing"&&state.overview.provider.mode==="manual_prepaid_card") actions.push(button("Complete handoff","primary-button",()=>confirmAction({title:"Did you submit exactly once?",copy:"Only continue after the owner-only browser submission is finished. Cixa will mark the outcome unknown until you check the provider.",label:"Complete handoff",action:()=>post("/api/handoff/complete",{intent_id:intent.id},"Handoff recorded. Check the provider outcome.")})));
+  const itemRows=(intent.items??[]).map((item)=>fact(`${item.quantity} × ${item.label}`,money({minor:item.unit_price_minor,currency:intent.amount.currency})));
+  const redirectRows=(facts.redirect_chain??[]).map((url,index)=>fact(`Redirect ${index+1}`,url));
+  openDrawer([node("p",{class:"eyebrow",text:statusCopy(intent.state)}),node("h2",{id:"drawer-title",text:money(intent.amount)}),node("p",{class:"decision-title",text:purchaseTitle(intent)}),node("p",{class:"decision-meta",text:`${agentName(intent.agent_id)} · ${intent.merchant_domain}`}),detailSection("Why Cixa decided this",intent.decision?.reasons?.length?intent.decision.reasons.map((reason)=>node("p",{text:humanReason(reason)})):node("p",{text:"No policy exception was recorded."})),detailSection("Bound purchase",[fact("Requested",money(intent.requested_amount)),fact("Final total",money(intent.final_total)),...itemRows,fact("Fulfillment",intent.fulfillment_profile)]),detailSection("Checkout facts",[fact("Payment form",title(facts.payment_form)),fact("Scenario",title(facts.scenario)),fact("Risk flags",flags.join(", ")||"None"),...redirectRows]),receipt?detailSection("Sanitized receipt",[fact("Status",statusCopy(receipt.status)),fact("Issued",when(receipt.issued_at)),fact("Provider reference",receipt.provider_reference??"Not available"),fact("Personal details",receipt.personal_information_redacted?"Redacted":"Not redacted")]):null,detailSection("Evidence",[fact("Intent",intent.id),fact("Policy version",String(intent.policy_version)),fact("Created",when(intent.created_at)),fact("Updated",when(intent.updated_at)),fact("Provider reference",intent.provider_reference??"Not available"),fact("Receipt hash",intent.receipt_hash??"Not issued")]),actions.length?node("div",{class:"card-actions"},actions):null]);
 }
+function confirmIntentDecision(intent, approve) { closeDrawer(); confirmAction({title:approve?"Allow this one purchase?":"Decline this purchase?",copy:approve?"This approval applies once and does not permanently trust the merchant.":"The request will be cancelled and cannot restart.",facts:[["Amount",money(intent.amount)],["Merchant",intent.merchant_domain],["Agent",agentName(intent.agent_id)]],label:approve?"Allow once":"Decline",danger:!approve,action:()=>post(approve?"/api/approvals/approve":"/api/approvals/deny",{intent_id:intent.id},approve?"Purchase allowed once.":"Purchase declined.")}); }
+function beginManualHandoff(intent) { closeDrawer(); const acknowledged=node("input",{type:"checkbox",required:true}); confirmAction({title:"Prepare the owner handoff?",copy:"Cixa will reserve the funds and mark this intent as executing before you open the merchant in an owner-only browser.",facts:[["Amount",money(intent.amount)],["Merchant",intent.merchant_domain]],custom:[node("label",{class:"checkbox-row"},[acknowledged," I will keep the agent suspended and submit at most once"])],label:"Prepare handoff",action:async()=>{const result=await post("/api/handoff/begin",{intent_id:intent.id},"Owner handoff is ready.");window.setTimeout(()=>showHandoff(result),0);}}); }
+function showHandoff(result) { const intent=result.intent;const facts=intent.checkout_facts??{};openDrawer([node("p",{class:"eyebrow",text:"Owner-only handoff"}),node("h2",{id:"drawer-title",text:"Verify before paying"}),node("p",{class:"safety-note",text:result.instructions}),detailSection("Money",[fact("Requested",money(intent.requested_amount)),fact("Final total",money(intent.final_total))]),detailSection("Items",(intent.items??[]).map((item)=>fact(`${item.quantity} × ${item.label}`,money({minor:item.unit_price_minor,currency:intent.amount.currency})))),detailSection("Merchant and delivery",[fact("Merchant",intent.merchant_domain),fact("Fulfillment",intent.fulfillment_profile),...(facts.redirect_chain??[]).map((url,index)=>fact(`Redirect ${index+1}`,url))]),detailSection("Consent facts",[fact("Recurring",facts.recurring?"Yes":"No"),fact("Trial auto-renew",facts.trial_auto_renew?"Yes":"No"),fact("Stored card",facts.stored_card?"Yes":"No"),fact("Form trust",title(facts.payment_form))]),node("p",{class:"safety-note",text:"If any fact differs in the owner-only browser, do not submit. Never paste payment details into Cixa."}),button("I submitted exactly once","primary-button",()=>confirmAction({title:"Finish this handoff?",copy:"Cixa will record the outcome as unknown. You must check the provider before marking it paid or declined.",label:"Complete handoff",action:()=>post("/api/handoff/complete",{intent_id:intent.id},"Handoff recorded as unknown. Check the provider now.")}))]); }
 function openAgent(agent) {
   const policy=state.overview.policies[agent.policy_id]; const modeSelect=node("select",{},["observe","approval_required","bounded_autonomous","disabled"].map((mode)=>node("option",{value:mode,text:title(mode),selected:agent.mode===mode})));
   const merchantInput=node("input",{placeholder:"merchant.example.test",maxLength:253});
@@ -167,7 +197,7 @@ function openAgent(agent) {
       node("label", { class:"stacked-form" }, [node("span", { text:"Mode" }), modeSelect]),
       node("div", { class:"card-actions" }, [
         button("Save mode", "primary-button", () => setAgentMode(agent, modeSelect.value)),
-        button("Arm 10 minutes", "quiet-button", () => post("/api/agents/arm-session", { agent_id:agent.id, ttl_secs:600 }, "Agent session armed for 10 minutes.")),
+        button("Arm 10 minutes", "quiet-button", () => { closeDrawer(); confirmAction({ title:"Arm this agent for 10 minutes?", copy:"This opens a short spending session inside the current policy and autonomy mode.", facts:[["Agent",agent.name],["Mode",title(agent.mode)]], label:"Arm session", action:() => post("/api/agents/arm-session", { agent_id:agent.id, ttl_secs:600 }, "Agent session armed for 10 minutes.") }); }),
       ]),
     ]),
     detailSection("Limits", [
@@ -177,15 +207,16 @@ function openAgent(agent) {
     ]),
     detailSection("Trusted merchants", [
       node("p", { text:agent.approved_merchants.length ? agent.approved_merchants.join(", ") : "No durable merchant approvals." }),
-      node("div", { class:"card-actions" }, [merchantInput, button("Trust merchant", "quiet-button", () => post("/api/merchants/approve", { agent_id:agent.id, merchant_domain:merchantInput.value.trim() }, "Merchant added to this agent's policy."))]),
+      node("div", { class:"card-actions" }, [merchantInput, button("Trust merchant", "quiet-button", () => { const merchant=merchantInput.value.trim(); closeDrawer(); confirmAction({ title:"Trust this merchant for future purchases?", copy:"This is broader than a one-time approval. The merchant will join this agent's durable allowlist.", facts:[["Agent",agent.name],["Merchant",merchant]], label:"Trust merchant", action:() => post("/api/merchants/approve", { agent_id:agent.id, merchant_domain:merchant }, "Merchant added to this agent's policy.") }); })]),
     ]),
-    agent.revoked ? null : detailSection("Capability", button("Revoke permanently", "secondary-button", () => confirmAction({ title:"Revoke this agent?", copy:"This cannot be undone. Existing access stops immediately.", label:"Revoke agent", danger:true, action:() => post("/api/agents/revoke", { agent_id:agent.id }, "Agent revoked.") }))),
+    agent.revoked ? null : detailSection("Capability", button("Revoke permanently", "secondary-button", () => { closeDrawer(); confirmAction({ title:"Revoke this agent?", copy:"This cannot be undone. Existing access stops immediately.", label:"Revoke agent", danger:true, action:() => post("/api/agents/revoke", { agent_id:agent.id }, "Agent revoked.") }); })),
   ]);
 }
-async function setAgentMode(agent,mode){await post("/api/agents/mode",{agent_id:agent.id,mode},`${agent.name} is now ${title(mode).toLowerCase()}.`);closeDrawer();}
+async function applyAgentMode(agent,mode){await post("/api/agents/mode",{agent_id:agent.id,mode},`${agent.name} is now ${title(mode).toLowerCase()}.`);closeDrawer();}
+function setAgentMode(agent,mode){const rank={disabled:0,observe:0,approval_required:1,bounded_autonomous:2};if((rank[mode]??0)>(rank[agent.mode]??0)){if($("#detail-drawer").classList.contains("open"))closeDrawer();confirmAction({title:`Give ${agent.name} more authority?`,copy:"This changes what the agent may do on future requests. Its existing policy limits still apply.",facts:[["Current mode",title(agent.mode)],["New mode",title(mode)]],label:"Change authority",action:()=>applyAgentMode(agent,mode)});}else return applyAgentMode(agent,mode);}
 function openPolicy(agent,policy) {
   closeDrawer(); const specs=[["max_per_transaction","Most per purchase"],["max_per_session","Most per session"],["max_rolling_24h","Rolling 24-hour limit"],["max_lifetime","Lifetime limit"],["absolute_exposure_ceiling","Absolute exposure ceiling"],["max_treasury_size","Maximum treasury size"]];
-  const fields=specs.map(([key,label])=>{const input=node("input",{type:"number",min:"0.01",step:"0.01",value:(policy[key].minor/100).toFixed(2),required:true,dataset:{policyKey:key}});return node("label",{},[label,input]);});
+  const fields=specs.map(([key,label])=>{const input=node("input",{type:"number",min:"0.01",step:"0.01",value:(policy[key].minor/100).toFixed(2),required:true,dataset:{policyKey:key}});return node("label",{},[`${label} (currently ${money(policy[key])})`,input]);});
   const booleans=[["require_approval_for_new_merchants","Ask before a new merchant"],["allow_recurring","Allow recurring charges"],["allow_trials","Allow trials"],["allow_stored_card","Allow stored cards"],["allow_tips","Allow tips"],["allow_preauthorization","Allow preauthorizations"],["allow_installments","Allow installments"]].map(([key,label])=>node("label",{class:"checkbox-row"},[node("input",{type:"checkbox",checked:policy[key],dataset:{policyBoolean:key}}),label]));
   confirmAction({title:`Edit ${agent.name}'s limits`,copy:"Raising a limit expands what this agent can spend. Cixa validates the complete policy before saving.",custom:[node("div",{class:"dialog-fields"},[...fields,...booleans])],label:"Save policy",action:()=>{const next=structuredClone(policy);$$('[data-policy-key]').forEach((input)=>{next[input.dataset.policyKey]={minor:Math.round(Number(input.value)*100),currency:policy.primary_currency};});$$('[data-policy-boolean]').forEach((input)=>{next[input.dataset.policyBoolean]=input.checked;});return post("/api/policies/update",{agent_id:agent.id,policy:next},"Policy saved.");}});
 }
@@ -207,7 +238,7 @@ $$('[data-filter]').forEach((buttonItem)=>buttonItem.addEventListener("click",()
 $("#ledger-search").addEventListener("input",(event)=>{state.search=event.target.value;renderLedger();});
 $$('[data-trust-tab]').forEach((buttonItem)=>buttonItem.addEventListener("click",()=>selectTrust(buttonItem.dataset.trustTab)));
 $$('[data-close-drawer]').forEach((item)=>item.addEventListener("click",closeDrawer));
-document.addEventListener("keydown",(event)=>{if(event.key==="Escape"&&$("#detail-drawer").classList.contains("open"))closeDrawer();});
+document.addEventListener("keydown",(event)=>{const drawer=$("#detail-drawer");if(!drawer.classList.contains("open"))return;if(event.key==="Escape")closeDrawer();if(event.key==="Tab"){const focusable=$$("#detail-drawer button:not([disabled]),#detail-drawer input:not([disabled]),#detail-drawer select:not([disabled]),#detail-drawer a[href]").filter((item)=>item.offsetParent!==null);if(!focusable.length)return;const first=focusable[0],last=focusable.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
 $("#action-dialog").addEventListener("close",()=>{state.dialogAction=null;state.lastFocus?.focus();});
 $("#dialog-form").addEventListener("submit",async(event)=>{if(event.submitter?.value!=="confirm")return;event.preventDefault();if(!event.currentTarget.reportValidity())return;const action=state.dialogAction;try{await action?.();$("#action-dialog").close();}catch{}});
 $("#emergency-stop-button").addEventListener("click",()=>confirmAction({title:"Stop all spending?",copy:"Every agent stops buying immediately. Requests already invalidated will not restart later.",label:"Stop all spending",danger:true,action:()=>post("/api/emergency-stop",{stopped:true},"Spending stopped.")}));
@@ -221,3 +252,5 @@ $("#deposit-form").addEventListener("submit",(event)=>{event.preventDefault();co
 $("#theme-button").addEventListener("click",()=>{const dark=document.documentElement.dataset.theme!=="dark";document.documentElement.dataset.theme=dark?"dark":"light";localStorage.setItem("cixa-theme",dark?"dark":"light");$("#theme-button").setAttribute("aria-label",dark?"Use light theme":"Use dark theme");});
 if(localStorage.getItem("cixa-theme")==="dark") { document.documentElement.dataset.theme="dark"; $("#theme-button").setAttribute("aria-label", "Use light theme"); }
 navigate(); refresh().catch((error)=>{$("#connection-label").textContent="Cixa is offline";$("#watch-copy").textContent="The local broker did not answer.";toast(error.message,true);});
+window.setInterval(() => refresh().catch(() => {}), 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh().catch(() => {}); });

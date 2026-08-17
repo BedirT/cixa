@@ -6,7 +6,7 @@ Replace the raw JSON dashboard with a complete, local-only owner console that ma
 
 ## Design Contract
 
-The console follows the approved product brief: a calm, editorial interface with warm stone surfaces, dark forest text, restrained clay-red for danger, a serif display face, and accessible sans-serif controls. The incoming Cixa SVG mark is the only brand asset. No external fonts, scripts, analytics, CDN assets, or cloud services are allowed.
+The console follows the delivered `cixa_design.html` direction: an airy blue-gray background, soft ambient color, translucent white panels, blue-gray ink, restrained green, amber, and clay status colors, an editorial serif display face, and accessible sans-serif controls. The supplied Cixa SVG mark is the only brand asset. No external fonts, scripts, analytics, CDN assets, or cloud services are allowed.
 
 The implementation intentionally differs from the design brief in these places:
 
@@ -17,14 +17,12 @@ The implementation intentionally differs from the design brief in these places:
 
 ## Information Architecture
 
-The authenticated single-page console has six routes implemented with hash navigation so it works from the standard-library HTTP bridge:
+The authenticated single-page console has four routes implemented with hash navigation so it works from the standard-library HTTP bridge:
 
-1. **Overview**: fortress status, provider evidence, pending decisions, reconciliation queue, active agents, and recent audit activity.
-2. **Requests**: filterable request queue plus a detail workspace showing request facts, policy decisions, checkout risk facts, and one-time approval or denial.
-3. **Transactions**: complete ledger of intents, receipt details, and a guided reconciliation flow for ambiguous outcomes. No retry action exists.
-4. **Agents**: agent health, modes, expiration, budget use, merchant trust, capability lifecycle, session arming, and a form-based policy editor.
-5. **Audit**: human-readable audit events with expandable hashes and sanitized export.
-6. **Settings**: broker and socket posture, provider reference configuration, receiving instructions, theme, and security boundaries.
+1. **Today**: fortress status, authoritative broker budget usage, provider evidence, pending decisions, reconciliation, and recent activity.
+2. **Ledger**: a filterable intent history with current intent and receipt details, bound checkout facts, one-time decisions, manual handoff, and guided reconciliation. No retry action exists.
+3. **Agents**: agent health, modes, expiration, budget use, merchant trust, capability lifecycle, session arming, and a form-based policy editor.
+4. **Trust**: local security boundaries plus provider references, receiving instructions, deposit verification, human-readable audit events, technical hashes, and sanitized export.
 
 Emergency stop is global and persistent. Activating it is a deliberate confirmation. Resuming is a separate confirmation and explicitly states that invalidated requests do not restart.
 

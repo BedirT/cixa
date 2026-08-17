@@ -4,12 +4,21 @@ import { mkdtemp, chmod, lstat, readFile, writeFile, mkdir } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConnection } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chromium } from "playwright-core";
 
 const root = resolve(import.meta.dirname, "..");
 const binary = join(root, "target", "debug", "cixa");
-const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+function findBrowser() {
+  const candidates = [process.env.CIXA_BROWSER_EXECUTABLE, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"].filter(Boolean);
+  for (const candidate of candidates) if (existsSync(candidate)) return candidate;
+  for (const name of ["google-chrome", "chromium", "chromium-browser"]) {
+    try { const candidate=execFileSync("which",[name],{encoding:"utf8"}).trim();if(candidate)return candidate; } catch {}
+  }
+  throw new Error("Chrome or Chromium is required for dashboard UI verification. Set CIXA_BROWSER_EXECUTABLE to its absolute path.");
+}
+const chrome = findBrowser();
 const directory = await mkdtemp(join(tmpdir(), "cixa-dashboard-ui-"));
 const ownerFile = join(directory, "owner.token");
 const accessFile = join(directory, "dashboard.token");
@@ -66,7 +75,7 @@ try {
 
   await page.getByRole("link", {name:"Agents"}).first().click();
   await page.getByRole("button", {name:"Create agent"}).click();
-  const dialog = page.getByRole("dialog");
+  const dialog = page.locator("#action-dialog");
   await dialog.getByLabel("Name", {exact:true}).fill("Research Runner");
   await dialog.getByLabel("Token filename", {exact:true}).fill("research-runner.token");
   await dialog.locator("select").selectOption("approval_required");
@@ -95,6 +104,14 @@ try {
   await depositForm.getByRole("button", {name:"Record arrival"}).click();
   await dialog.getByRole("button", {name:"Keep unverified"}).click();
   await dialog.waitFor({state:"hidden"});
+  await depositForm.getByLabel("Amount").fill("8.00");
+  await depositForm.getByLabel("Source").fill("Verified browser invoice");
+  await depositForm.getByLabel("Provider reference").fill("browser-deposit-2");
+  await depositForm.getByLabel("I checked the provider's own record").check();
+  await depositForm.getByLabel("Credit to agent").selectOption(agentId);
+  await depositForm.getByRole("button", {name:"Record arrival"}).click();
+  await dialog.getByRole("button", {name:"Record verified arrival"}).click();
+  await dialog.waitFor({state:"hidden"});
   const first = await rpc(agentSocket, agentToken, {type:"create_purchase_intent",request:purchase("approve",1800,"merchant.example.test")});
   const second = await rpc(agentSocket, agentToken, {type:"create_purchase_intent",request:purchase("deny",2200,"new.example.test")});
   assert.equal(first.state,"approval_required"); assert.equal(second.state,"approval_required");
@@ -118,13 +135,36 @@ try {
   await page.getByRole("link", {name:"Ledger"}).first().click();
   await page.getByRole("button", {name:/Dataset approve/}).click();
   await page.getByRole("heading", {name:"$18.00"}).waitFor();
+  await page.getByRole("button", {name:"Begin owner handoff"}).click();
+  await dialog.getByLabel("I will keep the agent suspended and submit at most once").check();
+  await dialog.getByRole("button", {name:"Prepare handoff"}).click();
+  await page.getByRole("heading", {name:"Verify before paying"}).waitFor();
+  await page.getByText("https://merchant.example.test/checkout", {exact:true}).waitFor();
+  await page.getByRole("button", {name:"I submitted exactly once"}).click();
+  await dialog.getByRole("button", {name:"Complete handoff"}).click();
+  await dialog.waitFor({state:"hidden"});
+  await page.getByRole("button", {name:"Close details"}).click();
+  await page.getByRole("button", {name:"Waiting"}).click();
+  await page.getByRole("button", {name:/Dataset approve/}).click();
+  await page.getByRole("button", {name:"Reconcile"}).click();
+  await dialog.getByLabel("Provider reference").fill("browser-payment-1");
+  await dialog.getByRole("button", {name:"Record outcome"}).click();
+  await dialog.waitFor({state:"hidden"});
+  await page.getByRole("button", {name:"All", exact:true}).click();
+  await page.getByRole("button", {name:/Dataset approve/}).click();
+  await page.getByText("Sanitized receipt", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Close details"}).click();
   await page.getByRole("button", {name:"Stopped"}).click();
   await page.locator("#ledger-list").getByText("Cancelled", {exact:true}).waitFor();
 
   await page.getByRole("link", {name:"Agents"}).first().click();
+  await page.getByRole("button", {name:"Manage limits"}).click();
+  await page.getByPlaceholder("merchant.example.test").fill("trusted.example.test");
+  await page.getByRole("button", {name:"Trust merchant"}).click();
+  await dialog.getByRole("button", {name:"Trust merchant"}).click();
+  await dialog.waitFor({state:"hidden"});
   await page.getByRole("button", {name:"Pause spending"}).click();
-  await page.getByText("Disabled", {exact:true}).waitFor();
+  await page.locator("#agent-list").getByText("Disabled", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Manage limits"}).click();
   await page.getByRole("button", {name:"Edit policy"}).click();
   await dialog.getByLabel("Most per purchase").fill("20.00");
@@ -136,6 +176,11 @@ try {
   await page.getByRole("link", {name:"Trust"}).first().click();
   await page.getByRole("button", {name:"Audit"}).click();
   await page.getByText(/Audit chain verified/).waitFor();
+  await page.getByText("Technical evidence", {exact:true}).first().click();
+  assert.equal(await page.locator("#audit-list details").first().getAttribute("open"), "");
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", {name:"Export recent sanitized audit"}).click();
+  assert.match((await download).suggestedFilename(), /cixa-sanitized-export/);
   await page.getByRole("button", {name:"Boundaries"}).click();
   await page.getByText("Unknown means stop and check").waitFor();
   await page.getByRole("button", {name:"Stop all spending"}).click();
@@ -156,11 +201,26 @@ try {
   await page.setViewportSize({width:390,height:844});
   await page.getByRole("link", {name:"Today"}).last().click();
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
+  await page.locator("#recent-list .ledger-row").first().click();
+  await page.getByRole("button", {name:"Close details"}).focus();
+  await page.keyboard.press("Tab");
+  assert.equal(await page.getByRole("button", {name:"Close details"}).evaluate((element) => element === document.activeElement), true);
+  await page.getByRole("button", {name:"Close details"}).click();
   await page.waitForTimeout(4800);
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-mobile.png"),fullPage:true});
   await page.setViewportSize({width:1440,height:1000});
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console.png"),fullPage:true});
+  await page.getByRole("link", {name:"Agents"}).first().click();
+  await page.getByRole("button", {name:"Manage limits"}).click();
+  await page.getByRole("button", {name:"Revoke permanently"}).click();
+  await dialog.getByRole("button", {name:"Revoke agent"}).click();
+  await page.getByText("Revoked", {exact:true}).waitFor();
   assert.deepEqual(errors, []);
+  daemon.kill("SIGTERM");
+  await new Promise((resolveExit) => daemon.once("exit",resolveExit));
+  await page.getByRole("button", {name:"Refresh"}).click();
+  await page.getByText("Cixa is offline", {exact:true}).waitFor();
+  await page.getByText(/Financial data and spending status may be stale/).waitFor();
   console.log("owner dashboard browser workflow assertions passed");
 } finally {
   if (browser) await browser.close();

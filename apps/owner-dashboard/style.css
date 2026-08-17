@@ -36,6 +36,7 @@ a { color:var(--accent); text-decoration:none; }
 .watch-card { margin-top:auto;padding:16px 18px;border:1px solid var(--line);border-radius:20px;background:var(--glass);box-shadow:var(--shadow); }
 .watch-card p { margin:0 0 12px;font-size:13px;color:var(--ink-soft); }.watch-state { display:flex;align-items:center;gap:8px;color:var(--green)!important; }
 .status-dot { width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px color-mix(in srgb,var(--green) 15%,transparent); }
+.status-dot.offline { background:var(--clay);box-shadow:0 0 0 4px color-mix(in srgb,var(--clay) 15%,transparent); }
 .workspace { grid-column:2; min-width:0; padding:0 5vw 80px; }
 .topbar { height:82px;display:flex;align-items:center;justify-content:space-between;gap:20px; }
 .local-pill { padding:7px 14px;border:1px solid var(--line);background:var(--glass);border-radius:999px;font-size:13px;color:var(--ink-soft); }
