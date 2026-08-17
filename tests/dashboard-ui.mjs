@@ -103,6 +103,9 @@ try {
   await page.getByRole("link", {name:"Trust"}).first().click();
   await page.getByRole("button", {name:"Provider"}).click();
   const providerForm = page.locator("#provider-form");
+  await page.setViewportSize({width:940,height:1189});assert.equal(await page.locator("#trust-provider").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);
+  const lastFourBefore=await providerForm.getByLabel("Last four").boundingBox();await providerForm.getByRole("button",{name:/Provider kind:/}).click();const lastFourAfter=await providerForm.getByLabel("Last four").boundingBox();assert.equal(lastFourAfter.y,lastFourBefore.y);assert.equal(await providerForm.getByRole("listbox",{name:"Provider kind options"}).evaluate((menu)=>getComputedStyle(menu).position),"absolute");await page.keyboard.press("Escape");
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-provider.png"),fullPage:false});
   await providerForm.getByLabel("Credential reference").fill("keychain://cixa/browser-card");
   await providerForm.getByLabel("Last four").fill("4417");
   await providerForm.getByLabel("Confirmed balance").fill("250.00");
@@ -111,6 +114,9 @@ try {
   await dialog.waitFor({state:"hidden"});
   await page.getByRole("button", {name:"Receiving"}).click();
   const receiveForm = page.locator("#receive-form");
+  assert.equal(await page.locator("#trust-receiving").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);assert.equal(await page.locator("#trust-receiving .trust-card").evaluateAll((cards)=>cards.every((card)=>card.scrollWidth<=card.clientWidth)),true);
+  const addressBefore=await receiveForm.getByLabel("Public receiving address").boundingBox();await receiveForm.getByRole("button",{name:/Method:/}).click();const addressAfter=await receiveForm.getByLabel("Public receiving address").boundingBox();assert.equal(addressAfter.y,addressBefore.y);await page.keyboard.press("Escape");
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-receiving.png"),fullPage:false});await page.setViewportSize({width:390,height:844});assert.equal(await page.locator("#trust-receiving").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-receiving-mobile.png"),fullPage:false});await page.setViewportSize({width:1440,height:1000});
   await receiveForm.getByLabel("Public receiving address").fill("public-inbox@example.invalid");
   await receiveForm.getByRole("button", {name:"Save receiving instructions"}).click();
   const depositForm = page.locator("#deposit-form");
@@ -228,6 +234,8 @@ try {
   await page.getByRole("link", {name:"Trust"}).first().click();
   await page.getByRole("button", {name:"Audit"}).click();
   await page.getByText(/Audit chain verified/).waitFor();
+  const auditStyle=await page.locator("#audit-list .audit-entry").first().evaluate((entry)=>({radius:getComputedStyle(entry).borderRadius,left:getComputedStyle(entry).borderLeftWidth}));assert.equal(auditStyle.radius,"18px");assert.equal(auditStyle.left,"1px");
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-audit.png"),fullPage:false});
   const olderAudit = page.getByRole("button", {name:"Load older audit events"});
   if (await olderAudit.isVisible()) { const firstAuditCount=await page.locator("#audit-list .audit-entry").count();await olderAudit.click();await waitFor(async()=>await page.locator("#audit-list .audit-entry").count()>firstAuditCount,"older audit page did not load");const loadedAuditCount=await page.locator("#audit-list .audit-entry").count();await page.getByRole("button",{name:"Refresh"}).click();assert.equal(await page.locator("#audit-list .audit-entry").count(),loadedAuditCount); }
   await page.getByText("Technical evidence", {exact:true}).first().click();
@@ -237,6 +245,7 @@ try {
   assert.match((await download).suggestedFilename(), /cixa-sanitized-export/);
   await page.getByRole("button", {name:"Boundaries"}).click();
   await page.getByText("Unknown means stop and check").waitFor();
+  assert.equal(await page.locator("#trust-boundaries .trust-card").count(),3);assert.equal(await page.locator("#trust-boundaries").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);
   await page.getByRole("button", {name:"Stop all spending"}).click();
   assert.equal(await page.locator("#dialog-eyebrow").textContent(),"Owner confirmation");assert.equal(await page.locator("#action-dialog").evaluate((element)=>element.classList.contains("policy-dialog")),false);
   await dialog.getByRole("button", {name:"Stop all spending"}).click();
