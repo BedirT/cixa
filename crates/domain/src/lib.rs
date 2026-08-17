@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 #[cfg(unix)]
 use std::{
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     os::unix::net::UnixStream,
 };
 use thiserror::Error;
@@ -4495,6 +4495,43 @@ pub fn unix_peer_effective_uid(_stream: &std::os::unix::net::UnixStream) -> Resu
 }
 
 #[cfg(unix)]
+fn require_owner_helper_socket(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        return Err(TreasuryError::Forbidden(
+            "owner secret-helper socket path must be absolute".to_string(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    let owner_uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != owner_uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(TreasuryError::Forbidden(
+            "owner secret-helper socket must be private, owner-controlled, and not a symlink"
+                .to_string(),
+        ));
+    }
+    let canonical = fs::canonicalize(path)?;
+    let mut ancestor = canonical.parent();
+    while let Some(directory) = ancestor {
+        let metadata = fs::symlink_metadata(directory)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || (metadata.uid() != 0 && metadata.uid() != owner_uid)
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(TreasuryError::Forbidden(
+                "owner secret-helper socket ancestors must be root/owner-controlled non-writable directories"
+                    .to_string(),
+            ));
+        }
+        ancestor = directory.parent();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 impl OwnerControlledSecretHelperProvider {
     pub fn new(
         socket_path: PathBuf,
@@ -4507,6 +4544,7 @@ impl OwnerControlledSecretHelperProvider {
                     .to_string(),
             ));
         }
+        require_owner_helper_socket(&socket_path)?;
         Ok(Self {
             socket_path,
             reference: reference.to_string(),
@@ -4574,6 +4612,11 @@ impl SecretProvider for OwnerControlledSecretHelperProvider {
             .map_err(|error| {
                 TreasuryError::Conflict(format!("owner helper connection failed: {error}"))
             })?;
+        if unix_peer_effective_uid(&stream)? != unsafe { libc::geteuid() } {
+            return Err(TreasuryError::Forbidden(
+                "owner secret-helper peer UID does not match the broker owner".to_string(),
+            ));
+        }
         stream.set_nonblocking(true)?;
         let mut request = serde_json::to_vec(operation)?;
         request.push(b'\n');
@@ -6045,6 +6088,21 @@ mod tests {
         let mut operation =
             ApprovedSecretOperation::new("helper-op", "intent-1", "card-ref-1").unwrap();
         operation.sign_for_helper(&helper_key, helper_id, broker_uid).unwrap();
+        let replaceable_directory = directory.path().join("replaceable");
+        fs::create_dir(&replaceable_directory).unwrap();
+        fs::set_permissions(&replaceable_directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let replaceable_socket = replaceable_directory.join("helper.sock");
+        let replaceable_listener = UnixListener::bind(&replaceable_socket).unwrap();
+        fs::set_permissions(&replaceable_socket, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            OwnerControlledSecretHelperProvider::new(
+                replaceable_socket,
+                "card-ref-1",
+                operation.clone(),
+            )
+            .is_err()
+        );
+        drop(replaceable_listener);
         let expected = operation.clone();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
