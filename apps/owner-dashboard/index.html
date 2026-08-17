@@ -10,20 +10,28 @@
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-today" viewBox="0 0 24 24"><path d="M4 18h16M6 15h12M8.5 12a3.5 3.5 0 0 1 7 0M12 3v2M5.6 5.6 7 7M18.4 5.6 17 7M3 11h2M19 11h2"/></symbol>
+    <symbol id="icon-ledger" viewBox="0 0 24 24"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21V3ZM9 8h6M9 12h6M9 16h4"/></symbol>
+    <symbol id="icon-agents" viewBox="0 0 24 24"><path d="M9 4h6M12 4V2M6 7h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2ZM8 12h.01M16 12h.01M9 16h6"/></symbol>
+    <symbol id="icon-trust" viewBox="0 0 24 24"><path d="m12 3 7 3v5c0 4.6-2.8 8.1-7 10-4.2-1.9-7-5.4-7-10V6l7-3Z"/></symbol>
+    <symbol id="icon-device" viewBox="0 0 24 24"><path d="M4 5h16v12H4V5ZM8 21h8M12 17v4"/></symbol>
+    <symbol id="icon-theme" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18V3Z"/></symbol>
+  </svg>
   <div class="ambient ambient-one" aria-hidden="true"></div><div class="ambient ambient-two" aria-hidden="true"></div>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Primary navigation">
       <a class="brand" href="#today" aria-label="Cixa home"><img src="/cixa-mark.svg" alt="" width="38" height="38"><span>Cixa</span></a>
       <nav class="primary-nav">
-        <a href="#today" data-route="today"><span class="nav-icon" aria-hidden="true">◒</span>Today <span class="nav-count" id="decision-count" hidden>0</span></a>
-        <a href="#ledger" data-route="ledger"><span class="nav-icon" aria-hidden="true">▤</span>Ledger</a>
-        <a href="#agents" data-route="agents"><span class="nav-icon" aria-hidden="true">◇</span>Agents</a>
-        <a href="#trust" data-route="trust"><span class="nav-icon" aria-hidden="true">▽</span>Trust</a>
+        <a href="#today" data-route="today"><svg class="nav-icon" aria-hidden="true"><use href="#icon-today"/></svg>Today <span class="nav-count" id="decision-count" hidden>0</span></a>
+        <a href="#ledger" data-route="ledger"><svg class="nav-icon" aria-hidden="true"><use href="#icon-ledger"/></svg>Ledger</a>
+        <a href="#agents" data-route="agents"><svg class="nav-icon" aria-hidden="true"><use href="#icon-agents"/></svg>Agents</a>
+        <a href="#trust" data-route="trust"><svg class="nav-icon" aria-hidden="true"><use href="#icon-trust"/></svg>Trust</a>
       </nav>
       <section class="watch-card" aria-label="Cixa status"><p class="watch-state"><span class="status-dot" aria-hidden="true"></span><strong id="connection-label">Connecting</strong></p><p id="watch-copy">Checking the local broker.</p><button class="danger-outline" id="emergency-stop-button" type="button">Stop all spending</button></section>
     </aside>
     <div class="workspace">
-      <header class="topbar"><span class="local-pill"><span aria-hidden="true">⌂</span> This computer only</span><div class="top-actions"><time id="current-time"></time><button class="quiet-button" id="refresh-button" type="button">Refresh</button><button class="icon-button" id="theme-button" type="button" aria-label="Use dark theme" title="Change theme">◐</button></div></header>
+      <header class="topbar"><span class="local-pill"><svg class="inline-icon" aria-hidden="true"><use href="#icon-device"/></svg> This computer only</span><div class="top-actions"><time id="current-time"></time><button class="quiet-button" id="refresh-button" type="button">Refresh</button><button class="icon-button" id="theme-button" type="button" aria-label="Use dark theme" title="Change theme"><svg class="button-icon" aria-hidden="true"><use href="#icon-theme"/></svg></button></div></header>
       <div class="stop-banner" id="stop-banner" role="status" hidden><div><strong>Spending is stopped.</strong><span>Agents can keep working, but no purchase can begin.</span></div><button class="primary-button" id="resume-button" type="button">Start again</button></div>
       <div class="unsafe-banner" id="unsafe-banner" role="status" hidden></div>
       <main id="main-content" tabindex="-1">
@@ -53,7 +61,7 @@
       </main>
     </div>
   </div>
-  <nav class="mobile-nav" aria-label="Mobile navigation"><a href="#today" data-route="today">Today</a><a href="#ledger" data-route="ledger">Ledger</a><a href="#agents" data-route="agents">Agents</a><a href="#trust" data-route="trust">Trust</a></nav>
+  <nav class="mobile-nav" aria-label="Mobile navigation"><a href="#today" data-route="today"><svg aria-hidden="true"><use href="#icon-today"/></svg>Today</a><a href="#ledger" data-route="ledger"><svg aria-hidden="true"><use href="#icon-ledger"/></svg>Ledger</a><a href="#agents" data-route="agents"><svg aria-hidden="true"><use href="#icon-agents"/></svg>Agents</a><a href="#trust" data-route="trust"><svg aria-hidden="true"><use href="#icon-trust"/></svg>Trust</a></nav>
   <aside class="drawer" id="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true"><div class="drawer-backdrop" data-close-drawer></div><div class="drawer-panel"><button class="drawer-close icon-button" type="button" data-close-drawer aria-label="Close details">×</button><div id="drawer-content"></div></div></aside>
   <dialog id="action-dialog" aria-labelledby="dialog-title"><form method="dialog" class="dialog-card" id="dialog-form"><button class="dialog-close icon-button" value="cancel" aria-label="Close dialog">×</button><p class="eyebrow" id="dialog-eyebrow">Owner confirmation</p><h2 id="dialog-title">Confirm action</h2><div id="dialog-body"></div><div class="dialog-actions"><button class="quiet-button" value="cancel">Cancel</button><button class="primary-button" id="dialog-confirm" value="confirm">Confirm</button></div></form></dialog>
   <dialog id="unlock-dialog" aria-labelledby="unlock-title"><form class="dialog-card" id="unlock-form"><p class="eyebrow">Local owner access</p><h2 id="unlock-title">Unlock Cixa</h2><p>Enter the separate dashboard access token from this computer. It is exchanged once for a session that stops working when this dashboard process stops.</p><label>Dashboard access token<input id="unlock-token" type="password" required autocomplete="off"></label><p class="form-error" id="unlock-error" role="alert"></p><div class="dialog-actions"><button class="primary-button" type="submit">Unlock console</button></div></form></dialog>
