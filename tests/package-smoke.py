@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -65,6 +66,32 @@ if not {"Cargo.toml", "src/main.rs"}.issubset(daemon_files):
 
 with tempfile.TemporaryDirectory(prefix="cixa-packages-") as raw_directory:
     directory = Path(raw_directory)
+    skill_environment = dict(
+        os.environ,
+        CODEX_HOME=str(directory / "codex-home"),
+        CLAUDE_HOME=str(directory / "claude-home"),
+    )
+    subprocess.run(
+        [str(ROOT / "scripts" / "install-agent-skill"), "--target", "all"],
+        cwd=ROOT,
+        env=skill_environment,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    for home in (directory / "codex-home", directory / "claude-home"):
+        installed_skill = home / "skills" / "cixa-payments" / "SKILL.md"
+        if "Never retry an ambiguous payment" not in installed_skill.read_text(encoding="utf-8"):
+            raise SystemExit(f"installed agent skill is incomplete: {installed_skill}")
+    refused = subprocess.run(
+        [str(ROOT / "scripts" / "install-agent-skill"), "--target", "all"],
+        cwd=ROOT,
+        env=skill_environment,
+        capture_output=True,
+        text=True,
+    )
+    if refused.returncode == 0 or "refusing to replace" not in refused.stderr:
+        raise SystemExit("agent skill installer replaced an existing skill without --force")
+
     rust_install = directory / "rust-install"
     subprocess.run(
         [

@@ -296,6 +296,7 @@ fn run() -> CliResult<()> {
         "complete-handoff" => owner_handoff_command(&rest, true),
         "init-helper" => init_helper_command(&rest),
         "secret-helper" => secret_helper_command(&rest),
+        "secret-session" => secret_session_command(&rest),
         "execute-handoff" => execute_handoff_command(&rest),
         "approve-merchant" => approve_merchant_command(&rest),
         "reconcile" => reconcile_command(&rest),
@@ -309,7 +310,7 @@ fn run() -> CliResult<()> {
 
 fn print_help() -> CliResult<()> {
     println!(
-        "Cixa {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "Cixa {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed [--autonomous-checkout true|false]\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  secret-session --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR [--ttl-secs N] [--max-operations N]\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID] [--checkout-runtime-dir DIR --checkout-profiles-dir DIR --node-path FILE --adapter-script FILE]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -429,12 +430,13 @@ fn require_absolute_regular_file(path: &Path, label: &str) -> CliResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != unsafe { libc::geteuid() }
+        if (metadata.uid() != 0 && metadata.uid() != unsafe { libc::geteuid() })
             || metadata.permissions().mode() & 0o022 != 0
         {
-            return Err(
-                format!("{label} must be owner-controlled and not group/world writable").into()
-            );
+            return Err(format!(
+                "{label} must be root/owner-controlled and not group/world writable"
+            )
+            .into());
         }
         let effective_uid = unsafe { libc::geteuid() };
         let mut ancestor = path.parent();
@@ -452,6 +454,39 @@ fn require_absolute_regular_file(path: &Path, label: &str) -> CliResult<()> {
             }
             ancestor = directory.parent();
         }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn require_owner_directory(path: &Path, label: &str) -> CliResult<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if !path.is_absolute() {
+        return Err(format!("{label} must be an absolute path").into());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(format!("{label} must be a private owner-controlled directory").into());
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    let mut ancestor = path.parent();
+    while let Some(directory) = ancestor {
+        let metadata = fs::symlink_metadata(directory)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || (metadata.uid() != 0 && metadata.uid() != effective_uid)
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(format!(
+                "{label} ancestors must be root/owner-controlled non-symlink directories"
+            )
+            .into());
+        }
+        ancestor = directory.parent();
     }
     Ok(())
 }
@@ -1144,6 +1179,184 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
 }
 
 #[cfg(unix)]
+#[derive(Clone)]
+struct ControlledCheckoutRuntime {
+    helper_socket: PathBuf,
+    helper_key_file: PathBuf,
+    helper_id_file: PathBuf,
+    node_path: PathBuf,
+    adapter_script: PathBuf,
+    profiles_directory: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ControlledCheckoutProfile {
+    profile_version: u32,
+    merchant_domain: String,
+    config: Value,
+}
+
+#[cfg(unix)]
+impl ControlledCheckoutRuntime {
+    fn from_args(args: &[String]) -> CliResult<Option<Self>> {
+        let runtime_dir = value(args, "--checkout-runtime-dir");
+        let profiles_directory = value(args, "--checkout-profiles-dir");
+        let node_path = value(args, "--node-path");
+        let adapter_script = value(args, "--adapter-script");
+        let configured = [
+            runtime_dir.as_ref(),
+            profiles_directory.as_ref(),
+            node_path.as_ref(),
+            adapter_script.as_ref(),
+        ]
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+        if configured == 0 {
+            return Ok(None);
+        }
+        if configured != 4 {
+            return Err("controlled checkout requires --checkout-runtime-dir, --checkout-profiles-dir, --node-path, and --adapter-script together".into());
+        }
+        let runtime_dir = fs::canonicalize(PathBuf::from(runtime_dir.unwrap()))?;
+        let profiles_directory = fs::canonicalize(PathBuf::from(profiles_directory.unwrap()))?;
+        let node_path = fs::canonicalize(PathBuf::from(node_path.unwrap()))?;
+        let adapter_script = fs::canonicalize(PathBuf::from(adapter_script.unwrap()))?;
+        require_owner_directory(&runtime_dir, "checkout runtime directory")?;
+        require_owner_directory(&profiles_directory, "checkout profiles directory")?;
+        require_owner_executable(&node_path, "Node executable")?;
+        require_absolute_regular_file(&adapter_script, "checkout adapter script")?;
+        let helper_key_file = runtime_dir.join("helper.key");
+        let helper_id_file = runtime_dir.join("helper.id");
+        let _ = read_private_text(&helper_key_file, "helper key file")?;
+        let _ = read_private_text(&helper_id_file, "helper id file")?;
+        Ok(Some(Self {
+            helper_socket: runtime_dir.join("session.sock"),
+            helper_key_file,
+            helper_id_file,
+            node_path,
+            adapter_script,
+            profiles_directory,
+        }))
+    }
+
+    fn load_profile(&self, request: &PurchaseRequest) -> CliResult<Value> {
+        let mut matched: Option<(PathBuf, Value)> = None;
+        let mut entries = 0_usize;
+        for entry in fs::read_dir(&self.profiles_directory)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            entries += 1;
+            if entries > 64 {
+                return Err("checkout profile limit exceeded".into());
+            }
+            require_absolute_regular_file(&path, "checkout profile")?;
+            let bytes = fs::read(&path)?;
+            if bytes.len() > 64 * 1024 {
+                return Err("checkout profile exceeds 64 KiB".into());
+            }
+            let profile: ControlledCheckoutProfile = serde_json::from_slice(&bytes)?;
+            if profile.profile_version != 1 {
+                return Err("checkout profile version is unsupported".into());
+            }
+            if profile.merchant_domain == request.merchant_domain {
+                if matched.is_some() {
+                    return Err("multiple checkout profiles match the merchant".into());
+                }
+                matched = Some((path, profile.config));
+            }
+        }
+        let (path, mut config) = matched.ok_or_else(|| {
+            format!("no owner-approved checkout profile exists for {}", request.merchant_domain)
+        })?;
+        let checkout_url = request
+            .redirect_chain
+            .first()
+            .ok_or("controlled checkout request has no checkout URL")?;
+        let object = config.as_object_mut().ok_or_else(|| {
+            format!("checkout profile {} config must be an object", path.display())
+        })?;
+        object.insert("checkoutUrl".to_string(), Value::String(checkout_url.clone()));
+        let browser_path = object
+            .get("browserExecutable")
+            .and_then(Value::as_str)
+            .ok_or("checkout profile requires browserExecutable")?;
+        require_owner_executable(Path::new(browser_path), "browser executable")?;
+        Ok(config)
+    }
+
+    fn execute(
+        &self,
+        treasury: &mut Treasury,
+        agent_token: &str,
+        intent_id: &str,
+        directory: &Path,
+    ) -> CliResult<Value> {
+        let expected_request = treasury
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or("purchase intent was not found")?
+            .request
+            .clone();
+        let config = self.load_profile(&expected_request)?;
+        let timeout_ms = config
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .ok_or("checkout profile requires an integer timeoutMs")?;
+        if !(1_000..=120_000).contains(&timeout_ms) {
+            return Err("checkout profile timeoutMs must be within 1000..120000".into());
+        }
+        let hard_timeout =
+            Duration::from_millis(timeout_ms.saturating_mul(2).saturating_add(1_000).min(180_000));
+        let deadline = Instant::now() + hard_timeout;
+        let helper_key =
+            Zeroizing::new(read_private_text(&self.helper_key_file, "helper key file")?);
+        let helper_id = Zeroizing::new(read_private_text(&self.helper_id_file, "helper id file")?);
+        let operation = treasury.bind_controlled_secret_helper_operation(
+            agent_token,
+            intent_id,
+            helper_key.as_bytes(),
+            &helper_id,
+            unsafe { libc::geteuid() },
+        )?;
+        let reference = treasury
+            .state
+            .manual_provider
+            .as_ref()
+            .ok_or("manual provider is not configured")?
+            .card
+            .reference
+            .clone();
+        let provider = OwnerControlledSecretHelperProvider::new(
+            self.helper_socket.clone(),
+            &reference,
+            operation.clone(),
+        )?
+        .with_deadline(deadline);
+        let transport = PlaywrightCheckoutTransport {
+            node_path: self.node_path.clone(),
+            adapter_script: self.adapter_script.clone(),
+            adapter_config: config,
+            deadline,
+        };
+        let mut executor = cixa_domain::SecureOwnerHandoffExecutor::new(
+            operation,
+            expected_request,
+            provider,
+            transport,
+        )?;
+        treasury
+            .execute_controlled_checkout_persisted(agent_token, intent_id, &mut executor, directory)
+            .map_err(Into::into)
+    }
+}
+
+#[cfg(unix)]
 fn share_with_agent_group(path: &Path, gid: u32, mode: u32) -> CliResult<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -1214,9 +1427,14 @@ fn rpc_over_socket(socket: &Path, token: String, operation: Request) -> CliResul
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
+    let read_timeout = if matches!(operation, Request::ExecutePurchaseIntent { .. }) {
+        Duration::from_secs(180)
+    } else {
+        Duration::from_secs(5)
+    };
     let request = RpcRequest { api_version: API_VERSION.to_string(), request_id, token, operation };
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -1360,6 +1578,16 @@ fn configure_manual_provider_command(args: &[String]) -> CliResult<()> {
             balance_ttl_secs: value(args, "--balance-ttl-secs")
                 .unwrap_or_else(|| "900".to_string())
                 .parse()?,
+            autonomous_checkout: match value(args, "--autonomous-checkout").as_deref() {
+                Some("true") => true,
+                Some("false") | None => false,
+                Some(value) => {
+                    return Err(format!(
+                        "--autonomous-checkout must be true or false, got {value}"
+                    )
+                    .into());
+                }
+            },
         },
     )?)
 }
@@ -1474,28 +1702,7 @@ impl Drop for SocketPathGuard {
 }
 
 #[cfg(unix)]
-fn secret_helper_command(args: &[String]) -> CliResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-
-    let socket_path = PathBuf::from(required(args, "--socket")?);
-    let helper_key = Zeroizing::new(read_private_text(
-        &PathBuf::from(required(args, "--helper-key-file")?),
-        "helper key file",
-    )?);
-    let helper_id = Zeroizing::new(read_private_text(
-        &PathBuf::from(required(args, "--helper-id-file")?),
-        "helper id file",
-    )?);
-    let redemption_store =
-        DurableNonceRedemptionStore::open(PathBuf::from(required(args, "--redemption-dir")?))?;
-    if socket_path.exists() {
-        return Err("secret-helper socket already exists".into());
-    }
-    let listener = UnixListener::bind(&socket_path)?;
-    let _socket_guard = SocketPathGuard(socket_path.clone());
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
+fn read_owner_secret() -> CliResult<Zeroizing<Vec<u8>>> {
     let mut secret = Zeroizing::new(Vec::new());
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
         let mut terminal: libc::termios = unsafe { std::mem::zeroed() };
@@ -1526,16 +1733,53 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
     if secret.is_empty() || secret.len() > 4096 {
         return Err("owner secret on stdin must contain 1..4096 bytes".into());
     }
-    (|| -> CliResult<()> {
-        let deadline = Instant::now() + Duration::from_secs(300);
+    Ok(secret)
+}
+
+#[cfg(unix)]
+fn serve_secret_helper(
+    args: &[String],
+    ttl_secs: u64,
+    max_operations: u32,
+    require_operation: bool,
+) -> CliResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let socket_path = PathBuf::from(required(args, "--socket")?);
+    let helper_key = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-key-file")?),
+        "helper key file",
+    )?);
+    let helper_id = Zeroizing::new(read_private_text(
+        &PathBuf::from(required(args, "--helper-id-file")?),
+        "helper id file",
+    )?);
+    let redemption_store =
+        DurableNonceRedemptionStore::open(PathBuf::from(required(args, "--redemption-dir")?))?;
+    if socket_path.exists() {
+        return Err("secret-helper socket already exists".into());
+    }
+    let listener = UnixListener::bind(&socket_path)?;
+    let _socket_guard = SocketPathGuard(socket_path.clone());
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    let secret = read_owner_secret()?;
+    let deadline = Instant::now() + Duration::from_secs(ttl_secs);
+    let mut completed = 0_u32;
+    while completed < max_operations {
         let stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return Err(
-                            "secret-helper expired before an authenticated broker connected".into(),
-                        );
+                        if require_operation && completed == 0 {
+                            return Err(
+                                "secret-helper expired before an authenticated broker connected"
+                                    .into(),
+                            );
+                        }
+                        return Ok(());
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -1563,12 +1807,37 @@ fn secret_helper_command(args: &[String]) -> CliResult<()> {
         stream.write_all(&(secret.len() as u32).to_be_bytes())?;
         stream.write_all(&secret)?;
         stream.flush()?;
-        Ok(())
-    })()
+        completed += 1;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secret_helper_command(args: &[String]) -> CliResult<()> {
+    serve_secret_helper(args, 300, 1, true)
+}
+
+#[cfg(unix)]
+fn secret_session_command(args: &[String]) -> CliResult<()> {
+    let ttl_secs = value(args, "--ttl-secs").unwrap_or_else(|| "600".to_string()).parse::<u64>()?;
+    let max_operations =
+        value(args, "--max-operations").unwrap_or_else(|| "10".to_string()).parse::<u32>()?;
+    if !(60..=3600).contains(&ttl_secs) {
+        return Err("secret-session ttl must be within 60..3600 seconds".into());
+    }
+    if !(1..=100).contains(&max_operations) {
+        return Err("secret-session max operations must be within 1..100".into());
+    }
+    serve_secret_helper(args, ttl_secs, max_operations, false)
 }
 
 #[cfg(not(unix))]
 fn secret_helper_command(_args: &[String]) -> CliResult<()> {
+    Err("the owner helper requires authenticated Unix-domain sockets".into())
+}
+
+#[cfg(not(unix))]
+fn secret_session_command(_args: &[String]) -> CliResult<()> {
     Err("the owner helper requires authenticated Unix-domain sockets".into())
 }
 
@@ -1706,6 +1975,7 @@ fn stop_command(args: &[String], stopped: bool) -> CliResult<()> {
 fn serve_command(args: &[String]) -> CliResult<()> {
     let directory = data_dir(args)?;
     let _lock = DataDirLock::acquire(&directory)?;
+    let checkout_runtime = ControlledCheckoutRuntime::from_args(args)?.map(Arc::new);
     let agent_socket =
         value(args, "--socket").map(PathBuf::from).unwrap_or_else(|| directory.join("cixa.sock"));
     let owner_socket = value(args, "--owner-socket")
@@ -1752,22 +2022,28 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     std::thread::spawn(move || {
         serve_listener(
             owner_listener,
-            owner_state,
-            owner_directory,
-            true,
-            MAX_OWNER_CONNECTIONS,
-            false,
-            Some(owner_admission),
+            ServeListenerContext {
+                state: owner_state,
+                directory: owner_directory,
+                owner_channel: true,
+                connection_limit: MAX_OWNER_CONNECTIONS,
+                reject_broker_uid: false,
+                agent_admission: Some(owner_admission),
+                checkout_runtime: None,
+            },
         )
     });
     serve_listener(
         agent_listener,
-        state,
-        directory,
-        false,
-        MAX_CONNECTIONS,
-        require_separate_agent,
-        Some(agent_admission),
+        ServeListenerContext {
+            state,
+            directory,
+            owner_channel: false,
+            connection_limit: MAX_CONNECTIONS,
+            reject_broker_uid: require_separate_agent,
+            agent_admission: Some(agent_admission),
+            checkout_runtime,
+        },
     );
     Ok(())
 }
@@ -1793,41 +2069,53 @@ fn bind_private_socket(socket: &Path) -> CliResult<std::os::unix::net::UnixListe
 }
 
 #[cfg(unix)]
-fn serve_listener(
-    listener: std::os::unix::net::UnixListener,
+struct ServeListenerContext {
     state: Arc<Mutex<Treasury>>,
     directory: PathBuf,
     owner_channel: bool,
     connection_limit: usize,
     reject_broker_uid: bool,
     agent_admission: Option<Arc<AgentAdmission>>,
-) {
+    checkout_runtime: Option<Arc<ControlledCheckoutRuntime>>,
+}
+
+#[cfg(unix)]
+fn serve_listener(listener: std::os::unix::net::UnixListener, context: ServeListenerContext) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if reject_broker_uid
+                let peer_uid = peer_effective_uid(&stream).ok();
+                if context.reject_broker_uid
                     && !matches!(
-                        peer_effective_uid(&stream),
-                        Ok(uid) if uid != unsafe { libc::geteuid() }
+                        peer_uid,
+                        Some(uid) if uid != unsafe { libc::geteuid() }
                     )
                 {
                     let _ = stream.write_all(b"{\"api_version\":\"v1\",\"request_id\":\"identity\",\"ok\":false,\"data\":null,\"error\":\"manual provider requires a separate agent OS identity\"}\n");
                     continue;
                 }
-                if active_connections.fetch_add(1, Ordering::AcqRel) >= connection_limit {
+                if active_connections.fetch_add(1, Ordering::AcqRel) >= context.connection_limit {
                     active_connections.fetch_sub(1, Ordering::AcqRel);
                     let _ = stream.write_all(b"{\"api_version\":\"v1\",\"request_id\":\"busy\",\"ok\":false,\"data\":null,\"error\":\"broker is busy\"}\n");
                     continue;
                 }
-                let state = Arc::clone(&state);
-                let directory = directory.clone();
+                let state = Arc::clone(&context.state);
+                let directory = context.directory.clone();
                 let active_connections = Arc::clone(&active_connections);
-                let agent_admission = agent_admission.clone();
+                let owner_channel = context.owner_channel;
+                let agent_admission = context.agent_admission.clone();
+                let checkout_runtime = context.checkout_runtime.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) =
-                        handle_connection(stream, state, directory, owner_channel, agent_admission)
-                    {
+                    if let Err(error) = handle_connection(
+                        stream,
+                        state,
+                        directory,
+                        owner_channel,
+                        agent_admission,
+                        checkout_runtime,
+                        peer_uid,
+                    ) {
                         eprintln!("connection error: {}", redact_sensitive(&error.to_string()));
                     }
                     active_connections.fetch_sub(1, Ordering::AcqRel);
@@ -1886,6 +2174,8 @@ fn handle_connection(
     directory: PathBuf,
     owner_channel: bool,
     agent_admission: Option<Arc<AgentAdmission>>,
+    checkout_runtime: Option<Arc<ControlledCheckoutRuntime>>,
+    peer_uid: Option<u32>,
 ) -> CliResult<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -1919,6 +2209,15 @@ fn handle_connection(
                         }
                         response
                     }
+                } else if state
+                    .lock()
+                    .map_err(|_| "broker state lock poisoned")?
+                    .state
+                    .provider_mode
+                    == cixa_domain::ProviderMode::ManualPrepaidCard
+                    && !matches!(peer_uid, Some(uid) if uid != unsafe { libc::geteuid() })
+                {
+                    rejected_rpc(&request, "manual provider requires a separate agent OS identity")
                 } else if let Some(admission) = agent_admission.as_ref() {
                     if !admission.is_known_capability(&request.token) {
                         let admitted = admission.admit_unauthenticated();
@@ -1941,7 +2240,51 @@ fn handle_connection(
                                 } else {
                                     let mut treasury =
                                         state.lock().map_err(|_| "broker state lock poisoned")?;
-                                    treasury.handle_rpc_persisted(request, &directory)
+                                    let controlled_intent = match &request.operation {
+                                        Request::ExecutePurchaseIntent { intent_id }
+                                            if treasury.controlled_checkout_enabled() =>
+                                        {
+                                            Some(intent_id.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(intent_id) = controlled_intent {
+                                        let request_id = request.request_id.clone();
+                                        let result = checkout_runtime
+                                            .as_ref()
+                                            .ok_or_else(|| {
+                                                "controlled checkout runtime is not configured"
+                                                    .to_string()
+                                            })
+                                            .and_then(|runtime| {
+                                                runtime
+                                                    .execute(
+                                                        &mut treasury,
+                                                        &request.token,
+                                                        &intent_id,
+                                                        &directory,
+                                                    )
+                                                    .map_err(|error| error.to_string())
+                                            });
+                                        match result {
+                                            Ok(data) => RpcResponse {
+                                                api_version: API_VERSION.to_string(),
+                                                request_id,
+                                                ok: true,
+                                                data: Some(data),
+                                                error: None,
+                                            },
+                                            Err(error) => RpcResponse {
+                                                api_version: API_VERSION.to_string(),
+                                                request_id,
+                                                ok: false,
+                                                data: None,
+                                                error: Some(redact_sensitive(&error)),
+                                            },
+                                        }
+                                    } else {
+                                        treasury.handle_rpc_persisted(request, &directory)
+                                    }
                                 }
                             }
                             None => rejected_rpc(&request, "agent request limit exceeded"),

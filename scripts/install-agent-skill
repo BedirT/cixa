@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE="$ROOT/skills/cixa-payments"
+TARGET="all"
+FORCE=0
+
+usage() {
+  printf '%s\n' 'usage: scripts/install-agent-skill [--target codex|claude|all] [--force]'
+}
+
+while (($#)); do
+  case "$1" in
+    --target) TARGET="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+case "$TARGET" in codex|claude|all) ;; *) usage >&2; exit 2 ;; esac
+
+install_skill() {
+  local base="$1"
+  local destination="$base/skills/cixa-payments"
+  mkdir -p "$base/skills"
+  if [[ -e "$destination" && "$FORCE" != "1" ]]; then
+    printf 'refusing to replace %s; rerun with --force after reviewing it\n' "$destination" >&2
+    exit 1
+  fi
+  local temporary="$base/skills/.cixa-payments.$$"
+  rm -rf "$temporary"
+  cp -R "$SOURCE" "$temporary"
+  if [[ -e "$destination" ]]; then rm -rf "$destination"; fi
+  mv "$temporary" "$destination"
+  printf 'installed %s\n' "$destination"
+}
+
+if [[ "$TARGET" == "codex" || "$TARGET" == "all" ]]; then
+  install_skill "${CODEX_HOME:-$HOME/.codex}"
+fi
+if [[ "$TARGET" == "claude" || "$TARGET" == "all" ]]; then
+  install_skill "${CLAUDE_HOME:-$HOME/.claude}"
+fi
+
+printf '%s\n' 'Next: configure the Cixa MCP server with only the agent socket and agent token file.'

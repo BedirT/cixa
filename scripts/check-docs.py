@@ -26,6 +26,9 @@ REQUIRED = [
     "docs/deployment.md",
     "docs/koho-setup.md",
     "docs/owner-console-plan.md",
+    "skills/cixa-payments/SKILL.md",
+    "skills/cixa-payments/references/purchase-contract.md",
+    "skills/cixa-payments/references/state-guide.md",
     "docs/adr/0001-core-boundary.md",
     "docs/adr/0002-secret-handling.md",
     "docs/adr/0003-checkout-trust.md",
@@ -36,7 +39,7 @@ if missing:
     raise SystemExit("missing documentation: " + ", ".join(missing))
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
-for phrase in ("not a bank", "manual-only", "pci", "emergency stop", "no real transaction"):
+for phrase in ("not a bank", "does not use a koho api", "pci", "emergency stop", "no real transaction"):
     if phrase not in readme:
         raise SystemExit(f"README is missing required phrase: {phrase}")
 

@@ -147,6 +147,7 @@ fn is_money_safety_audit(action: &str) -> bool {
             | "recover_interrupted_execution"
             | "begin_manual_handoff"
             | "complete_manual_handoff"
+            | "controlled_checkout_handoff"
             | "reconcile_intent"
     )
 }
@@ -926,6 +927,7 @@ pub struct ManualProviderConfiguration {
     pub balance: Money,
     pub balance_status: BalanceStatus,
     pub balance_ttl_secs: i64,
+    pub autonomous_checkout: bool,
 }
 
 impl ManualPrepaidCardProvider {
@@ -1349,6 +1351,7 @@ pub enum Request {
         balance: Money,
         balance_status: BalanceStatus,
         balance_ttl_secs: i64,
+        autonomous_checkout: bool,
     },
     OwnerConfigureReceiveInstructions {
         method: String,
@@ -1485,6 +1488,7 @@ where
             "balance",
             "balance_status",
             "balance_ttl_secs",
+            "autonomous_checkout",
         ],
         "owner_configure_receive_instructions" => &["method", "address", "memo_template"],
         _ => &[],
@@ -1529,6 +1533,15 @@ impl Treasury {
             .collect()
     }
 
+    pub fn controlled_checkout_enabled(&self) -> bool {
+        self.state.provider_mode == ProviderMode::ManualPrepaidCard
+            && self
+                .state
+                .manual_provider
+                .as_ref()
+                .is_some_and(|provider| provider.outgoing_supported)
+    }
+
     pub fn bind_approved_secret_operation(
         &self,
         owner_token: &str,
@@ -1571,6 +1584,131 @@ impl Treasury {
         let mut operation = self.bind_approved_secret_operation(owner_token, intent_id)?;
         operation.sign_for_helper(helper_key, helper_id, broker_uid)?;
         Ok(operation)
+    }
+
+    pub fn bind_controlled_secret_helper_operation(
+        &self,
+        agent_token: &str,
+        intent_id: &str,
+        helper_key: &[u8],
+        helper_id: &str,
+        broker_uid: u32,
+    ) -> Result<ApprovedSecretOperation> {
+        let actor = self.authenticate(agent_token)?;
+        let agent_id = self.require_agent_scope(&actor, "purchase_intents:execute")?;
+        let provider = self.state.manual_provider.as_ref().ok_or_else(|| {
+            TreasuryError::Conflict("manual provider is not configured".to_string())
+        })?;
+        if self.state.provider_mode != ProviderMode::ManualPrepaidCard
+            || !provider.outgoing_supported
+        {
+            return Err(TreasuryError::Forbidden(
+                "controlled card checkout is not enabled by the owner".to_string(),
+            ));
+        }
+        let intent = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?;
+        if intent.agent_id != agent_id {
+            return Err(TreasuryError::Forbidden("intent belongs to another agent".to_string()));
+        }
+        if !matches!(intent.state, TransactionState::PolicyValidated | TransactionState::Approved) {
+            return Err(TreasuryError::Conflict(
+                "controlled checkout requires a policy-authorized intent".to_string(),
+            ));
+        }
+        if intent.request.payment_form != PaymentFormTrust::HostedFields
+            || intent.request.redirect_chain.is_empty()
+        {
+            return Err(TreasuryError::Forbidden(
+                "controlled checkout requires a bound HTTPS checkout and hosted payment fields"
+                    .to_string(),
+            ));
+        }
+        let mut operation = ApprovedSecretOperation::new(
+            &new_id("secret_op"),
+            intent_id,
+            &provider.card.reference,
+        )?;
+        operation.sign_for_helper(helper_key, helper_id, broker_uid)?;
+        Ok(operation)
+    }
+
+    pub fn execute_controlled_checkout_persisted(
+        &mut self,
+        agent_token: &str,
+        intent_id: &str,
+        executor: &mut dyn CheckoutExecutor,
+        data_dir: &Path,
+    ) -> Result<Value> {
+        let actor = self.authenticate(agent_token)?;
+        let agent_id = self.require_agent_scope(&actor, "purchase_intents:execute")?.to_string();
+        let provider = self.state.manual_provider.as_ref().ok_or_else(|| {
+            TreasuryError::Conflict("manual provider is not configured".to_string())
+        })?;
+        if self.state.provider_mode != ProviderMode::ManualPrepaidCard
+            || !provider.outgoing_supported
+        {
+            return Err(TreasuryError::Forbidden(
+                "controlled card checkout is not enabled by the owner".to_string(),
+            ));
+        }
+        let existing = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?
+            .clone();
+        if existing.agent_id != agent_id {
+            return Err(TreasuryError::Forbidden("intent belongs to another agent".to_string()));
+        }
+        if !matches!(existing.state, TransactionState::PolicyValidated | TransactionState::Approved)
+        {
+            return Err(TreasuryError::Conflict(
+                "controlled checkout requires a policy-authorized intent".to_string(),
+            ));
+        }
+        executor.validate_origin_and_total(&existing.request)?;
+        let snapshot = self.state.clone();
+        if let Err(error) = self.prepare_intent_execution(&actor, intent_id) {
+            self.state = snapshot;
+            return Err(error);
+        }
+        let executing = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("purchase intent {intent_id}")))?
+            .clone();
+        self.audit(
+            &agent_id,
+            "controlled_checkout_handoff",
+            Some(intent_id),
+            Some(executing.policy_version),
+            Some("submitted"),
+            json!({ "executor_id": redact_sensitive(executor.executor_id()) }),
+        )?;
+        self.save_to(data_dir)?;
+        match executor.submit_once(&executing) {
+            Ok(outcome) => match self.apply_provider_outcome(&agent_id, intent_id, outcome) {
+                Ok(value) => {
+                    self.save_to(data_dir)?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    self.quarantine_execution(intent_id, &error.to_string())?;
+                    self.save_to(data_dir)?;
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.quarantine_execution(intent_id, &error.to_string())?;
+                self.save_to(data_dir)?;
+                Err(error)
+            }
+        }
     }
 
     pub fn owner_execute_approved_handoff_persisted(
@@ -2265,6 +2403,7 @@ impl Treasury {
                 balance,
                 balance_status,
                 balance_ttl_secs,
+                autonomous_checkout,
             } => self.owner_configure_manual_provider(
                 &actor,
                 ManualProviderConfiguration {
@@ -2274,6 +2413,7 @@ impl Treasury {
                     balance,
                     balance_status,
                     balance_ttl_secs,
+                    autonomous_checkout,
                 },
             ),
             Request::OwnerConfigureReceiveInstructions { method, address, memo_template } => {
@@ -2440,10 +2580,22 @@ impl Treasury {
                 "provider_kind": provider.card.provider_kind,
                 "last_four": provider.card.last_four,
                 "credential_reference_configured": !provider.card.reference.is_empty(),
+                "autonomous_checkout": provider.outgoing_supported,
             })
         });
         let unsafe_modes = if self.state.provider_mode == ProviderMode::ManualPrepaidCard {
-            vec!["manual prepaid-card checkout requires owner handoff and reconciliation"]
+            if self
+                .state
+                .manual_provider
+                .as_ref()
+                .is_some_and(|provider| provider.outgoing_supported)
+            {
+                vec![
+                    "controlled card checkout is enabled; every submitted payment requires independent owner reconciliation",
+                ]
+            } else {
+                vec!["manual prepaid-card checkout requires owner handoff and reconciliation"]
+            }
         } else {
             Vec::new()
         };
@@ -2650,9 +2802,14 @@ impl Treasury {
                     .to_string(),
             ];
         }
-        if self.state.provider_mode == ProviderMode::ManualPrepaidCard
-            && (decision.allowed || decision.requires_approval)
-        {
+        let manual_checkout_requires_owner = self.state.provider_mode
+            == ProviderMode::ManualPrepaidCard
+            && !self
+                .state
+                .manual_provider
+                .as_ref()
+                .is_some_and(|provider| provider.outgoing_supported);
+        if manual_checkout_requires_owner && (decision.allowed || decision.requires_approval) {
             decision.allowed = false;
             decision.requires_approval = true;
             decision.reasons = vec![
@@ -3875,6 +4032,7 @@ impl Treasury {
             balance,
             balance_status,
             balance_ttl_secs,
+            autonomous_checkout,
         } = configuration;
         validate_secret_reference(&credential_reference, &provider_kind)?;
         if self.state.intents.values().any(|intent| {
@@ -3883,6 +4041,7 @@ impl Treasury {
                 TransactionState::Declined
                     | TransactionState::Failed
                     | TransactionState::Cancelled
+                    | TransactionState::Settled
                     | TransactionState::Refunded
             )
         }) {
@@ -3927,6 +4086,7 @@ impl Treasury {
             last_four,
             persisted_secret: false,
         });
+        provider.outgoing_supported = autonomous_checkout;
         let at = now();
         provider.balance_snapshot = Some(ManualBalanceSnapshot {
             amount: balance.clone(),
@@ -3949,6 +4109,7 @@ impl Treasury {
                 "balance": balance,
                 "expires_at": at + balance_ttl_secs,
                 "credential_material_persisted": false,
+                "autonomous_checkout": autonomous_checkout,
             }),
         )?;
         Ok(json!({
@@ -3957,6 +4118,7 @@ impl Treasury {
             "balance": balance,
             "expires_at": at + balance_ttl_secs,
             "credential_material_persisted": false,
+            "autonomous_checkout": autonomous_checkout,
         }))
     }
 
@@ -6510,6 +6672,7 @@ mod tests {
                     balance: Money::positive(1_000, "CAD").unwrap(),
                     balance_status: BalanceStatus::OwnerConfirmed,
                     balance_ttl_secs: 60,
+                    autonomous_checkout: false,
                 },
             )
             .unwrap();
@@ -6639,6 +6802,7 @@ mod tests {
                             balance: Money::positive(1_000, "CAD").unwrap(),
                             balance_status: BalanceStatus::OwnerConfirmed,
                             balance_ttl_secs: 60,
+                            autonomous_checkout: false,
                         },
                     )
                     .is_err()
@@ -6655,6 +6819,7 @@ mod tests {
                         balance: Money::positive(1_000, "CAD").unwrap(),
                         balance_status: BalanceStatus::ProviderVerified,
                         balance_ttl_secs: 60,
+                        autonomous_checkout: false,
                     },
                 )
                 .is_err()
@@ -6669,6 +6834,7 @@ mod tests {
                     balance: Money::positive(1_000, "CAD").unwrap(),
                     balance_status: BalanceStatus::OwnerConfirmed,
                     balance_ttl_secs: 60,
+                    autonomous_checkout: false,
                 },
             )
             .unwrap();
@@ -7170,6 +7336,7 @@ mod tests {
                     balance: Money::positive(10_000, "CAD").unwrap(),
                     balance_status: BalanceStatus::OwnerConfirmed,
                     balance_ttl_secs: 3600,
+                    autonomous_checkout: false,
                 },
             )
             .unwrap();
@@ -7246,6 +7413,82 @@ mod tests {
         .unwrap();
         assert!(cleanup_executor.submit_once(&treasury.state.intents[intent_id].clone()).is_err());
         assert!(cleanup_executor.transport.cleaned);
+    }
+
+    #[test]
+    fn controlled_checkout_executes_policy_validated_intent_without_exposing_secret() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        treasury
+            .owner_configure_manual_provider(
+                &Actor::Owner,
+                ManualProviderConfiguration {
+                    credential_reference: "keychain://local/controlled-card".to_string(),
+                    provider_kind: "os-credential-store".to_string(),
+                    last_four: Some("1111".to_string()),
+                    balance: Money::positive(10_000, "CAD").unwrap(),
+                    balance_status: BalanceStatus::OwnerConfirmed,
+                    balance_ttl_secs: 3600,
+                    autonomous_checkout: true,
+                },
+            )
+            .unwrap();
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::BoundedAutonomous,
+        );
+        let created = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("controlled", 500) })
+            .unwrap();
+        assert_eq!(created["state"], "policy_validated");
+        let intent_id = created["id"].as_str().unwrap();
+        let helper_key = [17_u8; 32];
+        let operation = treasury
+            .bind_controlled_secret_helper_operation(
+                &token,
+                intent_id,
+                &helper_key,
+                "controlled-helper",
+                501,
+            )
+            .unwrap();
+        assert_eq!(operation.intent_id, intent_id);
+        assert!(operation.helper_mac.is_some());
+        let provider = InteractiveOwnerEntryProvider::from_owner_reader(
+            "keychain://local/controlled-card",
+            operation.clone(),
+            &b"synthetic-owner-secret"[..],
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        treasury.save_to(directory.path()).unwrap();
+        let transport = RecordingOwnerTransport {
+            persisted_state: Some((directory.path().to_path_buf(), intent_id.to_string())),
+            ..RecordingOwnerTransport::default()
+        };
+        let expected_request = treasury.state.intents[intent_id].request.clone();
+        let mut executor =
+            SecureOwnerHandoffExecutor::new(operation, expected_request, provider, transport)
+                .unwrap();
+        let result = treasury
+            .execute_controlled_checkout_persisted(
+                &token,
+                intent_id,
+                &mut executor,
+                directory.path(),
+            )
+            .unwrap();
+        assert_eq!(result["status"], "settled");
+        assert_eq!(executor.transport.submissions, 1);
+        assert!(executor.transport.cleaned);
+        let persisted = serde_json::to_string(&treasury.state).unwrap();
+        assert!(!persisted.contains("synthetic-owner-secret"));
+        assert!(
+            treasury.state.audit.iter().any(|entry| entry.action == "controlled_checkout_handoff")
+        );
     }
 
     proptest! {

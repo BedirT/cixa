@@ -99,11 +99,161 @@ def exercise_capability_handoff() -> None:
             )
             raise AssertionError("broker response loss was not propagated")
         except module.ActivationUncertain as error:
-            assert error.token_path == directory / "agent-tokens" / "uncertain.token"
+            assert error.token_path == (directory / "agent-tokens" / "uncertain.token").resolve()
         assert (directory / "agent-tokens" / "uncertain.token").exists()
+
+        shared_gid = next(group for group in os.getgroups() if group != os.getegid())
+        shared = module.DashboardState(
+            str(directory / "unused-shared.sock"),
+            str(owner_file),
+            str(access_file),
+            0,
+            str(directory / "shared-agent-tokens"),
+            agent_gid=shared_gid,
+        )
+        shared.call = lambda operation: {"agent_id": "shared-agent"}
+        shared_result = shared.write_capability(
+            {"type": "owner_create_agent_prepared"}, "shared.token"
+        )
+        shared_token = Path(shared_result["agent_token_file"])
+        assert shared_token.stat().st_gid == shared_gid
+        assert stat.S_IMODE(shared_token.stat().st_mode) == 0o640
+        assert stat.S_IMODE(shared_token.parent.stat().st_mode) == 0o750
 
 
 exercise_capability_handoff()
+
+
+def exercise_owner_setup_script() -> None:
+    with tempfile.TemporaryDirectory(prefix="cixa-setup-", dir="/tmp") as raw_directory:
+        directory = Path(raw_directory) / "owner"
+        result = subprocess.run(
+            [
+                str(ROOT / "scripts" / "setup-owner"),
+                "--data-dir",
+                str(directory),
+                "--skip-build",
+                "--skip-browser",
+            ],
+            cwd=ROOT,
+            env=dict(os.environ, CIXA_BINARY=str(BINARY)),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "Cixa owner files are ready" in result.stdout
+        for path in (
+            directory / "state.json",
+            directory / "owner.token",
+            directory / "dashboard.token",
+            directory / "checkout-runtime" / "helper.key",
+            directory / "checkout-runtime" / "helper.id",
+        ):
+            assert path.exists(), path
+            assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0, path
+        owner_secret = (directory / "owner.token").read_text(encoding="utf-8").strip()
+        dashboard_secret = (directory / "dashboard.token").read_text(encoding="utf-8").strip()
+        assert owner_secret != dashboard_secret
+        assert owner_secret not in result.stdout
+        assert dashboard_secret not in result.stdout
+
+
+exercise_owner_setup_script()
+
+
+def exercise_controlled_checkout_setup() -> None:
+    module_path = ROOT / "apps" / "owner-dashboard" / "server.py"
+    spec = importlib.util.spec_from_file_location("cixa_checkout_dashboard_server", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory(prefix="cixa-checkout-", dir="/tmp") as raw_directory:
+        directory = Path(raw_directory)
+        owner_file = directory / "owner.token"
+        access_file = directory / "access.token"
+        owner_file.write_text("owner-secret\n", encoding="utf-8")
+        access_file.write_text("access-secret\n", encoding="utf-8")
+        os.chmod(owner_file, 0o600)
+        os.chmod(access_file, 0o600)
+        browser = BINARY
+        state = module.DashboardState(
+            str(directory / "unused.sock"),
+            str(owner_file),
+            str(access_file),
+            0,
+            cixa_binary=str(BINARY),
+            checkout_browser_executable=str(browser),
+        )
+        selectors = {
+            "finalTotal": "[data-final-total]",
+            "currency": "[data-currency]",
+            "fulfillment": "[data-fulfillment]",
+            "items": "[data-items]",
+            "recurring": "[data-recurring]",
+            "trialAutoRenew": "[data-trial]",
+            "storedCard": "[data-stored-card]",
+            "tipMinor": "[data-tip]",
+            "preauthorization": "[data-preauthorization]",
+            "installments": "[data-installments]",
+            "paymentFrame": "iframe[name='payment']",
+            "pan": "input[name='cardnumber']",
+            "expiry": "input[name='expiry']",
+            "cvv": "input[name='cvv']",
+            "cardholder": "input[name='cardholder']",
+            "submit": "button[type='submit']",
+        }
+        saved = state.save_checkout_profile(
+            {
+                "profile_id": "merchant_test",
+                "merchant_domain": "merchant.example.test",
+                "browser_executable": str(browser),
+                "allowed_navigation_origins": ["https://merchant.example.test"],
+                "allowed_processor_origins": ["https://payments.example.test"],
+                "selectors": selectors,
+                "timeout_ms": 30_000,
+            }
+        )
+        assert saved == {
+            "saved": True,
+            "profile_id": "merchant_test",
+            "merchant_domain": "merchant.example.test",
+        }
+        profile_path = state.checkout_profiles_directory / "merchant_test.json"
+        assert stat.S_IMODE(profile_path.stat().st_mode) == 0o600
+        state.ensure_checkout_runtime()
+        assert state.checkout_status()["runtime_initialized"]
+        assert state.checkout_status()["suggested_browser_executable"] == str(browser)
+        try:
+            armed = state.arm_payment_session(
+                {
+                    "pan": "4242424242424242",
+                    "expiry": "08/29",
+                    "cvv": "123",
+                    "cardholder": "Cixa Owner",
+                    "ttl_secs": 60,
+                    "max_operations": 2,
+                }
+            )
+            assert armed["active"]
+            assert armed["max_operations"] == 2
+            assert not armed["secret_persisted"]
+            disk = b"".join(
+                path.read_bytes()
+                for path in directory.rglob("*")
+                if path.is_file()
+            )
+            assert b"4242424242424242" not in disk
+            assert b"Cixa Owner" not in disk
+        finally:
+            assert not state.stop_payment_session()["active"]
+        assert state.delete_checkout_profile({"profile_id": "merchant_test"}) == {
+            "deleted": True,
+            "profile_id": "merchant_test",
+        }
+        assert state.list_checkout_profiles() == []
+
+
+exercise_controlled_checkout_setup()
 
 
 def run(*args: str) -> dict:
@@ -363,13 +513,13 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         agent_id = created["agent_id"]
         assert "capability_token" not in created
         token_path = directory / "agent-tokens" / "dashboard-agent.token"
-        assert created["agent_token_file"] == str(token_path)
+        assert created["agent_token_file"] == str(token_path.resolve())
         assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
         agent_token = token_path.read_text(encoding="utf-8").strip()
         assert agent_token not in json.dumps(json.loads(request(port, "GET", "/api/overview", authenticated)[2]))
         policy["max_per_transaction"] = {"minor": 2000, "currency": "CAD"}
         assert owner_post("/api/policies/update", {"agent_id": agent_id, "policy": policy})["policy"]["version"] == 2
-        owner_post("/api/agents/mode", {"agent_id": agent_id, "mode": "bounded_autonomous"})
+        owner_post("/api/agents/mode", {"agent_id": agent_id, "mode": "approval_required"})
         owner_post("/api/agents/arm-session", {"agent_id": agent_id, "ttl_secs": 600})
         owner_post(
             "/api/merchants/approve",
@@ -381,17 +531,6 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
                 "method": "interac_e_transfer",
                 "address": "public-inbox@example.invalid",
                 "memo_template": "AGENT-{agent_id}-{intent_id}",
-            },
-        )
-        owner_post(
-            "/api/provider/manual",
-            {
-                "credential_reference": "keychain://cixa/dashboard-card",
-                "provider_kind": "os-credential-store",
-                "last_four": "1111",
-                "balance": {"minor": 10000, "currency": "CAD"},
-                "balance_status": "owner_confirmed",
-                "balance_ttl_secs": 900,
             },
         )
         purchase = {
@@ -453,14 +592,12 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         )
         assert intent["state"] == "approval_required"
         owner_post("/api/approvals/approve", {"intent_id": intent["id"]})
-        handoff = owner_post("/api/handoff/begin", {"intent_id": intent["id"]})
-        assert handoff["status"] == "owner_handoff_ready"
-        execution = owner_post("/api/handoff/complete", {"intent_id": intent["id"]})
-        assert execution["status"] == "unknown"
-        owner_post(
-            "/api/reconcile",
-            {"intent_id": intent["id"], "outcome": "settled", "provider_reference": "dashboard-ref-1"},
+        execution = rpc(
+            socket_path,
+            agent_token,
+            {"type": "execute_purchase_intent", "intent_id": intent["id"]},
         )
+        assert execution["status"] == "settled"
         receipt_status, _, receipt_body = request(
             port, "GET", f"/api/receipts/{intent['id']}", authenticated
         )
@@ -495,6 +632,24 @@ with tempfile.TemporaryDirectory(prefix="cixa-dashboard-") as raw_directory:
         assert export_status == 200 and json.loads(export_body)["sanitized"] is True
         owner_post("/api/agents/revoke", {"agent_id": agent_id})
         assert rpc(owner_socket_path, owner_file.read_text().strip(), {"type": "owner_get_dashboard"})["agents"][0]["revoked"] is True
+        owner_post(
+            "/api/provider/manual",
+            {
+                "credential_reference": "keychain://cixa/dashboard-card",
+                "provider_kind": "os-credential-store",
+                "last_four": "1111",
+                "balance": {"minor": 10000, "currency": "CAD"},
+                "balance_status": "owner_confirmed",
+                "balance_ttl_secs": 900,
+                "autonomous_checkout": True,
+            },
+        )
+        try:
+            rpc(socket_path, agent_token, {"type": "get_status"})
+        except RuntimeError as error:
+            assert "separate agent OS identity" in str(error)
+        else:
+            raise AssertionError("manual provider accepted a same-UID agent connection")
 
         dashboard.send_signal(signal.SIGTERM)
         dashboard.wait(timeout=5)

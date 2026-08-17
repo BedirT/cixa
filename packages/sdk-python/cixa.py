@@ -22,15 +22,16 @@ def _bounded(value: str, field: str, maximum: int) -> None:
 class CixaClient:
     """Agent-only client. It reads a token from a protected file, never from arguments."""
 
-    def __init__(self, socket_path: str, token_file: str, timeout: float = 10.0) -> None:
+    def __init__(self, socket_path: str, token_file: str, timeout: float = 10.0, execute_timeout: float = 180.0) -> None:
         _bounded(socket_path, "socket_path", 4096)
         _bounded(token_file, "token_file", 4096)
         self.socket_path = socket_path
         self.token = Path(token_file).read_text(encoding="utf-8").strip()
         _bounded(self.token, "capability token", 128)
         self.timeout = timeout
+        self.execute_timeout = execute_timeout
 
-    def request(self, operation: dict[str, Any]) -> Any:
+    def request(self, operation: dict[str, Any], timeout: float | None = None) -> Any:
         envelope = {
             "api_version": "v1",
             "request_id": str(uuid.uuid4()),
@@ -39,7 +40,7 @@ class CixaClient:
         }
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
-                channel.settimeout(self.timeout)
+                channel.settimeout(self.timeout if timeout is None else timeout)
                 channel.connect(self.socket_path)
                 channel.sendall((json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8"))
                 response = b""
@@ -99,7 +100,7 @@ class CixaClient:
 
     def execute_purchase_intent(self, intent_id: str) -> dict[str, Any]:
         _bounded(intent_id, "intent_id", 128)
-        return self.request({"type": "execute_purchase_intent", "intent_id": intent_id})
+        return self.request({"type": "execute_purchase_intent", "intent_id": intent_id}, self.execute_timeout)
 
     def cancel_purchase_intent(self, intent_id: str) -> dict[str, Any]:
         _bounded(intent_id, "intent_id", 128)

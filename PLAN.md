@@ -22,7 +22,7 @@ Completed. Owner CLI operations, loopback dashboard, CSRF and origin checks, pro
 
 ## Checkpoint 6 - Checkout Execution
 
-Completed as a safe reference boundary. The simulator executes known outcomes. The core exposes `CheckoutExecutor` and merchant trust tiers. Unknown merchant-controlled forms, hostile redirects, recurring behavior, and ambiguous provider outcomes are denied or approval-gated. A real browser automation adapter is intentionally not enabled by default; see [docs/checkout-adapters.md](docs/checkout-adapters.md).
+Completed as an owner-enabled, deny-by-default boundary. The simulator executes known outcomes. The manual provider can run an owner-approved Playwright profile for a policy-validated or explicitly approved intent while a bounded volatile card session is armed. Unknown merchant-controlled forms, hostile redirects, changed checkout facts, missing profiles, unavailable owner authentication, and ambiguous provider outcomes fail closed. Real browser results require independent owner reconciliation; see [docs/checkout-adapters.md](docs/checkout-adapters.md).
 
 ## Checkpoint 7 - Adversarial Validation
 
@@ -30,7 +30,7 @@ Completed for the local laboratory. Rust tests, daemon integration, SDK protocol
 
 ## Checkpoint 8 - Documentation and Release Readiness
 
-Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO manual setup, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Public release, package publication, account creation, and real-money tests remain owner-controlled actions.
+Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO setup, controlled-checkout runbook, owner bootstrap, Codex and Claude Code skill package, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Package publication, account creation, merchant-profile acceptance, and real-money tests remain owner-controlled actions.
 
 ## Release Gate
 

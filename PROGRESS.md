@@ -2,7 +2,7 @@
 
 ## Current Checkpoint
 
-Checkpoint 8, release-readiness verification.
+Checkpoint 9, controlled KOHO checkout and agent packaging verification.
 
 ## Completed
 
@@ -15,10 +15,14 @@ Checkpoint 8, release-readiness verification.
 - HMAC audit chain detects tampering and is stored with a separate key file.
 - MCP, TypeScript SDK, Python SDK, CLI, persisted daemon, loopback owner dashboard, hostile merchant fixture, demo, and integration tests exist.
 - Documentation and threat model are complete and candid about local-runtime, issuer, merchant, and compliance limits.
+- Manual-provider controlled checkout can preserve a bounded-autonomous policy decision, but executes only with a unique owner-approved merchant profile, hosted payment fields, fresh balance evidence, active agent session, and owner-armed volatile card session.
+- The owner console manages KOHO reference metadata, card-session lifetime and operation limits, structured checkout profiles, receiving instructions, reconciliation, and group-shared agent capability files without persisting card data.
+- The setup script builds the broker and adapter, installs a private Playwright Chromium, initializes private owner state, and prints matching broker and console commands.
+- The Agent Skills-compatible `cixa-payments` package installs for Codex and Claude Code and documents the exact purchase contract, receiving flow, ambiguous-state handling, and no-retry rule.
 
 ## Verification Evidence
 
-The canonical command is `./scripts/verify`. It runs Rust formatting, tests and clippy, TypeScript build and tests, Python tests and compilation, daemon integration, adversarial demo assertions, documentation validation, dependency and license checks, SBOM generation, and generated-artifact secret-canary scanning.
+The canonical command is `./scripts/verify`. It runs Rust formatting, tests and clippy, TypeScript build and tests, Python tests and compilation, daemon integration, one-shot and multi-operation helper flows, responsive owner-console browser checks, adversarial demo assertions, documentation validation, package and skill installation, dependency and license checks, SBOM generation, and generated-artifact secret-canary scanning.
 
 ## Security Findings
 
@@ -28,5 +32,7 @@ No unresolved critical or high-severity finding is known within the documented r
 
 - Review the exact release diff and lockfiles before publishing.
 - Keep pinned local `cargo-audit` 0.22.2 installed; both Rust lockfiles are mandatory audit inputs. Hosted CI remains intentionally absent for the solo workflow.
-- Review the KOHO terms and current features again immediately before any real manual test.
+- Review the KOHO terms and current features again immediately before any real controlled test.
+- Create and verify the dedicated agent OS identity or container, IPC group, shared socket directory, and group-readable capability path before enabling the manual provider.
+- Build and test each merchant profile with synthetic checkout data before putting a real card session behind it.
 - Confirm the owner’s operating-system permissions, local account isolation, browser settings, card limits, fraud-alert process, and emergency-stop runbook.

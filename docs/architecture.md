@@ -14,6 +14,7 @@ flowchart TB
     Broker[Rust broker]
     Owner[Owner CLI and dashboard]
     Secrets[Owner-controlled secret provider]
+    Checkout[Isolated controlled checkout]
     Data[Private state, audit log, audit key]
   end
   Agent --> Adapter
@@ -23,9 +24,11 @@ flowchart TB
   Owner -->|owner token| Broker
   Broker --> Data
   Broker --> Secrets
+  Broker --> Checkout
+  Checkout --> Merchant
 ```
 
-The agent, merchant, notifications, screenshots, and model traces are never trusted for security decisions. The broker revalidates amount, currency, origin, fulfillment, and policy immediately before the simulated provider call.
+The agent, merchant, notifications, screenshots, and model traces are never trusted for security decisions. The broker revalidates amount, currency, origin, fulfillment, and policy immediately before execution. Real checkout adds an owner profile and independent visible-page validation inside the isolated checkout process.
 
 ## Process Architecture
 
@@ -40,6 +43,9 @@ flowchart LR
   Mutex --> State[Atomic authenticated state envelope]
   Mutex --> Audit[Audit entries + separate audit.key]
   Daemon --> Provider[Simulated provider]
+  Daemon --> Helper[Owner-armed secret session]
+  Daemon --> Browser[Short-lived checkout adapter]
+  Browser --> Hosted[Approved merchant + hosted fields]
 ```
 
 The daemon owns an exclusive data-directory lock for its lifetime and serializes requests in one process. CLI mutations route through the independently admitted owner socket or acquire the same lock when the daemon is offline. The agent socket rejects owner operations, and the owner socket rejects non-owner credentials. State and audit entries are covered by an HMAC-authenticated envelope; writes use a random private temporary file, `sync_all`, atomic rename, and parent-directory synchronization. Both sockets are local by construction and are not public TCP listeners.
@@ -101,7 +107,7 @@ sequenceDiagram
   B-->>A: sanitized receipt or reconciliation state
 ```
 
-The default simulator exercises the state shape with synthetic facts and no money. The manual provider always requires owner approval and never trusts agent claims. The default real-card workflow is a two-phase owner-manual handoff. For owner-reviewed hosted-field integrations, the experimental Playwright adapter independently observes configured checkout facts, excludes agent RPC with the broker lock, leaves capture channels disabled, and destroys its fresh context. Unknown forms or observations return an explicit unsupported or ambiguous result.
+The default simulator exercises the state shape with synthetic facts and no money. Manual-provider checkout is owner-approved by default. The owner may explicitly enable controlled checkout for policy-validated intents, but only a unique owner profile and an active owner-armed card session can make that path executable. The Playwright adapter independently observes configured checkout facts, leaves capture channels disabled, and destroys its fresh context. Unknown forms, unavailable owner authentication, or ambiguous observations return an explicit unsupported or reconciliation result.
 
 ## Provider Abstraction
 
@@ -119,7 +125,7 @@ classDiagram
   PaymentProvider <|.. ManualPrepaidCardProvider
 ```
 
-The manual adapter is selectable through the owner CLI. It stores a non-secret credential reference and a freshness-limited balance snapshot, not a login or private issuer session. Estimated or expired snapshots cannot authorize spending. It returns an ambiguous/manual outcome for submission so the owner controls the real checkout and reconciliation.
+The manual adapter is selectable through the owner CLI or console. It stores a non-secret credential reference, masked metadata, controlled-checkout flag, and freshness-limited balance snapshot, not a login or private issuer session. Estimated or expired snapshots cannot authorize spending. A controlled browser submission still returns an ambiguous outcome because merchant DOM is not issuer evidence; the owner controls final reconciliation.
 
 ## Owner Versus Agent Interfaces
 

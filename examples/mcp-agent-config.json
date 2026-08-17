@@ -4,10 +4,9 @@
       "command": "node",
       "args": ["/absolute/path/to/cixa/packages/mcp-server/dist/index.js"],
       "env": {
-        "CIXA_SOCKET_PATH": "/absolute/path/to/.local/cixa.sock",
-        "CIXA_AGENT_TOKEN_FILE": "/absolute/path/to/.local/agent.token"
+        "CIXA_SOCKET_PATH": "/absolute/group-shared/cixa-agent/cixa.sock",
+        "CIXA_AGENT_TOKEN_FILE": "/absolute/group-shared/cixa-agent/tokens/research-runner.token"
       }
     }
   }
 }
-
