@@ -10,6 +10,7 @@
 - The system is not a bank, wallet, issuer, money transmitter, payment processor, or tax/accounting system.
 - The project does not claim PCI DSS compliance, formal certification, legal approval in every jurisdiction, or secure memory zeroization.
 - A compromised root/administrator, kernel, hypervisor, browser runtime, dependency supply chain, dishonest owner, or compromised issuer is outside the strongest local guarantee.
+- The broker owner UID and owner-reviewed checkout executables are trusted. File permission and path checks reject accidental or cross-identity substitution, but do not defend against same-UID replacement races or a deliberately daemonizing owner executable.
 - Merchant disputes, chargebacks, tax treatment, and accounting treatment require human professional advice.
 - The current browser reference is a safe-denial boundary, not a claim of universal Playwright payment isolation.
 - Local IPC protects against ordinary accidental exposure with OS permissions. It is not a defense against a privileged local attacker.
