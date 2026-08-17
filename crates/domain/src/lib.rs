@@ -4531,33 +4531,109 @@ impl SecretProvider for OwnerControlledSecretHelperProvider {
                 "owner secret-helper socket must be private and must not be a symlink".to_string(),
             ));
         }
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        let timeout = self
+        let deadline = self
             .deadline
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
-            .unwrap_or_else(|| std::time::Duration::from_secs(30));
-        if timeout.is_zero() {
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             return Err(TreasuryError::Conflict(
                 "owner handoff deadline expired before secret retrieval".to_string(),
             ));
         }
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        serde_json::to_writer(&mut stream, operation)?;
-        stream.write_all(b"\n")?;
+        let socket_path = self.socket_path.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = sender.send(UnixStream::connect(socket_path));
+        });
+        let mut stream = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| {
+                TreasuryError::Conflict(
+                    "owner handoff deadline expired during helper connection".to_string(),
+                )
+            })?
+            .map_err(|error| {
+                TreasuryError::Conflict(format!("owner helper connection failed: {error}"))
+            })?;
+        stream.set_nonblocking(true)?;
+        let mut request = serde_json::to_vec(operation)?;
+        request.push(b'\n');
+        unix_write_all_until(&mut stream, &request, deadline)?;
         stream.flush()?;
         let mut length = [0_u8; 4];
-        stream.read_exact(&mut length)?;
+        unix_read_exact_until(&mut stream, &mut length, deadline)?;
         let length = u32::from_be_bytes(length) as usize;
         if !(1..=4096).contains(&length) {
             return Err(TreasuryError::Invalid(
                 "owner secret-helper response length is invalid".to_string(),
             ));
         }
-        let mut bytes = vec![0_u8; length];
-        stream.read_exact(&mut bytes)?;
-        Ok(VolatileSecret::new(bytes))
+        let mut bytes = zeroize::Zeroizing::new(vec![0_u8; length]);
+        unix_read_exact_until(&mut stream, &mut bytes, deadline)?;
+        Ok(VolatileSecret::new(std::mem::take(&mut *bytes)))
     }
+}
+
+#[cfg(unix)]
+fn unix_write_all_until(
+    stream: &mut UnixStream,
+    mut bytes: &[u8],
+    deadline: std::time::Instant,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(TreasuryError::Conflict(
+                "owner handoff deadline expired during helper write".to_string(),
+            ));
+        }
+        let written = match stream.write(bytes) {
+            Ok(written) => written,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(error) => {
+                return Err(TreasuryError::Conflict(format!("owner helper write failed: {error}")));
+            }
+        };
+        if written == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_read_exact_until(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: std::time::Instant,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(TreasuryError::Conflict(
+                "owner handoff deadline expired during helper read".to_string(),
+            ));
+        }
+        let read = match stream.read(bytes) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(error) => {
+                return Err(TreasuryError::Conflict(format!("owner helper read failed: {error}")));
+            }
+        };
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
 }
 
 pub trait OwnerHandoffTransport {

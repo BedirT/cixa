@@ -33,6 +33,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "url",
+ "zeroize",
 ]
 
 [[package]]
