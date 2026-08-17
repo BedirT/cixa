@@ -15,6 +15,10 @@ if (!socketPath || !tokenFile) {
 const client = new BrokerClient({ socketPath, tokenFile });
 const empty = z.object({}).strict();
 const idInput = z.object({ intent_id: z.string().min(1).max(128) }).strict();
+const transactionPageInput = z.object({
+  cursor: z.string().min(1).max(128).nullable().optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+}).strict();
 const money = z.object({
   minor: z.number().int().safe().positive(),
   currency: z.string().regex(/^[A-Z]{3}$/u),
@@ -73,7 +77,7 @@ function createServer() {
   server.registerTool("cixa_get_purchase_intent", { description: "Read one of this agent's sanitized purchase intents.", inputSchema: idInput }, (input) => safe(() => client.getPurchaseIntent(input.intent_id)));
   server.registerTool("cixa_execute_purchase_intent", { description: "Execute only an intent already authorized for autonomous execution. Ambiguous outcomes cannot be retried.", inputSchema: idInput }, (input) => safe(() => client.executePurchaseIntent(input.intent_id)));
   server.registerTool("cixa_cancel_purchase_intent", { description: "Cancel an unexecuted purchase intent owned by this agent.", inputSchema: idInput }, (input) => safe(() => client.cancelPurchaseIntent(input.intent_id)));
-  server.registerTool("cixa_list_transactions", { description: "List this agent's sanitized transactions.", inputSchema: empty }, () => safe(() => client.listTransactions()));
+  server.registerTool("cixa_list_transactions", { description: "List one bounded page of this agent's sanitized transactions. Pass next_cursor to continue.", inputSchema: transactionPageInput }, (input) => safe(() => client.listTransactions(input.cursor ?? null, input.limit ?? 25)));
   server.registerTool("cixa_get_receipt", { description: "Read a sanitized receipt with personal information removed.", inputSchema: idInput }, (input) => safe(() => client.getReceipt(input.intent_id)));
   return server;
 }

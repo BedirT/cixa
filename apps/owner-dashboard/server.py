@@ -23,6 +23,15 @@ from urllib.parse import parse_qs, urlsplit
 MAX_BODY = 32 * 1024
 
 
+class ActivationUncertain(RuntimeError):
+    def __init__(self, token_path: Path) -> None:
+        self.token_path = token_path
+        super().__init__(
+            "Activation may have completed. The prepared token was retained at "
+            f"{token_path}. Refresh Agents and reconcile that file before retrying."
+        )
+
+
 def read_private_token(path_value: str) -> str:
     path = Path(path_value)
     metadata = path.lstat()
@@ -103,13 +112,14 @@ class DashboardState:
             operation["capability_token"] = token
             activation_started = True
             value = self.call(operation)
-        except BaseException:
+        except BaseException as error:
             if descriptor >= 0:
                 os.close(descriptor)
             if not activation_started:
                 token_path.unlink(missing_ok=True)
                 self._sync_agent_token_directory()
-            raise
+                raise
+            raise ActivationUncertain(token_path) from error
         value["agent_token_file"] = str(token_path)
         return value
 
@@ -381,6 +391,15 @@ def make_handler(state: DashboardState):
                 self._send_json(200, value)
             except KeyError:
                 self._send_json(404, {"error": "not found"})
+            except ActivationUncertain as error:
+                self._send_json(
+                    409,
+                    {
+                        "error": str(error),
+                        "activation_uncertain": True,
+                        "agent_token_file": str(error.token_path),
+                    },
+                )
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
                 self._send_json(400, {"error": "request rejected"})
 

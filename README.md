@@ -167,7 +167,7 @@ The MCP server exposes only the agent-safe surface:
 | `cixa_get_purchase_intent` | Read one sanitized intent |
 | `cixa_execute_purchase_intent` | Execute an already authorized intent |
 | `cixa_cancel_purchase_intent` | Cancel an unexecuted intent |
-| `cixa_list_transactions` | List the agent's sanitized transactions |
+| `cixa_list_transactions` | List a bounded page of sanitized transactions; follow `next_cursor` for older records |
 | `cixa_get_receipt` | Read a receipt with personal details removed |
 
 Policy edits, agent creation and revocation, approvals, deposits, reconciliation, provider setup, audit export, and emergency stop stay on the owner side.
@@ -185,6 +185,13 @@ const cixa = new BrokerClient({
 });
 
 console.log(await cixa.getBudget());
+
+let cursor: string | null = null;
+do {
+  const page = await cixa.listTransactions(cursor, 25);
+  console.log(page.transactions);
+  cursor = page.next_cursor;
+} while (cursor);
 ```
 
 Python:

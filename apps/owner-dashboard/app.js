@@ -48,7 +48,11 @@ async function api(path, options = {}) {
   const response = await fetch(path, { credentials:"same-origin", ...options, headers:{ ...(options.body ? { "Content-Type":"application/json", "X-CSRF-Token":csrf } : {}), ...(options.headers ?? {}) } });
   let value;
   try { value = await response.json(); } catch { throw new Error(`Cixa returned an unreadable response (${response.status}).`); }
-  if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status}).`);
+  if (!response.ok) {
+    const error = new Error(value.error ?? `Request failed (${response.status}).`);
+    error.status = response.status; error.details = value;
+    throw error;
+  }
   return value;
 }
 function readCsrf() { csrf = document.cookie.split("; ").find((part) => part.startsWith("csrf="))?.split("=")[1] ?? ""; }
@@ -85,7 +89,10 @@ async function post(path, body, success) {
   if (state.busy) return;
   state.busy = true; document.body.classList.add("busy"); $("main").setAttribute("aria-busy", "true");
   try { const value = await api(path, { method:"POST", body:JSON.stringify(body) }); toast(success); await refresh(); return value; }
-  catch (error) { toast(error.message, true); throw error; }
+  catch (error) {
+    if (error.details?.activation_uncertain) await refresh().catch(() => {});
+    toast(error.message, true); throw error;
+  }
   finally { state.busy = false; document.body.classList.remove("busy"); $("main").removeAttribute("aria-busy"); }
 }
 function toast(message, error = false) {

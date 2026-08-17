@@ -98,8 +98,8 @@ def exercise_capability_handoff() -> None:
                 {"type": "owner_rotate_agent_capability"}, "uncertain.token"
             )
             raise AssertionError("broker response loss was not propagated")
-        except RuntimeError as error:
-            assert "response loss" in str(error)
+        except module.ActivationUncertain as error:
+            assert error.token_path == directory / "agent-tokens" / "uncertain.token"
         assert (directory / "agent-tokens" / "uncertain.token").exists()
 
 

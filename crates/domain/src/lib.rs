@@ -2097,6 +2097,11 @@ impl Treasury {
         request: Request,
         data_dir: &Path,
     ) -> Result<Value> {
+        if matches!(&request, Request::OwnerCreateAgent { .. }) {
+            return Err(TreasuryError::Forbidden(
+                "persisted agent creation requires a caller-prepared capability".to_string(),
+            ));
+        }
         let read_only = request.is_read_only();
         match request {
             Request::ExecutePurchaseIntent { intent_id } => {
@@ -6457,6 +6462,21 @@ mod tests {
 
         assert_eq!(status["principal"], "owner");
         assert!(!directory.path().join(STATE_FILE).exists());
+        assert!(
+            treasury
+                .handle_persisted(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: "unsafe-persisted-agent".to_string(),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::ApprovalRequired,
+                        ttl_secs: 3600,
+                    },
+                    directory.path(),
+                )
+                .is_err()
+        );
+        assert!(treasury.state.agents.is_empty());
     }
 
     #[test]

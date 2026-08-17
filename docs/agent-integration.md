@@ -35,6 +35,10 @@ const cixa = new BrokerClient({
   tokenFile: process.env.CIXA_AGENT_TOKEN_FILE!,
 });
 const budget = await cixa.getBudget();
+const firstTransactions = await cixa.listTransactions(null, 25);
+const olderTransactions = firstTransactions.next_cursor
+  ? await cixa.listTransactions(firstTransactions.next_cursor, 25)
+  : null;
 ```
 
 The SDK reads the capability token from a protected file. It does not accept a raw token in a method argument and does not provide owner operations.
@@ -46,9 +50,14 @@ from cixa import CixaClient
 
 cixa = CixaClient(".local/cixa.sock", ".local/agent.token")
 print(cixa.get_budget())
+page = cixa.list_transactions(limit=25)
+while page["next_cursor"]:
+    page = cixa.list_transactions(page["next_cursor"], limit=25)
 ```
 
 Use `PYTHONPATH=packages/sdk-python` for the repository example without installing it. The Python client has no runtime dependency beyond the standard library.
+
+Transaction history is always paged. Each SDK and the `cixa_list_transactions` MCP tool accepts a nullable cursor and a limit from 1 to 50, and returns `transactions`, `transactions_total`, `next_cursor`, and `has_more`.
 
 ## Purchase Intent
 

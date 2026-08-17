@@ -41,6 +41,13 @@ try {
   const status = await client.callTool({ name: "cixa_get_status", arguments: {} });
   const payload = JSON.parse(status.content[0].text);
   assert.equal(payload.principal, "agent");
+  const transactions = await client.callTool({
+    name: "cixa_list_transactions",
+    arguments: { cursor: null, limit: 25 },
+  });
+  const transactionPage = JSON.parse(transactions.content[0].text);
+  assert.equal(transactionPage.transactions.length, 0);
+  assert.equal(transactionPage.has_more, false);
   await client.close();
   console.log("MCP smoke assertions passed");
 } finally {

@@ -55,6 +55,8 @@ cixa serve --data-dir /var/lib/cixa \
   --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
 ```
 
+`create-agent` writes, syncs, permissions, and syncs the token directory before it asks the broker to activate that capability. If activation fails or the broker response is lost, Cixa retains the named token file and reports an uncertain outcome. Reconcile the Agents view and that exact file before removing it or trying another creation.
+
 The broker changes only the agent token and agent socket to that group. `owner.sock`, `owner.token`, `audit.key`, and state remain private. Manual-provider startup rejects a missing or primary `--agent-gid`, and the socket rejects peers using the broker UID even if they can reach it.
 
 ## Windows

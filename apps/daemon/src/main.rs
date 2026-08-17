@@ -265,9 +265,9 @@ fn token_file(args: &[String], owner: bool) -> CliResult<String> {
 }
 
 fn write_token(path: &Path, token: &str) -> CliResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let parent =
+        path.parent().filter(|value| !value.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -278,7 +278,41 @@ fn write_token(path: &Path, token: &str) -> CliResult<()> {
     let mut file = options.open(path)?;
     file.write_all(format!("{token}\n").as_bytes())?;
     file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+fn new_capability_token() -> CliResult<Zeroizing<String>> {
+    Ok(Zeroizing::new(hex::encode(rand::random::<[u8; 32]>())))
+}
+
+fn activate_with_prepared_token(
+    token_path: &Path,
+    agent_gid: Option<u32>,
+    activate: impl FnOnce(String) -> CliResult<Value>,
+) -> CliResult<Value> {
+    let capability_token = new_capability_token()?;
+    write_token(token_path, &capability_token)?;
+    #[cfg(unix)]
+    if let Some(gid) = agent_gid {
+        let parent = token_path
+            .parent()
+            .filter(|value| !value.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        share_with_agent_group(parent, gid, 0o750)?;
+        share_with_agent_group(token_path, gid, 0o640)?;
+        OpenOptions::new().read(true).write(true).open(token_path)?.sync_all()?;
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = agent_gid;
+    activate(capability_token.to_string()).map_err(|error| {
+        format!(
+            "agent activation failed or became uncertain; prepared token retained at {} for owner reconciliation: {error}",
+            token_path.display()
+        )
+        .into()
+    })
 }
 
 fn read_private_text(path: &Path, label: &str) -> CliResult<String> {
@@ -709,8 +743,21 @@ mod process_identity_tests {
         assert!(encoded.len() <= MAX_FRAME_BYTES);
         let decoded: RpcResponse = serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
         assert!(!decoded.ok);
-        assert_eq!(decoded.request_id, "large-response");
+        assert_eq!(decoded.request_id, "oversize");
         assert_eq!(decoded.error.as_deref(), Some("response exceeds the broker frame limit"));
+
+        let attacker_controlled_id = RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: "r".repeat(MAX_FRAME_BYTES),
+            ok: false,
+            data: None,
+            error: Some("rejected".to_string()),
+        };
+        encoded.clear();
+        write_response(&mut encoded, &attacker_controlled_id).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let decoded: RpcResponse = serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
+        assert_eq!(decoded.request_id, "oversize");
     }
 
     #[test]
@@ -727,6 +774,25 @@ mod process_identity_tests {
             .collect();
         assert!(admission.admit("one-too-many").is_none());
         drop(guards);
+    }
+
+    #[test]
+    fn prepared_cli_token_is_durable_before_activation_and_retained_on_uncertainty() {
+        let directory = std::env::temp_dir().join(format!(
+            "cixa-prepared-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let token_path = directory.join("agent.token");
+        let error = activate_with_prepared_token(&token_path, None, |token| {
+            assert_eq!(fs::read_to_string(&token_path).unwrap().trim(), token);
+            Err("injected response loss after activation started".into())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("prepared token retained"));
+        assert_eq!(fs::read_to_string(&token_path).unwrap().trim().len(), 64);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1057,6 +1123,8 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
     }
     #[cfg(unix)]
     let agent_gid = value(args, "--agent-gid").map(|value| value.parse::<u32>()).transpose()?;
+    #[cfg(not(unix))]
+    let agent_gid = None;
     #[cfg(unix)]
     if agent_gid == Some(unsafe { libc::getegid() }) {
         return Err(
@@ -1075,26 +1143,15 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
         "disabled" => AutonomyMode::Disabled,
         value => return Err(format!("unsupported mode {value}").into()),
     };
-    let result = run_request(
-        args,
-        owner,
-        Request::OwnerCreateAgent {
-            name: value(args, "--name").unwrap_or_else(|| "local-agent".to_string()),
-            policy,
-            mode,
-            ttl_secs: value(args, "--ttl-secs").unwrap_or_else(|| "3600".to_string()).parse()?,
-        },
-    )?;
-    let token =
-        result["capability_token"].as_str().ok_or("broker did not return a capability token")?;
-    write_token(&token_path, token)?;
-    #[cfg(unix)]
-    if let Some(gid) = agent_gid {
-        if let Some(parent) = token_path.parent() {
-            share_with_agent_group(parent, gid, 0o750)?;
-        }
-        share_with_agent_group(&token_path, gid, 0o640)?;
-    }
+    let name = value(args, "--name").unwrap_or_else(|| "local-agent".to_string());
+    let ttl_secs = value(args, "--ttl-secs").unwrap_or_else(|| "3600".to_string()).parse()?;
+    let result = activate_with_prepared_token(&token_path, agent_gid, |capability_token| {
+        run_request(
+            args,
+            owner,
+            Request::OwnerCreateAgentPrepared { name, policy, mode, ttl_secs, capability_token },
+        )
+    })?;
     print_json(
         &json!({ "agent_id": result["agent_id"], "agent_token_file": token_path, "expires_at": result["expires_at"] }),
     )
@@ -1762,7 +1819,7 @@ fn write_response(writer: &mut impl Write, response: &RpcResponse) -> CliResult<
     if encoded.len() + 1 > MAX_FRAME_BYTES {
         encoded = serde_json::to_vec(&RpcResponse {
             api_version: API_VERSION.to_string(),
-            request_id: response.request_id.clone(),
+            request_id: "oversize".to_string(),
             ok: false,
             data: None,
             error: Some("response exceeds the broker frame limit".to_string()),

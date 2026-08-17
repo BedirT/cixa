@@ -100,6 +100,7 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "rand",
  "serde",
  "serde_json",
  "zeroize",
