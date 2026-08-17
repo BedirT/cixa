@@ -101,6 +101,13 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
         time.sleep(0.1)
         assert run("stop", "--data-dir", str(directory), "--owner-token-file", str(owner_file))["emergency_stop"] is True
         assert run("resume", "--data-dir", str(directory), "--owner-token-file", str(owner_file))["emergency_stop"] is False
+        run(
+            "arm-session",
+            "--data-dir", str(directory),
+            "--owner-token-file", str(owner_file),
+            "--agent-id", created["agent_id"],
+            "--ttl-secs", "300",
+        )
         for connection in flood:
             connection.close()
         client = TreasuryClient(str(socket_path), str(agent_file))
