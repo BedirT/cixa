@@ -291,33 +291,55 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_identity(pid: u32) -> Option<ProcessIdentity> {
-    #[repr(C)]
-    #[derive(Default)]
-    struct ProcBsdInfo {
-        flags: u32,
-        status: u32,
-        xstatus: u32,
-        pid: u32,
-        ppid: u32,
-        uid: u32,
-        gid: u32,
-        ruid: u32,
-        rgid: u32,
-        svuid: u32,
-        svgid: u32,
-        rfu_1: u32,
-        comm: [u8; 16],
-        name: [u8; 32],
-        nfiles: u32,
-        pgid: u32,
-        pjobc: u32,
-        e_tdev: u32,
-        e_tpgid: u32,
-        nice: i32,
-        start_tvsec: u64,
-        start_tvusec: u64,
-    }
+#[repr(C)]
+#[derive(Default)]
+struct ProcBsdInfo {
+    flags: u32,
+    status: u32,
+    xstatus: u32,
+    pid: u32,
+    ppid: u32,
+    uid: u32,
+    gid: u32,
+    ruid: u32,
+    rgid: u32,
+    svuid: u32,
+    svgid: u32,
+    rfu_1: u32,
+    comm: [u8; 16],
+    name: [u8; 32],
+    nfiles: u32,
+    pgid: u32,
+    pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    nice: i32,
+    start_tvsec: u64,
+    start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct ProcUniqueIdentifierInfo {
+    uuid: [u8; 16],
+    unique_id: u64,
+    parent_unique_id: u64,
+    id_version: i32,
+    original_parent_id_version: i32,
+    reserved: [u64; 2],
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct ProcBsdInfoWithUniqueId {
+    bsd: ProcBsdInfo,
+    unique: ProcUniqueIdentifierInfo,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_info(pid: u32) -> Option<ProcBsdInfoWithUniqueId> {
     #[link(name = "proc")]
     unsafe extern "C" {
         fn proc_pidinfo(
@@ -328,25 +350,28 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
             buffersize: libc::c_int,
         ) -> libc::c_int;
     }
-    const PROC_PIDTBSDINFO: libc::c_int = 3;
-    let mut info = ProcBsdInfo::default();
-    let expected = std::mem::size_of::<ProcBsdInfo>() as libc::c_int;
+    const PROC_PIDT_BSDINFOWITHUNIQID: libc::c_int = 18;
+    let mut info = ProcBsdInfoWithUniqueId::default();
+    let expected = std::mem::size_of::<ProcBsdInfoWithUniqueId>() as libc::c_int;
     let received = unsafe {
         proc_pidinfo(
             pid as libc::c_int,
-            PROC_PIDTBSDINFO,
+            PROC_PIDT_BSDINFOWITHUNIQID,
             0,
-            (&mut info as *mut ProcBsdInfo).cast(),
+            (&mut info as *mut ProcBsdInfoWithUniqueId).cast(),
             expected,
         )
     };
-    if received != expected || info.pid != pid {
+    if received != expected || info.bsd.pid != pid {
         return None;
     }
-    Some(ProcessIdentity {
-        pid,
-        started: u128::from(info.start_tvsec) * 1_000_000 + u128::from(info.start_tvusec),
-    })
+    Some(info)
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let info = macos_process_info(pid)?;
+    Some(ProcessIdentity { pid, started: u128::from(info.unique.unique_id) })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -362,6 +387,96 @@ fn process_identity_matches(identity: ProcessIdentity) -> bool {
 #[cfg(unix)]
 fn process_group_identity_matches(root: ProcessIdentity) -> bool {
     process_identity_matches(root)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_process_if_current(identity: ProcessIdentity) -> bool {
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0) } as libc::c_int;
+    if descriptor < 0 {
+        return false;
+    }
+    let matches = process_identity_matches(identity);
+    let result = if matches {
+        (unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                descriptor,
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        }) == 0
+    } else {
+        false
+    };
+    unsafe {
+        libc::close(descriptor);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn signal_process_if_current(identity: ProcessIdentity) -> bool {
+    #[repr(C)]
+    #[derive(Default)]
+    struct AuditMask {
+        success: u32,
+        failure: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct AuditTerminalId {
+        port: i32,
+        kind: u32,
+        address: [u32; 4],
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct AuditInfo {
+        audit_user_id: u32,
+        mask: AuditMask,
+        terminal_id: AuditTerminalId,
+        session_id: i32,
+        flags: u64,
+    }
+    #[repr(C)]
+    struct AuditToken {
+        values: [u32; 8],
+    }
+    unsafe extern "C" {
+        fn getaudit_addr(info: *mut AuditInfo, length: libc::c_int) -> libc::c_int;
+    }
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_signal_with_audittoken(token: *mut AuditToken, signal: libc::c_int) -> libc::c_int;
+    }
+
+    let info = match macos_process_info(identity.pid) {
+        Some(info) if u128::from(info.unique.unique_id) == identity.started => info,
+        _ => return false,
+    };
+    let mut audit = AuditInfo::default();
+    if unsafe { getaudit_addr(&mut audit, std::mem::size_of::<AuditInfo>() as libc::c_int) } != 0 {
+        return false;
+    }
+    let mut token = AuditToken {
+        values: [
+            audit.audit_user_id,
+            info.bsd.uid,
+            info.bsd.gid,
+            info.bsd.ruid,
+            info.bsd.rgid,
+            identity.pid,
+            audit.session_id as u32,
+            info.unique.id_version as u32,
+        ],
+    };
+    unsafe { proc_signal_with_audittoken(&mut token, libc::SIGKILL) == 0 }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn signal_process_if_current(_identity: ProcessIdentity) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -474,11 +589,7 @@ impl DescendantTracker {
                 }
             }
             for identity in tracked.iter().rev() {
-                if process_identity_matches(*identity) {
-                    unsafe {
-                        libc::kill(identity.pid as libc::pid_t, libc::SIGKILL);
-                    }
-                }
+                signal_process_if_current(*identity);
             }
         }
         let _ = child.kill();
@@ -498,6 +609,15 @@ mod process_identity_tests {
         assert!(!process_identity_matches(stale));
         assert!(process_group_identity_matches(current));
         assert!(!process_group_identity_matches(stale));
+        assert!(!signal_process_if_current(stale));
+    }
+
+    #[test]
+    fn stable_process_handle_signals_the_observed_child() {
+        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn test child");
+        let identity = process_identity(child.id()).expect("test child identity");
+        assert!(signal_process_if_current(identity));
+        child.wait().expect("reap test child");
     }
 }
 
@@ -546,7 +666,10 @@ fn collect_child_output(
                 return Err(error.into());
             }
         }
-        if status.is_none() {
+        // Keep an exited adapter as an unreaped child while descendants still
+        // hold stdout. Its PID and process-group ID cannot be reused before
+        // timeout cleanup validates and signals the group.
+        if eof && status.is_none() {
             status = match child.try_wait() {
                 Ok(status) => status,
                 Err(error) => {
