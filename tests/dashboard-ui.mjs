@@ -158,14 +158,18 @@ try {
   await page.getByRole("button", {name:"Close details"}).click();
   await page.getByRole("button", {name:"Stopped"}).click();
   await page.locator("#ledger-list").getByText("Cancelled", {exact:true}).waitFor();
+  const ownerToken=(await readFile(ownerFile,"utf8")).trim();const historyOverview=await rpc(ownerSocket,ownerToken,{type:"owner_get_dashboard"});const historyPolicy=structuredClone(historyOverview.policies[historyOverview.agents.find((agent)=>agent.id===agentId).policy_id]);historyPolicy.max_transactions_per_minute=100;await rpc(ownerSocket,ownerToken,{type:"owner_update_policy",agent_id:agentId,policy:historyPolicy});
   for (let index=0;index<26;index+=1) await rpc(agentSocket,agentToken,{type:"create_purchase_intent",request:purchase(`history-${index}`,100,"merchant.example.test")});
   await page.getByRole("button", {name:"Refresh"}).click();
   await page.getByRole("button", {name:"All",exact:true}).click();
-  await page.getByText("Showing 25 of 28 attempts", {exact:true}).waitFor();
+  await page.getByText("Showing 27 of 28 attempts", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Load older attempts"}).click();
+  await page.getByText("Showing 28 of 28 attempts", {exact:true}).waitFor();
+  await page.getByRole("button", {name:"Refresh"}).click();
   await page.getByText("Showing 28 of 28 attempts", {exact:true}).waitFor();
 
   await page.getByRole("link", {name:"Agents"}).first().click();
+  await rpc(ownerSocket,ownerToken,{type:"owner_set_emergency_stop",stopped:true});await rpc(ownerSocket,ownerToken,{type:"owner_set_emergency_stop",stopped:false});await page.getByRole("button",{name:"Refresh"}).click();await page.getByRole("button",{name:"Arm spending"}).click();await dialog.getByRole("button",{name:"Arm spending"}).click();await page.getByText("Active",{exact:true}).waitFor();
   await page.getByRole("button", {name:"Manage limits"}).click();
   await page.getByPlaceholder("merchant.example.test").fill("trusted.example.test");
   await page.getByRole("button", {name:"Trust merchant"}).click();
@@ -185,7 +189,7 @@ try {
   await page.getByRole("button", {name:"Audit"}).click();
   await page.getByText(/Audit chain verified/).waitFor();
   const olderAudit = page.getByRole("button", {name:"Load older audit events"});
-  if (await olderAudit.isVisible()) await olderAudit.click();
+  if (await olderAudit.isVisible()) { await olderAudit.click(); const loadedAuditCount=await page.locator("#audit-list .audit-entry").count();await page.getByRole("button",{name:"Refresh"}).click();assert.equal(await page.locator("#audit-list .audit-entry").count(),loadedAuditCount); }
   await page.getByText("Technical evidence", {exact:true}).first().click();
   assert.equal(await page.locator("#audit-list details").first().getAttribute("open"), "");
   const download = page.waitForEvent("download");
@@ -212,7 +216,7 @@ try {
   await page.getByRole("link", {name:"Today"}).last().click();
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
   await page.locator("#recent-list .ledger-row").first().click();
-  await page.getByRole("button", {name:"Close details"}).focus();
+  const drawerButtons=page.locator("#detail-drawer button:visible");await drawerButtons.last().focus();
   await page.keyboard.press("Tab");
   assert.equal(await page.getByRole("button", {name:"Close details"}).evaluate((element) => element === document.activeElement), true);
   await page.getByRole("button", {name:"Close details"}).click();

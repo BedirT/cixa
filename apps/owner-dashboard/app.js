@@ -55,14 +55,30 @@ readCsrf();
 async function loadLedger(reset = false) {
   const cursor = reset ? null : state.ledgerCursor;
   const page = await api(`/api/transactions?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-  state.ledgerTransactions = reset ? page.transactions : [...state.ledgerTransactions, ...page.transactions];
+  state.ledgerTransactions = reset ? page.transactions : [...new Map([...state.ledgerTransactions,...page.transactions].map((intent)=>[intent.id,intent])).values()];
   state.ledgerCursor = page.next_cursor; state.ledgerTotal = page.transactions_total; renderLedger();
+}
+async function refreshLedger() {
+  const page = await api("/api/transactions?limit=25");
+  const byId = new Map([...state.ledgerTransactions, ...page.transactions].map((intent)=>[intent.id,intent]));
+  state.ledgerTransactions = [...byId.values()]; state.ledgerTotal = page.transactions_total;
+  if (state.ledgerTransactions.length >= state.ledgerTotal) state.ledgerCursor = null;
+  else if (!state.ledgerCursor) state.ledgerCursor = page.next_cursor;
+  renderLedger();
 }
 async function loadAudit(reset = false) {
   const cursor = reset ? null : state.auditCursor;
   const page = await api(`/api/audit?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-  state.audit = reset ? page : {...page, entries:[...(state.audit?.entries ?? []), ...page.entries]};
+  state.audit = reset ? page : {...page, entries:[...new Map([...(state.audit?.entries ?? []),...page.entries].map((entry)=>[entry.sequence,entry])).values()].sort((a,b)=>b.sequence-a.sequence)};
   state.auditCursor = page.next_cursor; renderTrust();
+}
+async function refreshAudit() {
+  const page = await api("/api/audit?limit=25");
+  const bySequence = new Map([...(state.audit?.entries ?? []), ...page.entries].map((entry)=>[entry.sequence,entry]));
+  state.audit = {...page,entries:[...bySequence.values()].sort((a,b)=>b.sequence-a.sequence)};
+  if (state.audit.entries.length >= page.entries_total) state.auditCursor = null;
+  else if (!state.auditCursor) state.auditCursor = page.next_cursor;
+  renderTrust();
 }
 async function post(path, body, success) {
   if (state.busy) return;
@@ -79,10 +95,11 @@ function toast(message, error = false) {
 
 async function refresh() {
   try {
+    const initial = !state.overview;
     state.overview = await api("/api/overview");
-    await loadLedger(true);
+    if (initial) await loadLedger(true); else await refreshLedger();
     state.lastSuccessfulRefresh = new Date(); state.offline = false; render();
-    try { await loadAudit(true); }
+    try { if (initial) await loadAudit(true); else await refreshAudit(); }
     catch { state.audit = null; renderTrust(); }
   } catch (error) {
     state.offline = true; renderChrome(); throw error;
@@ -117,7 +134,7 @@ function renderToday() {
   $("#today-summary").textContent = pendingCount ? `${pendingCount} ${pendingCount === 1 ? "decision is" : "decisions are"} waiting. Everything else stays inside your rules.` : "Nothing needs a decision. Cixa is reading every checkout as it comes in.";
   const currency = data.provider.balance?.currency ?? "CAD";
   const active = data.agents.filter((agent) => !agent.revoked && agent.mode !== "disabled" && agent.expires_at > Date.now()/1000 && agent.broker_session_expires_at > Date.now()/1000 && agent.budget?.usage?.rolling_24h_amount?.currency === currency);
-  const spent = active.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const policyRemaining = active.reduce((sum, agent) => sum + agent.budget.remaining_rolling_24h.minor, 0); const providerRemaining = data.provider.balance_evidence?.stale ? 0 : data.provider.balance?.minor ?? 0; const authorityRemaining = data.available_authority?.currency === currency ? data.available_authority.minor : 0; const remaining = Math.max(0, Math.min(policyRemaining, providerRemaining, authorityRemaining)); const allowance = spent + remaining;
+  const spent = active.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const policyRemaining = active.reduce((sum, agent) => sum + Math.min(agent.budget.remaining_rolling_24h.minor,agent.budget.remaining_session.minor,agent.budget.remaining_lifetime.minor), 0); const providerRemaining = data.provider.balance_evidence?.stale ? 0 : data.provider.balance?.minor ?? 0; const authorityRemaining = data.available_authority?.currency === currency ? data.available_authority.minor : 0; const remaining = Math.max(0, Math.min(policyRemaining, providerRemaining, authorityRemaining)); const allowance = spent + remaining;
   const evidence = data.provider.balance_evidence?.stale ? "Expired evidence" : title(data.provider.balance_status);
   replace($("#today-metrics"), [metric("Spent in 24 hours", money({ minor:spent, currency }), "Authoritative broker ledger usage", allowance ? spent / allowance * 100 : 0), metric("Provider reports", money(data.provider.balance), evidence, data.provider.balance_evidence?.stale ? 0 : 100, data.provider.balance_evidence?.stale ? "" : "green"), metric("Available now", money({ minor:remaining, currency }), "Capped by shared funds, ledger authority, and active agent limits", allowance ? remaining / allowance * 100 : 0)]);
   $("#waiting-count").textContent = `${pendingCount} ${pendingCount === 1 ? "item" : "items"}`; replace($("#decision-list"), pending.length ? pending.map(decisionCard) : empty("Nothing needs you right now."));
@@ -160,12 +177,13 @@ function renderAgents() {
   depositAgent.value = selected;
 }
 function agentCard(agent) {
-  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const active = !agent.revoked && agent.mode !== "disabled" && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":sessionExpired?"Session expired":active?"Active":"Paused"; const primaryAction=sessionExpired&&!agent.revoked&&!capabilityExpired?button("Arm spending", "quiet-button",()=>confirmAction({title:"Arm this agent again?",copy:"This starts a new local spending session. Existing limits and approval rules still apply.",label:"Arm spending",action:()=>post("/api/agents/arm-session",{agent_id:agent.id,ttl_secs:3600},"Agent session armed for one hour.")})):button(active ? "Pause spending" : "Allow with approval", active ? "secondary-button" : "quiet-button", () => setAgentMode(agent, active ? "disabled" : "approval_required"));
+  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const active = !agent.revoked && agent.mode !== "disabled" && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":sessionExpired?"Session expired":active?"Active":"Paused"; const sessionTtl=policy?.card_session_ttl_secs ?? 600; const primaryAction=sessionExpired&&!agent.revoked&&!capabilityExpired?button("Arm spending", "quiet-button",()=>confirmAction({title:"Arm this agent again?",copy:`This starts a new local spending session for ${Math.ceil(sessionTtl/60)} minutes. Existing limits and approval rules still apply.`,label:"Arm spending",action:()=>post("/api/agents/arm-session",{agent_id:agent.id,ttl_secs:sessionTtl},`Agent session armed for ${Math.ceil(sessionTtl/60)} minutes.`)})):button(active ? "Pause spending" : "Allow with approval", active ? "secondary-button" : "quiet-button", () => setAgentMode(agent, active ? "disabled" : "approval_required"));
   return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [node("div", {}, [node("h2", { text:agent.name }), node("p", { class:"agent-subtitle", text:title(agent.mode) })]), node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"progress-row" }, [node("span", { text:"Spent against rolling limit" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } }), node("div", { class:"fact-list" }, [fact("Most at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session expires", when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [primaryAction, button("Manage limits", "quiet-button", () => openAgent(agent))])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
 function renderTrust() {
   const provider = state.overview.provider; const card = provider.manual_card;
+  const treasuryCurrency = provider.balance?.currency ?? "CAD"; $("#provider-form").elements.currency.value=treasuryCurrency;$("#provider-form").elements.currency.readOnly=true;$("#deposit-form").elements.currency.value=treasuryCurrency;$("#deposit-form").elements.currency.readOnly=true;
   replace($("#provider-summary"), [fact("Mode", title(provider.mode)), fact("Held as", card?.credential_reference_configured ? "Credential reference configured" : "No manual reference"), fact("Ends in", card?.last_four ?? "Not stored"), fact("Evidence", title(provider.balance_status))]);
   replace($("#system-summary"), [fact("Runs", "On this computer"), fact("Sends analytics", "Nothing"), fact("Records kept", "On this disk"), fact("Audit events", String(state.overview.audit_entry_count)), fact("Sanitized", state.overview.sanitized ? "Yes" : "No")]);
   if (!state.audit) { $("#audit-verification").textContent = "Audit history is temporarily unavailable. Other owner controls still work."; replace($("#audit-list"), empty("Refresh to try loading audit history again.")); }
@@ -230,7 +248,7 @@ function openAgent(agent) {
     agent.revoked ? null : detailSection("Capability", button("Revoke permanently", "secondary-button", () => { closeDrawer(); confirmAction({ title:"Revoke this agent?", copy:"This cannot be undone. Existing access stops immediately.", label:"Revoke agent", danger:true, action:() => post("/api/agents/revoke", { agent_id:agent.id }, "Agent revoked.") }); })),
   ]);
 }
-async function applyAgentMode(agent,mode){await post("/api/agents/mode",{agent_id:agent.id,mode},`${agent.name} is now ${title(mode).toLowerCase()}.`);closeDrawer();}
+async function applyAgentMode(agent,mode){closeDrawer();await post("/api/agents/mode",{agent_id:agent.id,mode},`${agent.name} is now ${title(mode).toLowerCase()}.`);}
 function setAgentMode(agent,mode){const rank={disabled:0,observe:0,approval_required:1,bounded_autonomous:2};if((rank[mode]??0)>(rank[agent.mode]??0)){if($("#detail-drawer").classList.contains("open"))closeDrawer();confirmAction({title:`Give ${agent.name} more authority?`,copy:"This changes what the agent may do on future requests. Its existing policy limits still apply.",facts:[["Current mode",title(agent.mode)],["New mode",title(mode)]],label:"Change authority",action:()=>applyAgentMode(agent,mode)});}else return applyAgentMode(agent,mode);}
 function openPolicy(agent,policy) {
   closeDrawer(); const specs=[["max_per_transaction","Most per purchase"],["max_per_session","Most per session"],["max_rolling_24h","Rolling 24-hour limit"],["max_lifetime","Lifetime limit"],["absolute_exposure_ceiling","Absolute exposure ceiling"],["max_treasury_size","Maximum treasury size"]];
