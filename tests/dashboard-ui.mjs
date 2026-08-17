@@ -81,7 +81,7 @@ try {
   assert.equal((await page.getByRole("button", {name:"Refresh"}).textContent()).trim(), "");
   await page.getByText("Used or held in the last 24 hours", {exact:true}).waitFor();
   await page.getByText("Brought in", {exact:true}).waitFor();
-  await page.getByText("Still allowed today", {exact:true}).waitFor();
+  await page.getByText("Available to spend now", {exact:true}).waitFor();
   await page.getByText("Nothing needs a decision.", {exact:true}).waitFor();
   assert.equal(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth), true);
 
@@ -224,8 +224,8 @@ try {
   await page.getByRole("button", {name:"Trust merchant"}).click();
   await dialog.getByRole("button", {name:"Trust merchant"}).click();
   await dialog.waitFor({state:"hidden"});
-  await page.getByRole("button", {name:"Halve today's allowance"}).click();
-  await dialog.getByRole("button", {name:"Halve allowance"}).click();
+  await page.getByRole("button", {name:"Halve spending limits"}).click();
+  await dialog.getByRole("button", {name:"Halve spending limits"}).click();
   await page.getByText(/CA\$12\.50/, {exact:false}).first().waitFor();
   await page.getByRole("button", {name:"Pause spending"}).click();
   await page.locator("#agent-list").getByText("Paused", {exact:true}).waitFor();

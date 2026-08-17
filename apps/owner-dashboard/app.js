@@ -187,7 +187,7 @@ function renderToday() {
   const spent = currencyAgents.reduce((sum, agent) => sum + agent.budget.usage.rolling_24h_amount.minor, 0); const policyRemaining = active.reduce((sum, agent) => sum + Math.min(agent.budget.remaining_rolling_24h.minor,agent.budget.remaining_session.minor,agent.budget.remaining_lifetime.minor), 0); const providerRemaining = data.provider.balance_evidence?.stale ? 0 : data.provider.balance?.minor ?? 0; const authorityRemaining = data.available_authority?.currency === currency ? data.available_authority.minor : 0; const remaining = Math.max(0, Math.min(policyRemaining, providerRemaining, authorityRemaining)); const allowance = spent + remaining;
   const broughtIn = data.ledger?.verified_income?.currency === currency ? data.ledger.verified_income : { minor:0, currency };
   const waitingIncome = data.ledger?.unverified_income?.currency === currency ? data.ledger.unverified_income : { minor:0, currency };
-  replace($("#today-metrics"), [metric("Used or held in the last 24 hours", money({ minor:spent, currency }), `Across ${currencyAgents.length} ${currencyAgents.length === 1 ? "agent" : "agents"}`, allowance ? spent / allowance * 100 : 0), metric("Brought in", money(broughtIn), waitingIncome.minor ? `${money(waitingIncome)} more waiting on you` : "All confirmed by you", broughtIn.minor ? 100 : 0, "green"), metric("Still allowed today", money({ minor:remaining, currency }), "What active agents can use right now", allowance ? remaining / allowance * 100 : 0, "neutral")]);
+  replace($("#today-metrics"), [metric("Used or held in the last 24 hours", money({ minor:spent, currency }), `Across ${currencyAgents.length} ${currencyAgents.length === 1 ? "agent" : "agents"}`, allowance ? spent / allowance * 100 : 0), metric("Brought in", money(broughtIn), waitingIncome.minor ? `${money(waitingIncome)} more waiting on you` : "All confirmed by you", broughtIn.minor ? 100 : 0, "green"), metric("Available to spend now", money({ minor:remaining, currency }), "What active agents can use right now", allowance ? remaining / allowance * 100 : 0, "neutral")]);
   $("#waiting-count").textContent = pendingCount ? `${pendingCount} ${pendingCount === 1 ? "item" : "items"}` : "Nothing pending"; replace($("#decision-list"), pending.length ? pending.map(decisionCard) : todayClear());
   const recent = [...data.transactions].sort((a,b) => b.updated_at - a.updated_at).slice(0,4); replace($("#recent-list"), recent.length ? recent.map(ledgerRow) : empty("No purchases have been attempted yet."));
 }
@@ -231,16 +231,16 @@ function renderAgents() {
 function agentDescription(mode) {
   return ({ bounded_autonomous:"Spends quietly inside its standing limits", approval_required:"Asks before spending when your decision is needed", observe:"Reads only, never buys", disabled:"Spending is paused" })[mode] ?? "Works inside the boundaries you set";
 }
-function halveAgentAllowance(agent, policy) {
+function halveAgentSpendingLimits(agent, policy) {
   const next = structuredClone(policy);
   next.max_rolling_24h.minor = Math.max(1, Math.floor(next.max_rolling_24h.minor / 2));
   next.max_per_transaction.minor = Math.max(1, Math.floor(next.max_per_transaction.minor / 2));
   confirmAction({
-    title:`Halve ${agent.name}'s allowance?`,
-    copy:"This immediately halves both the rolling 24-hour allowance and the most this agent may spend at once. Existing purchases are not changed.",
-    facts:[["24-hour allowance",`${money(policy.max_rolling_24h)} → ${money(next.max_rolling_24h)}`],["Most at once",`${money(policy.max_per_transaction)} → ${money(next.max_per_transaction)}`]],
-    label:"Halve allowance",
-    action:()=>post("/api/policies/update",{agent_id:agent.id,policy:next},`${agent.name}'s allowance was halved.`),
+    title:`Halve ${agent.name}'s spending limits?`,
+    copy:"This updates the policy immediately and stays in place until you edit it. The rolling 24-hour limit and per-purchase limit will each be cut in half. Existing purchases and current reservations are not changed.",
+    facts:[["Rolling 24-hour limit",`${money(policy.max_rolling_24h)} → ${money(next.max_rolling_24h)}`],["Per-purchase limit",`${money(policy.max_per_transaction)} → ${money(next.max_per_transaction)}`]],
+    label:"Halve spending limits",
+    action:()=>post("/api/policies/update",{agent_id:agent.id,policy:next},`${agent.name}'s spending limits were halved.`),
   });
 }
 function restoreAgentSpending(agent, sessionExpired, sessionTtl) {
@@ -255,9 +255,9 @@ function agentCard(agent) {
   const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const spendMode=["approval_required","bounded_autonomous"].includes(agent.mode); const active = !agent.revoked && spendMode && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":agent.mode==="observe"?"Observe only":sessionExpired&&spendMode?"Session expired":active?"Active":"Paused"; const sessionTtl=policy?.card_session_ttl_secs ?? 600;
   const avatar=node("span",{class:"agent-avatar"},[svgIcon("icon-agents")]);
   const identity=node("button",{type:"button",class:"agent-identity",onclick:()=>openAgent(agent),attrs:{"aria-label":`Open ${agent.name} settings`}},[avatar,node("span",{class:"agent-copy"},[node("h2",{text:agent.name}),node("span",{class:"agent-subtitle",text:agentDescription(agent.mode)})])]);
-  const allowance=button("Halve today's allowance","quiet-button agent-halve",()=>halveAgentAllowance(agent,policy));
+  const limitReductionButton=button("Halve spending limits","quiet-button agent-halve",()=>halveAgentSpendingLimits(agent,policy));
   const toggle=button(active?"Pause spending":"Let it spend",active?"secondary-button agent-toggle":"quiet-button agent-toggle",()=>active?setAgentMode(agent,"disabled"):restoreAgentSpending(agent,sessionExpired,sessionTtl));
-  return node("article", { class:"agent-card",onclick:(event)=>{if(!event.target.closest("button,a,input,select,label"))openAgent(agent);} }, [node("div", { class:"agent-head" }, [identity,node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"agent-spend" }, [node("div", { class:"progress-row" }, [node("span", { text:"Used or held in the last 24 hours" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } })]), node("div", { class:"fact-list" }, [fact("Most it may spend at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session ends", sessionExpired ? "Not armed" : when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [allowance,toggle])]);
+  return node("article", { class:"agent-card",onclick:(event)=>{if(!event.target.closest("button,a,input,select,label"))openAgent(agent);} }, [node("div", { class:"agent-head" }, [identity,node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"agent-spend" }, [node("div", { class:"progress-row" }, [node("span", { text:"Used or held in the last 24 hours" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } })]), node("div", { class:"fact-list" }, [fact("Most it may spend at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session ends", sessionExpired ? "Not armed" : when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [limitReductionButton,toggle])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
 function renderTrust() {
