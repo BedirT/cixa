@@ -33,6 +33,7 @@ const MAX_AGENT_ADMISSION_ENTRIES: usize = 128;
 const MAX_AGENT_REQUESTS_PER_SECOND: u32 = 100;
 const MAX_AGENT_CHANNEL_REQUESTS_PER_SECOND: u32 = 200;
 const MAX_AGENT_CHANNEL_IN_FLIGHT: u32 = 4;
+const MAX_UNAUTHENTICATED_REQUESTS_PER_SECOND: u32 = 20;
 
 struct AgentAdmission {
     state: Mutex<AgentAdmissionState>,
@@ -43,6 +44,8 @@ struct AgentAdmissionState {
     window_started: Instant,
     requests: u32,
     in_flight: u32,
+    unauthenticated_window_started: Instant,
+    unauthenticated_requests: u32,
 }
 
 struct AgentAdmissionEntry {
@@ -51,7 +54,11 @@ struct AgentAdmissionEntry {
     in_flight: bool,
 }
 
-struct AgentAdmissionGuard {
+struct AgentChannelGuard {
+    admission: Arc<AgentAdmission>,
+}
+
+struct AgentCapabilityGuard {
     admission: Arc<AgentAdmission>,
     fingerprint: u64,
 }
@@ -64,19 +71,31 @@ impl AgentAdmission {
                 window_started: Instant::now(),
                 requests: 0,
                 in_flight: 0,
+                unauthenticated_window_started: Instant::now(),
+                unauthenticated_requests: 0,
             }),
         }
     }
 
-    fn admit(self: &Arc<Self>, token: &str) -> Option<AgentAdmissionGuard> {
-        let mut hasher = DefaultHasher::new();
-        token.hash(&mut hasher);
-        let fingerprint = hasher.finish();
+    fn admit_unauthenticated(&self) -> bool {
+        let now = Instant::now();
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if now.duration_since(state.unauthenticated_window_started) >= Duration::from_secs(1) {
+            state.unauthenticated_window_started = now;
+            state.unauthenticated_requests = 0;
+        }
+        if state.unauthenticated_requests >= MAX_UNAUTHENTICATED_REQUESTS_PER_SECOND {
+            return false;
+        }
+        state.unauthenticated_requests += 1;
+        true
+    }
+
+    fn admit_channel(self: &Arc<Self>) -> Option<AgentChannelGuard> {
         let now = Instant::now();
         let mut state = self.state.lock().ok()?;
-        state.entries.retain(|_, entry| {
-            entry.in_flight || now.duration_since(entry.window_started) < Duration::from_secs(2)
-        });
         if now.duration_since(state.window_started) >= Duration::from_secs(1) {
             state.window_started = now;
             state.requests = 0;
@@ -86,6 +105,20 @@ impl AgentAdmission {
         {
             return None;
         }
+        state.in_flight += 1;
+        state.requests += 1;
+        Some(AgentChannelGuard { admission: Arc::clone(self) })
+    }
+
+    fn admit_capability(self: &Arc<Self>, token: &str) -> Option<AgentCapabilityGuard> {
+        let mut hasher = DefaultHasher::new();
+        token.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let now = Instant::now();
+        let mut state = self.state.lock().ok()?;
+        state.entries.retain(|_, entry| {
+            entry.in_flight || now.duration_since(entry.window_started) < Duration::from_secs(2)
+        });
         if !state.entries.contains_key(&fingerprint)
             && state.entries.len() >= MAX_AGENT_ADMISSION_ENTRIES
         {
@@ -105,19 +138,24 @@ impl AgentAdmission {
         }
         entry.in_flight = true;
         entry.requests += 1;
-        state.in_flight += 1;
-        state.requests += 1;
-        Some(AgentAdmissionGuard { admission: Arc::clone(self), fingerprint })
+        Some(AgentCapabilityGuard { admission: Arc::clone(self), fingerprint })
     }
 }
 
-impl Drop for AgentAdmissionGuard {
+impl Drop for AgentChannelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock() {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+}
+
+impl Drop for AgentCapabilityGuard {
     fn drop(&mut self) {
         if let Ok(mut state) = self.admission.state.lock()
             && let Some(entry) = state.entries.get_mut(&self.fingerprint)
         {
             entry.in_flight = false;
-            state.in_flight = state.in_flight.saturating_sub(1);
         }
     }
 }
@@ -763,17 +801,27 @@ mod process_identity_tests {
     #[test]
     fn agent_admission_allows_only_one_in_flight_request_per_capability() {
         let admission = Arc::new(AgentAdmission::new());
-        let first = admission.admit("agent-capability").expect("first request admitted");
-        assert!(admission.admit("agent-capability").is_none());
-        assert!(admission.admit("different-capability").is_some());
+        let first = admission.admit_capability("agent-capability").expect("first request admitted");
+        assert!(admission.admit_capability("agent-capability").is_none());
+        assert!(admission.admit_capability("different-capability").is_some());
         drop(first);
-        assert!(admission.admit("agent-capability").is_some());
+        assert!(admission.admit_capability("agent-capability").is_some());
 
-        let guards: Vec<_> = (0..MAX_AGENT_CHANNEL_IN_FLIGHT)
-            .map(|index| admission.admit(&format!("channel-{index}")).unwrap())
-            .collect();
-        assert!(admission.admit("one-too-many").is_none());
+        let guards: Vec<_> =
+            (0..MAX_AGENT_CHANNEL_IN_FLIGHT).map(|_| admission.admit_channel().unwrap()).collect();
+        assert!(admission.admit_channel().is_none());
         drop(guards);
+    }
+
+    #[test]
+    fn unauthenticated_channel_admission_cannot_fill_capability_entries() {
+        let admission = Arc::new(AgentAdmission::new());
+        for _ in 0..MAX_AGENT_ADMISSION_ENTRIES {
+            admission.admit_unauthenticated();
+        }
+        assert!(admission.state.lock().unwrap().entries.is_empty());
+        assert!(admission.admit_channel().is_some());
+        assert!(admission.admit_capability("authenticated-capability").is_some());
     }
 
     #[test]
@@ -1780,25 +1828,47 @@ fn handle_connection(
     } else {
         match serde_json::from_slice::<RpcRequest>(&frame) {
             Ok(request) => {
-                let _admission = if let Some(admission) = agent_admission.as_ref() {
-                    match admission.admit(&request.token) {
-                        Some(guard) => Some(guard),
-                        None => {
-                            let response = rejected_rpc(&request, "agent request limit exceeded");
-                            write_response(&mut writer, &response)?;
-                            return Ok(());
-                        }
+                if owner_channel {
+                    let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
+                    if !treasury.is_owner_token(&request.token) {
+                        rejected_rpc(&request, "owner control authentication failed")
+                    } else {
+                        treasury.handle_rpc_persisted(request, &directory)
                     }
                 } else {
-                    None
-                };
-                let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
-                if owner_channel && !treasury.is_owner_token(&request.token) {
-                    rejected_rpc(&request, "owner control authentication failed")
-                } else if !owner_channel && request.operation.requires_owner() {
-                    rejected_rpc(&request, "owner operations require the owner control socket")
-                } else {
-                    treasury.handle_rpc_persisted(request, &directory)
+                    let authenticated = state
+                        .lock()
+                        .map_err(|_| "broker state lock poisoned")?
+                        .is_active_agent_token(&request.token);
+                    if !authenticated {
+                        let admitted = agent_admission
+                            .as_ref()
+                            .is_some_and(|admission| admission.admit_unauthenticated());
+                        rejected_rpc(
+                            &request,
+                            if admitted {
+                                "agent capability authentication failed"
+                            } else {
+                                "unauthenticated agent request limit exceeded"
+                            },
+                        )
+                    } else if request.operation.requires_owner() {
+                        rejected_rpc(&request, "owner operations require the owner control socket")
+                    } else if let Some(admission) = agent_admission.as_ref() {
+                        match (
+                            admission.admit_channel(),
+                            admission.admit_capability(&request.token),
+                        ) {
+                            (Some(_channel_guard), Some(_capability_guard)) => {
+                                let mut treasury =
+                                    state.lock().map_err(|_| "broker state lock poisoned")?;
+                                treasury.handle_rpc_persisted(request, &directory)
+                            }
+                            _ => rejected_rpc(&request, "agent request limit exceeded"),
+                        }
+                    } else {
+                        rejected_rpc(&request, "agent admission is unavailable")
+                    }
                 }
             }
             Err(error) => RpcResponse {

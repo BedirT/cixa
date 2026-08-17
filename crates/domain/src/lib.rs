@@ -1515,6 +1515,10 @@ impl Treasury {
         self.state.owner.capability_token_hash == token_hash(token)
     }
 
+    pub fn is_active_agent_token(&self, token: &str) -> bool {
+        matches!(self.authenticate(token), Ok(Actor::Agent(_)))
+    }
+
     pub fn bind_approved_secret_operation(
         &self,
         owner_token: &str,
