@@ -38,28 +38,45 @@ def package_url(ecosystem: str, name: str, version: str) -> PackageURL:
 
 
 components: list[Component] = []
-metadata = json.loads(
-    subprocess.run(
-        ["cargo", "metadata", "--locked", "--format-version", "1"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-)
-for package in metadata["packages"]:
-    component_type = (
-        ComponentType.APPLICATION
-        if any("bin" in target["kind"] for target in package["targets"])
-        else ComponentType.LIBRARY
+cargo_names: set[str] = set()
+for manifest in (ROOT / "Cargo.toml", ROOT / "fuzz" / "Cargo.toml"):
+    metadata = json.loads(
+        subprocess.run(
+            [
+                "cargo",
+                "metadata",
+                "--locked",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(manifest),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
     )
-    components.append(
-        Component(
-            type=component_type,
-            name=package["name"],
-            version=package["version"],
-            purl=package_url("cargo", package["name"], package["version"]),
+    for package in metadata["packages"]:
+        cargo_names.add(package["name"])
+        component_type = (
+            ComponentType.APPLICATION
+            if any("bin" in target["kind"] for target in package["targets"])
+            else ComponentType.LIBRARY
         )
+        components.append(
+            Component(
+                type=component_type,
+                name=package["name"],
+                version=package["version"],
+                purl=package_url("cargo", package["name"], package["version"]),
+            )
+        )
+
+required_fuzz_packages = {"agent-treasury-fuzz", "arbitrary", "libfuzzer-sys"}
+if not required_fuzz_packages.issubset(cargo_names):
+    raise SystemExit(
+        f"fuzz dependency graph is incomplete: {sorted(required_fuzz_packages - cargo_names)}"
     )
 
 lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
@@ -111,7 +128,9 @@ expected_workspaces = {
 if workspace_names != expected_workspaces:
     raise SystemExit(f"unexpected npm workspace inventory: {sorted(workspace_names)}")
 
-purls = sorted(str(component.purl) for component in components)
+components_by_purl = {str(component.purl): component for component in components}
+components = [components_by_purl[purl] for purl in sorted(components_by_purl)]
+purls = sorted(components_by_purl)
 bom = Bom(
     components=components,
     serial_number=uuid.uuid5(uuid.NAMESPACE_URL, "\n".join(purls)),
