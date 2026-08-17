@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "agent-treasury-domain"
+name = "cixa-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -22,10 +22,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-treasury-fuzz"
+name = "cixa-fuzz"
 version = "0.0.0"
 dependencies = [
- "agent-treasury-domain",
+ "cixa-domain",
  "libfuzzer-sys",
  "serde_json",
 ]

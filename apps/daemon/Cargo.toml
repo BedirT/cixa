@@ -1,19 +1,20 @@
 [package]
-name = "agent-treasury"
+name = "cixa"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [[bin]]
-name = "treasury"
+name = "cixa"
 path = "src/main.rs"
 
 [dependencies]
-agent-treasury-domain = { path = "../../crates/domain", version = "0.1.0" }
+cixa-domain = { path = "../../crates/domain", version = "0.1.0" }
 fs2.workspace = true
 hex.workspace = true
 libc.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true

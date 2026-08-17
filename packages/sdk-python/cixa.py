@@ -19,7 +19,7 @@ def _bounded(value: str, field: str, maximum: int) -> None:
         raise ValueError(f"{field} must contain 1..{maximum} printable characters")
 
 
-class TreasuryClient:
+class CixaClient:
     """Agent-only client. It reads a token from a protected file, never from arguments."""
 
     def __init__(self, socket_path: str, token_file: str, timeout: float = 10.0) -> None:
@@ -105,8 +105,12 @@ class TreasuryClient:
         _bounded(intent_id, "intent_id", 128)
         return self.request({"type": "cancel_purchase_intent", "intent_id": intent_id})
 
-    def list_transactions(self) -> dict[str, Any]:
-        return self.request({"type": "list_transactions"})
+    def list_transactions(self, cursor: str | None = None, limit: int = 25) -> dict[str, Any]:
+        if cursor is not None:
+            _bounded(cursor, "cursor", 128)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise ValueError("limit must be an integer between 1 and 50")
+        return self.request({"type": "list_transactions_page", "cursor": cursor, "limit": limit})
 
     def get_receipt(self, intent_id: str) -> dict[str, Any]:
         _bounded(intent_id, "intent_id", 128)

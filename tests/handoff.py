@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "debug" / "treasury"
+BINARY = ROOT / "target" / "debug" / "cixa"
 NODE = Path(subprocess.run(["which", "node"], check=True, capture_output=True, text=True).stdout.strip())
 ARTIFACTS = ROOT / "build" / "handoff-artifacts"
 shutil.rmtree(ARTIFACTS, ignore_errors=True)
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="handoff-", dir=TEST_TEMP_ROOT) as raw_d
     run(
         "configure-manual-provider", "--data-dir", str(directory),
         "--owner-token-file", str(owner_file), "--credential-reference",
-        "keychain://agent-treasury/handoff-test", "--provider-kind", "os-credential-store",
+        "keychain://cixa/handoff-test", "--provider-kind", "os-credential-store",
         "--last-four", "1111", "--balance-minor", "10000", "--balance-status", "owner_confirmed",
     )
     run(

@@ -4,6 +4,12 @@ import { connect } from "node:net";
 
 export type Money = { minor: number; currency: string };
 export type PurchaseIntentResult = Record<string, unknown>;
+export type TransactionPage = {
+  transactions: PurchaseIntentResult[];
+  transactions_total: number;
+  next_cursor: string | null;
+  has_more: boolean;
+};
 
 export class BrokerError extends Error {
   constructor(message: string, readonly response?: unknown) {
@@ -162,8 +168,12 @@ export class BrokerClient {
     return this.request({ type: "cancel_purchase_intent", intent_id: intentId });
   }
 
-  listTransactions(): Promise<{ transactions: PurchaseIntentResult[] }> {
-    return this.request({ type: "list_transactions" });
+  listTransactions(cursor: string | null = null, limit = 25): Promise<TransactionPage> {
+    if (cursor !== null) assertBounded(cursor, "cursor", 128);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+      throw new TypeError("limit must be an integer between 1 and 50");
+    }
+    return this.request({ type: "list_transactions_page", cursor, limit });
   }
 
   getReceipt(intentId: string): Promise<Record<string, unknown>> {

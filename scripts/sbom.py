@@ -73,7 +73,7 @@ for manifest in (ROOT / "Cargo.toml", ROOT / "fuzz" / "Cargo.toml"):
             )
         )
 
-required_fuzz_packages = {"agent-treasury-fuzz", "arbitrary", "libfuzzer-sys"}
+required_fuzz_packages = {"cixa-fuzz", "arbitrary", "libfuzzer-sys"}
 if not required_fuzz_packages.issubset(cargo_names):
     raise SystemExit(
         f"fuzz dependency graph is incomplete: {sorted(required_fuzz_packages - cargo_names)}"
@@ -121,9 +121,9 @@ for line in (ROOT / "requirements-build.lock").read_text(encoding="utf-8").split
         )
 
 expected_workspaces = {
-    "agent-treasury-checkout-playwright",
-    "agent-treasury-mcp-server",
-    "agent-treasury-sdk",
+    "cixa-checkout-playwright",
+    "cixa-mcp-server",
+    "cixa-sdk",
 }
 if workspace_names != expected_workspaces:
     raise SystemExit(f"unexpected npm workspace inventory: {sorted(workspace_names)}")

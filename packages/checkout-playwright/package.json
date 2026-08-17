@@ -1,12 +1,12 @@
 {
-  "name": "agent-treasury-checkout-playwright",
+  "name": "cixa-checkout-playwright",
   "version": "0.1.0",
-  "description": "Owner-only controlled browser checkout adapter for agent-treasury",
+  "description": "Owner-only controlled browser checkout adapter for Cixa",
   "license": "Apache-2.0",
   "type": "module",
   "private": true,
   "bin": {
-    "agent-treasury-checkout-playwright": "dist/index.js"
+    "cixa-checkout-playwright": "dist/index.js"
   },
   "dependencies": {
     "playwright-core": "1.62.1"

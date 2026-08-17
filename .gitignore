@@ -9,4 +9,10 @@ __pycache__/
 coverage/
 build/
 demo-state/
+.local/
+.env
+.env.*
+!.env.example
+*.token
+*.log
 .DS_Store

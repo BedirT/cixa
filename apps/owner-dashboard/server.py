@@ -9,7 +9,6 @@ an Origin check plus a synchronizer token.
 from __future__ import annotations
 
 import argparse
-import base64
 import http.server
 import json
 import os
@@ -18,9 +17,19 @@ import socket
 import stat
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 
 MAX_BODY = 32 * 1024
+
+
+class ActivationUncertain(RuntimeError):
+    def __init__(self, token_path: Path) -> None:
+        self.token_path = token_path
+        super().__init__(
+            "Activation may have completed. The prepared token was retained at "
+            f"{token_path}. Refresh Agents and reconcile that file before retrying."
+        )
 
 
 def read_private_token(path_value: str) -> str:
@@ -66,7 +75,14 @@ class DashboardState:
         if metadata.st_mode & 0o077:
             raise ValueError("agent token directory permissions are too broad")
 
-    def create_agent(self, operation: dict[str, Any], token_filename: Any) -> Any:
+    def _sync_agent_token_directory(self) -> None:
+        descriptor = os.open(self.agent_token_directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def write_capability(self, operation: dict[str, Any], token_filename: Any) -> Any:
         if not isinstance(token_filename, str) or not 1 <= len(token_filename) <= 64:
             raise ValueError("token_filename must be a short string")
         if token_filename in {".", ".."} or not all(
@@ -79,18 +95,31 @@ class DashboardState:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(token_path, flags, 0o600)
+        token = secrets.token_hex(32)
+        payload = (token + "\n").encode("ascii")
+        activation_started = False
         try:
-            value = self.call(operation)
-            token = value.pop("capability_token", None)
-            if not isinstance(token, str) or not token:
-                raise RuntimeError("broker did not return an agent capability")
-            os.write(descriptor, (token + "\n").encode("utf-8"))
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("agent capability write made no progress")
+                written += count
             os.fsync(descriptor)
-        except BaseException:
             os.close(descriptor)
-            token_path.unlink(missing_ok=True)
-            raise
-        os.close(descriptor)
+            descriptor = -1
+            self._sync_agent_token_directory()
+            operation["capability_token"] = token
+            activation_started = True
+            value = self.call(operation)
+        except BaseException as error:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if not activation_started:
+                token_path.unlink(missing_ok=True)
+                self._sync_agent_token_directory()
+                raise
+            raise ActivationUncertain(token_path) from error
         value["agent_token_file"] = str(token_path)
         return value
 
@@ -121,7 +150,7 @@ class DashboardState:
 
 def make_handler(state: DashboardState):
     class Handler(http.server.BaseHTTPRequestHandler):
-        server_version = "agent-treasury-dashboard/0.1"
+        server_version = "cixa-dashboard/0.1"
 
         def log_message(self, format: str, *args: object) -> None:
             print(format % args)
@@ -150,17 +179,6 @@ def make_handler(state: DashboardState):
             origin = self.headers.get("Origin", "")
             return origin in {f"http://127.0.0.1:{state.port}", f"http://localhost:{state.port}"}
 
-        def _authorized(self) -> bool:
-            header = self.headers.get("Authorization", "")
-            if not header.startswith("Basic "):
-                return False
-            try:
-                decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
-                username, password = decoded.split(":", 1)
-            except (ValueError, UnicodeDecodeError):
-                return False
-            return username == "owner" and secrets.compare_digest(password, state.access_token)
-
         def _session_ok(self) -> bool:
             cookie = self.headers.get("Cookie", "")
             session_cookie = next(
@@ -169,16 +187,10 @@ def make_handler(state: DashboardState):
             )
             return secrets.compare_digest(session_cookie, state.session)
 
-        def _require_owner(self, require_session: bool = True) -> bool:
-            if self._authorized() and (not require_session or self._session_ok()):
+        def _require_owner(self) -> bool:
+            if self._session_ok():
                 return True
-            self.send_response(401)
-            self._headers("application/json; charset=utf-8")
-            self.send_header("WWW-Authenticate", 'Basic realm="agent-treasury owner"')
-            body = b'{"error":"owner authentication required"}'
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(401, {"error": "owner session required"})
             return False
 
         def _csrf_ok(self) -> bool:
@@ -199,14 +211,21 @@ def make_handler(state: DashboardState):
             schemas: dict[str, tuple[str, set[str]]] = {
                 "/api/emergency-stop": ("owner_set_emergency_stop", {"stopped"}),
                 "/api/agents/create": (
-                    "owner_create_agent",
+                    "owner_create_agent_prepared",
                     {"name", "policy", "mode", "ttl_secs", "token_filename"},
                 ),
                 "/api/agents/revoke": ("owner_revoke_agent", {"agent_id"}),
+                "/api/agents/rotate": (
+                    "owner_rotate_agent_capability",
+                    {"agent_id", "ttl_secs", "token_filename"},
+                ),
                 "/api/agents/mode": ("owner_set_agent_mode", {"agent_id", "mode"}),
                 "/api/agents/arm-session": ("owner_arm_agent_session", {"agent_id", "ttl_secs"}),
                 "/api/policies/update": ("owner_update_policy", {"agent_id", "policy"}),
                 "/api/approvals/approve": ("owner_approve_intent", {"intent_id"}),
+                "/api/approvals/deny": ("owner_deny_intent", {"intent_id"}),
+                "/api/handoff/begin": ("owner_begin_manual_handoff", {"intent_id"}),
+                "/api/handoff/complete": ("owner_complete_manual_handoff", {"intent_id"}),
                 "/api/merchants/approve": ("owner_approve_merchant", {"agent_id", "merchant_domain"}),
                 "/api/reconcile": ("owner_reconcile", {"intent_id", "outcome", "provider_reference"}),
                 "/api/provider/manual": (
@@ -231,37 +250,66 @@ def make_handler(state: DashboardState):
                 self._send_json(400, {"error": "untrusted Host"})
                 return
             if self.path == "/":
-                if not self._require_owner(require_session=False):
-                    return
                 body = Path(__file__).with_name("index.html").read_bytes()
                 self.send_response(200)
                 self._headers("text/html; charset=utf-8")
-                self.send_header("Set-Cookie", f"csrf={state.csrf}; Path=/; SameSite=Strict")
-                self.send_header(
-                    "Set-Cookie",
-                    f"session={state.session}; Path=/; HttpOnly; SameSite=Strict",
-                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path in {"/app.js", "/style.css"}:
-                if not self._require_owner():
-                    return
-                name = self.path.removeprefix("/")
-                body = Path(__file__).with_name(name).read_bytes()
-                content_type = (
-                    "application/javascript; charset=utf-8"
-                    if name.endswith(".js")
-                    else "text/css; charset=utf-8"
-                )
+            static_files = {
+                "/app.js": (
+                    Path(__file__).with_name("app.js"),
+                    "application/javascript; charset=utf-8",
+                ),
+                "/style.css": (
+                    Path(__file__).with_name("style.css"),
+                    "text/css; charset=utf-8",
+                ),
+                "/cixa-mark.svg": (Path(__file__).with_name("cixa-mark.svg"), "image/svg+xml"),
+                "/assets/manrope-latin.woff2": (
+                    Path(__file__).with_name("assets") / "manrope-latin.woff2",
+                    "font/woff2",
+                ),
+                "/assets/newsreader-latin.woff2": (
+                    Path(__file__).with_name("assets") / "newsreader-latin.woff2",
+                    "font/woff2",
+                ),
+            }
+            if self.path in static_files:
+                static_path, content_type = static_files[self.path]
+                body = static_path.read_bytes()
                 self.send_response(200)
                 self._headers(content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path == "/api/status":
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            if path.startswith("/api/intents/") or path.startswith("/api/receipts/"):
+                if not self._require_owner():
+                    return
+                intent_id = path.rsplit("/", 1)[-1]
+                if not 1 <= len(intent_id) <= 128 or not all(
+                    character.isalnum() or character in "_-" for character in intent_id
+                ):
+                    self._send_json(400, {"error": "invalid intent identifier"})
+                    return
+                operation_type = (
+                    "get_purchase_intent"
+                    if path.startswith("/api/intents/")
+                    else "get_receipt"
+                )
+                try:
+                    self._send_json(
+                        200,
+                        state.call({"type": operation_type, "intent_id": intent_id}),
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    self._send_json(404, {"error": "intent detail is unavailable"})
+                return
+            if path == "/api/status":
                 if not self._require_owner():
                     return
                 try:
@@ -269,30 +317,71 @@ def make_handler(state: DashboardState):
                 except (OSError, RuntimeError, ValueError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
-            if self.path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
+            if path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
                 if not self._require_owner():
                     return
                 try:
-                    if self.path == "/api/overview":
+                    if path == "/api/overview":
                         value = state.call({"type": "owner_get_dashboard"})
-                    elif self.path == "/api/transactions":
-                        value = state.call({"type": "list_transactions"})
-                    elif self.path == "/api/audit":
-                        value = state.call({"type": "owner_list_audit"})
+                    elif path in {"/api/transactions", "/api/audit"}:
+                        query = parse_qs(parsed.query, strict_parsing=True)
+                        if set(query) - {"cursor", "limit"} or any(len(values) != 1 for values in query.values()):
+                            raise ValueError("invalid page query")
+                        limit = int(query.get("limit", ["25"])[0])
+                        if not 1 <= limit <= 50:
+                            raise ValueError("invalid page limit")
+                        raw_cursor = query.get("cursor", [None])[0]
+                        if path == "/api/transactions" and raw_cursor is not None and (
+                            not 1 <= len(raw_cursor) <= 128
+                            or not all(character.isalnum() or character in "_-" for character in raw_cursor)
+                        ):
+                            raise ValueError("invalid transaction cursor")
+                        operation = {
+                            "type": "owner_list_transactions_page" if path == "/api/transactions" else "owner_list_audit_page",
+                            "cursor": int(raw_cursor) if path == "/api/audit" and raw_cursor is not None else raw_cursor,
+                            "limit": limit,
+                        }
+                        value = state.call(operation)
                     else:
                         value = {
                             "overview": state.call({"type": "owner_get_dashboard"}),
-                            "audit": state.call({"type": "owner_list_audit"}),
+                            "audit": state.call({"type": "owner_list_audit_recent"}),
                             "sanitized": True,
                         }
                     self._send_json(200, value)
-                except (OSError, RuntimeError, ValueError):
+                except ValueError:
+                    self._send_json(400, {"error": "invalid page request"})
+                except (OSError, RuntimeError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self._host_allowed() or not self._require_owner():
+            if not self._host_allowed():
+                return
+            if self.path == "/api/session":
+                if not self._same_origin():
+                    self._send_json(403, {"error": "origin validation failed"})
+                    return
+                try:
+                    body = self._read_json()
+                    if set(body) != {"access_token"} or not isinstance(body["access_token"], str):
+                        raise ValueError("invalid session request")
+                    if not secrets.compare_digest(body["access_token"], state.access_token):
+                        self._send_json(401, {"error": "access credential rejected"})
+                        return
+                    response = b'{"ok":true}'
+                    self.send_response(200)
+                    self._headers("application/json; charset=utf-8")
+                    self.send_header("Set-Cookie", f"csrf={state.csrf}; Path=/; SameSite=Strict")
+                    self.send_header("Set-Cookie", f"session={state.session}; Path=/; HttpOnly; SameSite=Strict")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                except (ValueError, json.JSONDecodeError):
+                    self._send_json(400, {"error": "request rejected"})
+                return
+            if not self._require_owner():
                 return
             if not self._same_origin() or not self._csrf_ok():
                 self._send_json(403, {"error": "origin or CSRF validation failed"})
@@ -304,14 +393,26 @@ def make_handler(state: DashboardState):
                     operation["stopped"], bool
                 ):
                     raise ValueError("stopped must be boolean")
-                if operation["type"] == "owner_create_agent":
+                if operation["type"] in {
+                    "owner_create_agent_prepared",
+                    "owner_rotate_agent_capability",
+                }:
                     token_filename = operation.pop("token_filename")
-                    value = state.create_agent(operation, token_filename)
+                    value = state.write_capability(operation, token_filename)
                 else:
                     value = state.call(operation)
                 self._send_json(200, value)
             except KeyError:
                 self._send_json(404, {"error": "not found"})
+            except ActivationUncertain as error:
+                self._send_json(
+                    409,
+                    {
+                        "error": str(error),
+                        "activation_uncertain": True,
+                        "agent_token_file": str(error.token_path),
+                    },
+                )
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
                 self._send_json(400, {"error": "request rejected"})
 

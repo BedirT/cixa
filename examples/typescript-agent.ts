@@ -1,8 +1,8 @@
-import { BrokerClient } from "agent-treasury-sdk";
+import { BrokerClient } from "cixa-sdk";
 
 const client = new BrokerClient({
-  socketPath: process.env.TREASURY_SOCKET_PATH!,
-  tokenFile: process.env.TREASURY_AGENT_TOKEN_FILE!,
+  socketPath: process.env.CIXA_SOCKET_PATH!,
+  tokenFile: process.env.CIXA_AGENT_TOKEN_FILE!,
 });
 
 console.log(await client.getBudget());

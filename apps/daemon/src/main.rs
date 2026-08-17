@@ -1,19 +1,22 @@
-use agent_treasury_domain::{
+use cixa_domain::{
     API_VERSION, ApprovedSecretOperation, AutonomyMode, BalanceStatus, Money,
     OwnerHandoffTransport, Policy, ProviderOutcome, PurchaseItem, PurchaseRequest,
     ReconciliationOutcome, Request, RpcRequest, RpcResponse, SecretProvider, SimulatedScenario,
-    SimulatedSecretProvider, Treasury, VolatileSecret, redact_sensitive,
+    SimulatedSecretProvider, Treasury, VolatileSecret, capability_fingerprint, redact_sensitive,
 };
 #[cfg(unix)]
-use agent_treasury_domain::{
+use cixa_domain::{
     DurableNonceRedemptionStore, OwnerControlledSecretHelperProvider,
     redeem_owner_helper_operation, unix_peer_effective_uid,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -26,6 +29,182 @@ type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_OWNER_CONNECTIONS: usize = 8;
+const MAX_AGENT_ADMISSION_ENTRIES: usize = 128;
+const MAX_AGENT_REQUESTS_PER_SECOND: u32 = 100;
+const MAX_AGENT_CHANNEL_REQUESTS_PER_SECOND: u32 = 200;
+const MAX_AGENT_CHANNEL_IN_FLIGHT: u32 = 4;
+const MAX_UNAUTHENTICATED_REQUESTS_PER_SECOND: u32 = 20;
+
+struct AgentAdmission {
+    state: Mutex<AgentAdmissionState>,
+}
+
+struct AgentAdmissionState {
+    known_capabilities: HashMap<String, i64>,
+    entries: HashMap<u64, AgentAdmissionEntry>,
+    window_started: Instant,
+    requests: u32,
+    in_flight: u32,
+    unauthenticated_window_started: Instant,
+    unauthenticated_requests: u32,
+}
+
+struct AgentAdmissionEntry {
+    window_started: Instant,
+    requests: u32,
+    in_flight: bool,
+}
+
+struct AgentChannelGuard {
+    admission: Arc<AgentAdmission>,
+}
+
+struct AgentCapabilityGuard {
+    admission: Arc<AgentAdmission>,
+    fingerprint: u64,
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(i64::MAX, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn admission_fingerprint(fingerprint: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    fingerprint.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl AgentAdmission {
+    fn new(known_capabilities: Vec<(String, i64)>) -> Self {
+        Self {
+            state: Mutex::new(AgentAdmissionState {
+                known_capabilities: known_capabilities.into_iter().collect(),
+                entries: HashMap::new(),
+                window_started: Instant::now(),
+                requests: 0,
+                in_flight: 0,
+                unauthenticated_window_started: Instant::now(),
+                unauthenticated_requests: 0,
+            }),
+        }
+    }
+
+    fn is_known_capability(&self, token: &str) -> bool {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        let at = unix_timestamp();
+        let fingerprint = capability_fingerprint(token);
+        self.state.lock().is_ok_and(|state| {
+            state.known_capabilities.get(&fingerprint).is_some_and(|expires_at| *expires_at > at)
+        })
+    }
+
+    fn replace_known_capabilities(&self, capabilities: Vec<(String, i64)>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.known_capabilities = capabilities.into_iter().collect();
+            let active_keys: HashSet<u64> = state
+                .known_capabilities
+                .keys()
+                .map(|fingerprint| admission_fingerprint(fingerprint))
+                .collect();
+            state
+                .entries
+                .retain(|fingerprint, entry| entry.in_flight || active_keys.contains(fingerprint));
+        }
+    }
+
+    fn admit_unauthenticated(&self) -> bool {
+        let now = Instant::now();
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if now.duration_since(state.unauthenticated_window_started) >= Duration::from_secs(1) {
+            state.unauthenticated_window_started = now;
+            state.unauthenticated_requests = 0;
+        }
+        if state.unauthenticated_requests >= MAX_UNAUTHENTICATED_REQUESTS_PER_SECOND {
+            return false;
+        }
+        state.unauthenticated_requests += 1;
+        true
+    }
+
+    fn admit_channel(self: &Arc<Self>) -> Option<AgentChannelGuard> {
+        let now = Instant::now();
+        let mut state = self.state.lock().ok()?;
+        if now.duration_since(state.window_started) >= Duration::from_secs(1) {
+            state.window_started = now;
+            state.requests = 0;
+        }
+        if state.in_flight >= MAX_AGENT_CHANNEL_IN_FLIGHT
+            || state.requests >= MAX_AGENT_CHANNEL_REQUESTS_PER_SECOND
+        {
+            return None;
+        }
+        state.in_flight += 1;
+        state.requests += 1;
+        Some(AgentChannelGuard { admission: Arc::clone(self) })
+    }
+
+    fn admit_capability(self: &Arc<Self>, token: &str) -> Option<AgentCapabilityGuard> {
+        let fingerprint = admission_fingerprint(&capability_fingerprint(token));
+        let now = Instant::now();
+        let mut state = self.state.lock().ok()?;
+        state.entries.retain(|_, entry| {
+            entry.in_flight || now.duration_since(entry.window_started) < Duration::from_secs(2)
+        });
+        if !state.entries.contains_key(&fingerprint)
+            && state.entries.len() >= MAX_AGENT_ADMISSION_ENTRIES
+        {
+            return None;
+        }
+        let entry = state.entries.entry(fingerprint).or_insert(AgentAdmissionEntry {
+            window_started: now,
+            requests: 0,
+            in_flight: false,
+        });
+        if now.duration_since(entry.window_started) >= Duration::from_secs(1) {
+            entry.window_started = now;
+            entry.requests = 0;
+        }
+        if entry.in_flight || entry.requests >= MAX_AGENT_REQUESTS_PER_SECOND {
+            return None;
+        }
+        entry.in_flight = true;
+        entry.requests += 1;
+        Some(AgentCapabilityGuard { admission: Arc::clone(self), fingerprint })
+    }
+
+    fn admit_authenticated(
+        self: &Arc<Self>,
+        token: &str,
+    ) -> Option<(AgentChannelGuard, AgentCapabilityGuard)> {
+        let channel = self.admit_channel()?;
+        let capability = self.admit_capability(token)?;
+        Some((channel, capability))
+    }
+}
+
+impl Drop for AgentChannelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock() {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+}
+
+impl Drop for AgentCapabilityGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock()
+            && let Some(entry) = state.entries.get_mut(&self.fingerprint)
+        {
+            entry.in_flight = false;
+        }
+    }
+}
 
 struct DataDirLock(fs::File);
 
@@ -40,7 +219,7 @@ impl DataDirLock {
                 return Err("data directory must be a real directory".into());
             }
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-            let lock_path = directory.join("treasury.lock");
+            let lock_path = directory.join("cixa.lock");
             if let Ok(metadata) = fs::symlink_metadata(&lock_path)
                 && (metadata.file_type().is_symlink() || !metadata.is_file())
             {
@@ -53,10 +232,7 @@ impl DataDirLock {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(lock_path)?;
-            fs::set_permissions(
-                directory.join("treasury.lock"),
-                fs::Permissions::from_mode(0o600),
-            )?;
+            fs::set_permissions(directory.join("cixa.lock"), fs::Permissions::from_mode(0o600))?;
             file.try_lock_exclusive()
                 .map_err(|_| "treasury data directory is already owned by another writer")?;
             Ok(Self(file))
@@ -67,7 +243,7 @@ impl DataDirLock {
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(directory.join("treasury.lock"))?;
+                .open(directory.join("cixa.lock"))?;
             file.try_lock_exclusive()
                 .map_err(|_| "treasury data directory is already owned by another writer")?;
             Ok(Self(file))
@@ -127,13 +303,13 @@ fn run() -> CliResult<()> {
         "resume" => stop_command(&rest, false),
         "audit" => direct_command(&rest, Request::OwnerListAudit),
         "serve" => serve_command(&rest),
-        other => Err(format!("unknown command {other}; run `treasury help`").into()),
+        other => Err(format!("unknown command {other}; run `cixa help`").into()),
     }
 }
 
 fn print_help() -> CliResult<()> {
     println!(
-        "agent-treasury {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
+        "Cixa {}\n\nCommands:\n  demo                              Run the local adversarial demo\n  init --data-dir DIR --owner-token-file FILE\n  create-agent --data-dir DIR --owner-token-file FILE --agent-token-file FILE [--agent-gid GID]\n  update-policy --data-dir DIR --owner-token-file FILE --agent-id ID --policy-file FILE\n  revoke-agent --data-dir DIR --owner-token-file FILE --agent-id ID\n  set-agent-mode --data-dir DIR --owner-token-file FILE --agent-id ID --mode MODE\n  arm-session --data-dir DIR --owner-token-file FILE --agent-id ID --ttl-secs N\n  configure-manual-provider --data-dir DIR --owner-token-file FILE --credential-reference REF --balance-minor N --balance-status estimated|owner_confirmed\n  configure-receive --data-dir DIR --owner-token-file FILE --address VALUE\n  record-deposit --data-dir DIR --owner-token-file FILE --amount-minor N --currency CAD --source VALUE --external-reference REF --verified true|false\n  status|budget|capabilities|receive-instructions --data-dir DIR --token-file FILE\n  intent --data-dir DIR --token-file FILE --request-file FILE\n  execute|cancel --data-dir DIR --token-file FILE --intent-id ID\n  approve --data-dir DIR --owner-token-file FILE --intent-id ID\n  begin-handoff|complete-handoff --data-dir DIR --owner-token-file FILE --intent-id ID\n  init-helper --helper-dir DIR\n  secret-helper --socket PATH --helper-key-file FILE --helper-id-file FILE --redemption-dir DIR\n  execute-handoff --data-dir DIR --owner-token-file FILE --intent-id ID --helper-socket PATH --helper-key-file FILE --helper-id-file FILE --adapter-script FILE --adapter-config FILE --node-path FILE\n  approve-merchant --data-dir DIR --owner-token-file FILE --agent-id ID --merchant-domain DOMAIN\n  reconcile --data-dir DIR --owner-token-file FILE --intent-id ID --outcome settled|declined|refunded [--provider-reference REF]\n  stop|resume --data-dir DIR --owner-token-file FILE\n  audit --data-dir DIR --owner-token-file FILE\n  serve --data-dir DIR [--socket PATH] [--owner-socket PATH] [--agent-gid GID]\n\nTokens and payment material are read from protected files or stdin, never accepted as command-line values or printed.\nThe broker binds separate agent and owner Unix-domain sockets by default and does not expose a public listener.",
         env!("CARGO_PKG_VERSION")
     );
     Ok(())
@@ -173,9 +349,9 @@ fn token_file(args: &[String], owner: bool) -> CliResult<String> {
 }
 
 fn write_token(path: &Path, token: &str) -> CliResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let parent =
+        path.parent().filter(|value| !value.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -186,7 +362,41 @@ fn write_token(path: &Path, token: &str) -> CliResult<()> {
     let mut file = options.open(path)?;
     file.write_all(format!("{token}\n").as_bytes())?;
     file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+fn new_capability_token() -> CliResult<Zeroizing<String>> {
+    Ok(Zeroizing::new(hex::encode(rand::random::<[u8; 32]>())))
+}
+
+fn activate_with_prepared_token(
+    token_path: &Path,
+    agent_gid: Option<u32>,
+    activate: impl FnOnce(String) -> CliResult<Value>,
+) -> CliResult<Value> {
+    let capability_token = new_capability_token()?;
+    write_token(token_path, &capability_token)?;
+    #[cfg(unix)]
+    if let Some(gid) = agent_gid {
+        let parent = token_path
+            .parent()
+            .filter(|value| !value.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        share_with_agent_group(parent, gid, 0o750)?;
+        share_with_agent_group(token_path, gid, 0o640)?;
+        OpenOptions::new().read(true).write(true).open(token_path)?.sync_all()?;
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = agent_gid;
+    activate(capability_token.to_string()).map_err(|error| {
+        format!(
+            "agent activation failed or became uncertain; prepared token retained at {} for owner reconciliation: {error}",
+            token_path.display()
+        )
+        .into()
+    })
 }
 
 fn read_private_text(path: &Path, label: &str) -> CliResult<String> {
@@ -602,6 +812,116 @@ mod process_identity_tests {
     use super::*;
 
     #[test]
+    fn oversized_responses_are_replaced_with_a_bounded_error() {
+        let response = RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: "large-response".to_string(),
+            ok: true,
+            data: Some(json!({ "payload": "x".repeat(MAX_FRAME_BYTES) })),
+            error: None,
+        };
+        let mut encoded = Vec::new();
+
+        write_response(&mut encoded, &response).unwrap();
+
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let decoded: RpcResponse = serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
+        assert!(!decoded.ok);
+        assert_eq!(decoded.request_id, "oversize");
+        assert_eq!(decoded.error.as_deref(), Some("response exceeds the broker frame limit"));
+
+        let attacker_controlled_id = RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: "r".repeat(MAX_FRAME_BYTES),
+            ok: false,
+            data: None,
+            error: Some("rejected".to_string()),
+        };
+        encoded.clear();
+        write_response(&mut encoded, &attacker_controlled_id).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let decoded: RpcResponse = serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
+        assert_eq!(decoded.request_id, "oversize");
+    }
+
+    #[test]
+    fn agent_admission_allows_only_one_in_flight_request_per_capability() {
+        let admission = Arc::new(AgentAdmission::new(Vec::new()));
+        let first = admission.admit_capability("agent-capability").expect("first request admitted");
+        assert!(admission.admit_capability("agent-capability").is_none());
+        assert!(admission.admit_capability("different-capability").is_some());
+        drop(first);
+        assert!(admission.admit_capability("agent-capability").is_some());
+
+        let guards: Vec<_> =
+            (0..MAX_AGENT_CHANNEL_IN_FLIGHT).map(|_| admission.admit_channel().unwrap()).collect();
+        assert!(admission.admit_channel().is_none());
+        drop(guards);
+    }
+
+    #[test]
+    fn unauthenticated_channel_admission_cannot_fill_capability_entries() {
+        let token = "a".repeat(64);
+        let admission = Arc::new(AgentAdmission::new(vec![(
+            capability_fingerprint(&token),
+            unix_timestamp() + 60,
+        )]));
+        for _ in 0..MAX_AGENT_ADMISSION_ENTRIES {
+            admission.admit_unauthenticated();
+        }
+        assert!(admission.state.lock().unwrap().entries.is_empty());
+        assert!(admission.is_known_capability(&token));
+        assert!(admission.admit_channel().is_some());
+        assert!(admission.admit_capability(&token).is_some());
+    }
+
+    #[test]
+    fn authenticated_forbidden_requests_consume_capability_admission() {
+        let token = "b".repeat(64);
+        let admission = Arc::new(AgentAdmission::new(vec![(
+            capability_fingerprint(&token),
+            unix_timestamp() + 60,
+        )]));
+        for _ in 0..MAX_AGENT_REQUESTS_PER_SECOND {
+            drop(admission.admit_authenticated(&token).unwrap());
+        }
+        assert!(admission.admit_authenticated(&token).is_none());
+        admission.replace_known_capabilities(vec![(
+            capability_fingerprint(&token),
+            unix_timestamp() + 60,
+        )]);
+        assert!(admission.admit_authenticated(&token).is_none());
+    }
+
+    #[test]
+    fn expired_capabilities_are_not_classified_as_known() {
+        let token = "c".repeat(64);
+        let admission =
+            AgentAdmission::new(vec![(capability_fingerprint(&token), unix_timestamp() - 1)]);
+        assert!(!admission.is_known_capability(&token));
+        assert!(!admission.is_known_capability(&"x".repeat(MAX_FRAME_BYTES)));
+    }
+
+    #[test]
+    fn prepared_cli_token_is_durable_before_activation_and_retained_on_uncertainty() {
+        let directory = std::env::temp_dir().join(format!(
+            "cixa-prepared-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let token_path = directory.join("agent.token");
+        let error = activate_with_prepared_token(&token_path, None, |token| {
+            assert_eq!(fs::read_to_string(&token_path).unwrap().trim(), token);
+            Err("injected response loss after activation started".into())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("prepared token retained"));
+        assert_eq!(fs::read_to_string(&token_path).unwrap().trim().len(), 64);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn stale_process_identity_is_rejected_before_signaling() {
         let current = process_identity(std::process::id()).expect("current process identity");
         assert!(process_identity_matches(current));
@@ -649,7 +969,7 @@ fn collect_child_output(
     tracker: &mut DescendantTracker,
     mut stdout: ChildStdout,
     timeout: Duration,
-) -> agent_treasury_domain::Result<(ExitStatus, Zeroizing<Vec<u8>>)> {
+) -> cixa_domain::Result<(ExitStatus, Zeroizing<Vec<u8>>)> {
     use std::os::fd::AsRawFd;
 
     let descriptor = stdout.as_raw_fd();
@@ -671,7 +991,7 @@ fn collect_child_output(
                 output.extend_from_slice(&buffer[..count]);
                 if output.len() > 16 * 1024 {
                     terminate_child_group(child, tracker);
-                    return Err(agent_treasury_domain::TreasuryError::Conflict(
+                    return Err(cixa_domain::TreasuryError::Conflict(
                         "controlled checkout adapter output is too large".to_string(),
                     ));
                 }
@@ -694,7 +1014,7 @@ fn collect_child_output(
                 // Keep the root as a zombie until its process group is signaled,
                 // then reap it and preserve its original exit status.
                 let status = terminate_child_group(child, tracker).ok_or_else(|| {
-                    agent_treasury_domain::TreasuryError::Conflict(
+                    cixa_domain::TreasuryError::Conflict(
                         "controlled checkout adapter could not be reaped".to_string(),
                     )
                 })?;
@@ -705,7 +1025,7 @@ fn collect_child_output(
     }
 
     terminate_child_group(child, tracker);
-    Err(agent_treasury_domain::TreasuryError::Conflict(
+    Err(cixa_domain::TreasuryError::Conflict(
         "controlled checkout adapter exceeded its hard deadline; payment outcome is unknown"
             .to_string(),
     ))
@@ -729,10 +1049,10 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         &mut self,
         request: &PurchaseRequest,
         secret: &VolatileSecret,
-    ) -> agent_treasury_domain::Result<ProviderOutcome> {
+    ) -> cixa_domain::Result<ProviderOutcome> {
         let secret: CheckoutSecret<'_> =
             serde_json::from_slice(secret.as_bytes()).map_err(|_| {
-                agent_treasury_domain::TreasuryError::Invalid(
+                cixa_domain::TreasuryError::Invalid(
                 "owner secret must be one strict JSON object for the controlled checkout adapter"
                     .to_string(),
             )
@@ -745,7 +1065,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             || secret.cvv.len() > 8
             || secret.cardholder.is_some_and(|value| value.is_empty() || value.len() > 128)
         {
-            return Err(agent_treasury_domain::TreasuryError::Invalid(
+            return Err(cixa_domain::TreasuryError::Invalid(
                 "owner secret fields are missing or outside their size limits".to_string(),
             ));
         }
@@ -753,7 +1073,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let mut encoded = Zeroizing::new(serde_json::to_vec(&input)?);
         encoded.push(b'\n');
         if encoded.len() > 16 * 1024 {
-            return Err(agent_treasury_domain::TreasuryError::Invalid(
+            return Err(cixa_domain::TreasuryError::Invalid(
                 "checkout adapter request is too large".to_string(),
             ));
         }
@@ -774,7 +1094,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             Some(stdin) => stdin,
             None => {
                 terminate_child_group(&mut child, &mut tracker);
-                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                return Err(cixa_domain::TreasuryError::Conflict(
                     "checkout adapter stdin is unavailable".to_string(),
                 ));
             }
@@ -789,7 +1109,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
             Some(stdout) => stdout,
             None => {
                 terminate_child_group(&mut child, &mut tracker);
-                return Err(agent_treasury_domain::TreasuryError::Conflict(
+                return Err(cixa_domain::TreasuryError::Conflict(
                     "checkout adapter stdout is unavailable".to_string(),
                 ));
             }
@@ -797,18 +1117,18 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             terminate_child_group(&mut child, &mut tracker);
-            return Err(agent_treasury_domain::TreasuryError::Conflict(
+            return Err(cixa_domain::TreasuryError::Conflict(
                 "owner handoff deadline expired before adapter completion".to_string(),
             ));
         }
         let (status, output) = collect_child_output(&mut child, &mut tracker, stdout, remaining)?;
         if !status.success() {
-            return Err(agent_treasury_domain::TreasuryError::Conflict(
+            return Err(cixa_domain::TreasuryError::Conflict(
                 "controlled checkout adapter failed; payment outcome is unknown".to_string(),
             ));
         }
         let _: ProviderOutcome = serde_json::from_slice(&output).map_err(|_| {
-            agent_treasury_domain::TreasuryError::Conflict(
+            cixa_domain::TreasuryError::Conflict(
                 "controlled checkout adapter returned an invalid sanitized outcome".to_string(),
             )
         })?;
@@ -818,7 +1138,7 @@ impl OwnerHandoffTransport for PlaywrightCheckoutTransport {
         })
     }
 
-    fn cleanup(&mut self) -> agent_treasury_domain::Result<()> {
+    fn cleanup(&mut self) -> cixa_domain::Result<()> {
         Ok(())
     }
 }
@@ -869,7 +1189,7 @@ fn run_request(args: &[String], token: String, operation: Request) -> CliResult<
     {
         let socket_argument =
             if operation.requires_owner() { "--owner-socket" } else { "--socket" };
-        let default_name = if operation.requires_owner() { "owner.sock" } else { "treasury.sock" };
+        let default_name = if operation.requires_owner() { "owner.sock" } else { "cixa.sock" };
         let socket = value(args, socket_argument)
             .map(PathBuf::from)
             .unwrap_or_else(|| directory.join(default_name));
@@ -929,6 +1249,8 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
     }
     #[cfg(unix)]
     let agent_gid = value(args, "--agent-gid").map(|value| value.parse::<u32>()).transpose()?;
+    #[cfg(not(unix))]
+    let agent_gid = None;
     #[cfg(unix)]
     if agent_gid == Some(unsafe { libc::getegid() }) {
         return Err(
@@ -947,26 +1269,15 @@ fn create_agent_command(args: &[String]) -> CliResult<()> {
         "disabled" => AutonomyMode::Disabled,
         value => return Err(format!("unsupported mode {value}").into()),
     };
-    let result = run_request(
-        args,
-        owner,
-        Request::OwnerCreateAgent {
-            name: value(args, "--name").unwrap_or_else(|| "local-agent".to_string()),
-            policy,
-            mode,
-            ttl_secs: value(args, "--ttl-secs").unwrap_or_else(|| "3600".to_string()).parse()?,
-        },
-    )?;
-    let token =
-        result["capability_token"].as_str().ok_or("broker did not return a capability token")?;
-    write_token(&token_path, token)?;
-    #[cfg(unix)]
-    if let Some(gid) = agent_gid {
-        if let Some(parent) = token_path.parent() {
-            share_with_agent_group(parent, gid, 0o750)?;
-        }
-        share_with_agent_group(&token_path, gid, 0o640)?;
-    }
+    let name = value(args, "--name").unwrap_or_else(|| "local-agent".to_string());
+    let ttl_secs = value(args, "--ttl-secs").unwrap_or_else(|| "3600".to_string()).parse()?;
+    let result = activate_with_prepared_token(&token_path, agent_gid, |capability_token| {
+        run_request(
+            args,
+            owner,
+            Request::OwnerCreateAgentPrepared { name, policy, mode, ttl_secs, capability_token },
+        )
+    })?;
     print_json(
         &json!({ "agent_id": result["agent_id"], "agent_token_file": token_path, "expires_at": result["expires_at"] }),
     )
@@ -1335,7 +1646,7 @@ fn execute_handoff_command(args: &[String]) -> CliResult<()> {
         adapter_config: config,
         deadline: handoff_deadline,
     };
-    let mut executor = agent_treasury_domain::SecureOwnerHandoffExecutor::new(
+    let mut executor = cixa_domain::SecureOwnerHandoffExecutor::new(
         operation,
         expected_request,
         provider,
@@ -1395,9 +1706,8 @@ fn stop_command(args: &[String], stopped: bool) -> CliResult<()> {
 fn serve_command(args: &[String]) -> CliResult<()> {
     let directory = data_dir(args)?;
     let _lock = DataDirLock::acquire(&directory)?;
-    let agent_socket = value(args, "--socket")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| directory.join("treasury.sock"));
+    let agent_socket =
+        value(args, "--socket").map(PathBuf::from).unwrap_or_else(|| directory.join("cixa.sock"));
     let owner_socket = value(args, "--owner-socket")
         .map(PathBuf::from)
         .unwrap_or_else(|| directory.join("owner.sock"));
@@ -1407,7 +1717,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     }
     let mut treasury = Treasury::load_from(&directory)?;
     let require_separate_agent =
-        treasury.state.provider_mode == agent_treasury_domain::ProviderMode::ManualPrepaidCard;
+        treasury.state.provider_mode == cixa_domain::ProviderMode::ManualPrepaidCard;
     if require_separate_agent && agent_gid.is_none() {
         return Err(
             "manual provider mode requires --agent-gid and a separate agent OS identity".into()
@@ -1424,6 +1734,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
     if treasury.recover_interrupted_executions()? > 0 {
         treasury.save_to(&directory)?;
     }
+    let agent_admission = Arc::new(AgentAdmission::new(treasury.active_agent_capabilities()));
     let state = Arc::new(Mutex::new(treasury));
     let agent_listener = bind_private_socket(&agent_socket)?;
     let owner_listener = bind_private_socket(&owner_socket)?;
@@ -1433,10 +1744,11 @@ fn serve_command(args: &[String]) -> CliResult<()> {
         }
         share_with_agent_group(&agent_socket, gid, 0o660)?;
     }
-    eprintln!("agent-treasury agent broker listening on {}", agent_socket.display());
-    eprintln!("agent-treasury owner control listening on {}", owner_socket.display());
+    eprintln!("Cixa agent broker listening on {}", agent_socket.display());
+    eprintln!("Cixa owner control listening on {}", owner_socket.display());
     let owner_state = Arc::clone(&state);
     let owner_directory = directory.clone();
+    let owner_admission = Arc::clone(&agent_admission);
     std::thread::spawn(move || {
         serve_listener(
             owner_listener,
@@ -1445,6 +1757,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
             true,
             MAX_OWNER_CONNECTIONS,
             false,
+            Some(owner_admission),
         )
     });
     serve_listener(
@@ -1454,6 +1767,7 @@ fn serve_command(args: &[String]) -> CliResult<()> {
         false,
         MAX_CONNECTIONS,
         require_separate_agent,
+        Some(agent_admission),
     );
     Ok(())
 }
@@ -1486,6 +1800,7 @@ fn serve_listener(
     owner_channel: bool,
     connection_limit: usize,
     reject_broker_uid: bool,
+    agent_admission: Option<Arc<AgentAdmission>>,
 ) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -1508,8 +1823,11 @@ fn serve_listener(
                 let state = Arc::clone(&state);
                 let directory = directory.clone();
                 let active_connections = Arc::clone(&active_connections);
+                let agent_admission = agent_admission.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, state, directory, owner_channel) {
+                    if let Err(error) =
+                        handle_connection(stream, state, directory, owner_channel, agent_admission)
+                    {
                         eprintln!("connection error: {}", redact_sensitive(&error.to_string()));
                     }
                     active_connections.fetch_sub(1, Ordering::AcqRel);
@@ -1567,6 +1885,7 @@ fn handle_connection(
     state: Arc<Mutex<Treasury>>,
     directory: PathBuf,
     owner_channel: bool,
+    agent_admission: Option<Arc<AgentAdmission>>,
 ) -> CliResult<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
@@ -1588,13 +1907,48 @@ fn handle_connection(
     } else {
         match serde_json::from_slice::<RpcRequest>(&frame) {
             Ok(request) => {
-                let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
-                if owner_channel && !treasury.is_owner_token(&request.token) {
-                    rejected_rpc(&request, "owner control authentication failed")
-                } else if !owner_channel && request.operation.requires_owner() {
-                    rejected_rpc(&request, "owner operations require the owner control socket")
+                if owner_channel {
+                    let mut treasury = state.lock().map_err(|_| "broker state lock poisoned")?;
+                    if !treasury.is_owner_token(&request.token) {
+                        rejected_rpc(&request, "owner control authentication failed")
+                    } else {
+                        let response = treasury.handle_rpc_persisted(request, &directory);
+                        if let Some(admission) = agent_admission.as_ref() {
+                            admission
+                                .replace_known_capabilities(treasury.active_agent_capabilities());
+                        }
+                        response
+                    }
+                } else if let Some(admission) = agent_admission.as_ref() {
+                    if !admission.is_known_capability(&request.token) {
+                        let admitted = admission.admit_unauthenticated();
+                        rejected_rpc(
+                            &request,
+                            if admitted {
+                                "agent capability authentication failed"
+                            } else {
+                                "unauthenticated agent request limit exceeded"
+                            },
+                        )
+                    } else {
+                        match admission.admit_authenticated(&request.token) {
+                            Some((_channel_guard, _capability_guard)) => {
+                                if request.operation.requires_owner() {
+                                    rejected_rpc(
+                                        &request,
+                                        "owner operations require the owner control socket",
+                                    )
+                                } else {
+                                    let mut treasury =
+                                        state.lock().map_err(|_| "broker state lock poisoned")?;
+                                    treasury.handle_rpc_persisted(request, &directory)
+                                }
+                            }
+                            None => rejected_rpc(&request, "agent request limit exceeded"),
+                        }
+                    }
                 } else {
-                    treasury.handle_rpc_persisted(request, &directory)
+                    rejected_rpc(&request, "agent admission is unavailable")
                 }
             }
             Err(error) => RpcResponse {
@@ -1606,7 +1960,23 @@ fn handle_connection(
             },
         }
     };
-    writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+    write_response(&mut writer, &response)?;
+    Ok(())
+}
+
+fn write_response(writer: &mut impl Write, response: &RpcResponse) -> CliResult<()> {
+    let mut encoded = serde_json::to_vec(response)?;
+    if encoded.len() + 1 > MAX_FRAME_BYTES {
+        encoded = serde_json::to_vec(&RpcResponse {
+            api_version: API_VERSION.to_string(),
+            request_id: "oversize".to_string(),
+            ok: false,
+            data: None,
+            error: Some("response exceeds the broker frame limit".to_string()),
+        })?;
+    }
+    writer.write_all(&encoded)?;
+    writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
 }
@@ -1640,7 +2010,7 @@ fn demo_request(key: &str, amount: i64) -> PurchaseRequest {
         preauthorization: false,
         installments: false,
         fulfillment_profile: "digital-email".to_string(),
-        payment_form: agent_treasury_domain::PaymentFormTrust::HostedFields,
+        payment_form: cixa_domain::PaymentFormTrust::HostedFields,
         redirect_chain: vec!["https://merchant.example.test/checkout".to_string()],
         attempts: 1,
         session_id: "demo-session".to_string(),
@@ -1701,7 +2071,7 @@ fn run_demo() -> CliResult<()> {
     let currency =
         treasury.handle(&agent_token, Request::CreatePurchaseIntent { request: currency })?;
     let mut hostile_form = demo_request("hostile-form", 500);
-    hostile_form.payment_form = agent_treasury_domain::PaymentFormTrust::MerchantControlled;
+    hostile_form.payment_form = cixa_domain::PaymentFormTrust::MerchantControlled;
     let hostile_form =
         treasury.handle(&agent_token, Request::CreatePurchaseIntent { request: hostile_form })?;
     treasury.handle(&owner, Request::OwnerSetEmergencyStop { stopped: true })?;
@@ -1717,7 +2087,7 @@ fn run_demo() -> CliResult<()> {
     treasury.verify_audit_chain()?;
 
     print_json(&json!({
-        "project": "agent-treasury",
+        "project": "cixa",
         "demo": "passed",
         "budget": budget,
         "public_receive_instructions": receive,

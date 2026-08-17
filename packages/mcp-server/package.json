@@ -1,11 +1,22 @@
 {
-  "name": "agent-treasury-mcp-server",
+  "name": "cixa-mcp-server",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "description": "Local MCP adapter exposing only the agent-scoped agent-treasury interface",
+  "description": "Local MCP adapter exposing only the agent-scoped Cixa interface",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BedirT/cixa.git",
+    "directory": "packages/mcp-server"
+  },
+  "homepage": "https://github.com/BedirT/cixa#readme",
+  "bugs": "https://github.com/BedirT/cixa/issues",
+  "keywords": ["cixa", "mcp", "payments", "agents", "security"],
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "bin": {
-    "agent-treasury-mcp": "dist/index.js"
+    "cixa-mcp": "dist/index.js"
   },
   "files": [
     "dist",
@@ -16,7 +27,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "agent-treasury-sdk": "0.1.0",
+    "cixa-sdk": "0.1.0",
     "zod": "^4.4.3"
   }
 }

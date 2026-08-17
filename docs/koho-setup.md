@@ -19,7 +19,7 @@ KOHO is used only as a manually operated provider for a user-owned Canadian prep
 KOHO's [third-party e-Transfer guide](https://help.koho.ca/en_us/what%27s-a-3rd-party-e-transfer-Bycs9jcUWe) describes a unique email address shown in-app for receiving an Interac e-Transfer. The owner may copy that public address into the broker:
 
 ```bash
-target/debug/treasury configure-receive --data-dir .local \
+target/debug/cixa configure-receive --data-dir .local \
   --owner-token-file .local/owner.token \
   --method interac_e_transfer \
   --address 'owner-approved-public-address@example.invalid' \

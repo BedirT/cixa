@@ -12,18 +12,18 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_treasury import BrokerError, TreasuryClient
+from cixa import BrokerError, CixaClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "debug" / "treasury"
+BINARY = ROOT / "target" / "debug" / "cixa"
 
 
 def run(*args: str) -> dict:
     return json.loads(subprocess.run([str(BINARY), *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout)
 
 
-with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_directory:
+with tempfile.TemporaryDirectory(prefix="cixa-integration-") as raw_directory:
     directory = Path(raw_directory)
     owner_file = directory / "owner.token"
     agent_file = directory / "agent.token"
@@ -80,10 +80,10 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
         agent_file,
         directory / "state.json",
         directory / "audit.key",
-        directory / "treasury.lock",
+        directory / "cixa.lock",
     ):
         assert protected.stat().st_mode & 0o077 == 0, protected
-    socket_path = directory / "treasury.sock"
+    socket_path = directory / "cixa.sock"
     owner_socket_path = directory / "owner.sock"
     daemon = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(directory), "--socket", str(socket_path)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
         )
         for connection in flood:
             connection.close()
-        client = TreasuryClient(str(socket_path), str(agent_file))
+        client = CixaClient(str(socket_path), str(agent_file))
         for _ in range(100):
             try:
                 status = client.get_status()
@@ -183,7 +183,7 @@ with tempfile.TemporaryDirectory(prefix="agent-treasury-integration-") as raw_di
             if socket_path.exists():
                 break
             time.sleep(0.05)
-        assert TreasuryClient(str(socket_path), str(agent_file)).get_receipt(intent["id"])["intent_id"] == intent["id"]
+        assert CixaClient(str(socket_path), str(agent_file)).get_receipt(intent["id"])["intent_id"] == intent["id"]
         run(
             "revoke-agent",
             "--data-dir",

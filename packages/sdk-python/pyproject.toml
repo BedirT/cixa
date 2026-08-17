@@ -3,13 +3,24 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-treasury-sdk"
+name = "cixa-sdk"
 version = "0.1.0"
-description = "Thin provider-neutral Python client for a local agent-treasury broker"
+description = "Thin provider-neutral Python client for a local Cixa broker"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
+keywords = ["cixa", "payments", "agents", "local-first", "security"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/BedirT/cixa"
+Repository = "https://github.com/BedirT/cixa.git"
+Issues = "https://github.com/BedirT/cixa/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

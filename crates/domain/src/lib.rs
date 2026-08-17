@@ -1,4 +1,4 @@
-//! The provider-neutral, deterministic security core for agent-treasury.
+//! The provider-neutral, deterministic security core for Cixa.
 //!
 //! The core deliberately has no browser, network, MCP, or framework dependency. A
 //! caller supplies an authenticated capability token and a typed request. All
@@ -29,7 +29,19 @@ use url::Url;
 pub const API_VERSION: &str = "v1";
 pub const STATE_FILE: &str = "state.json";
 pub const AUDIT_KEY_FILE: &str = "audit.key";
-pub const LOCK_FILE: &str = "treasury.lock";
+pub const LOCK_FILE: &str = "cixa.lock";
+const DASHBOARD_HISTORY_LIMIT: usize = 10;
+const DASHBOARD_AUDIT_LIMIT: usize = 25;
+const OWNER_PAGE_LIMIT: usize = 50;
+const MAX_PURCHASE_REQUEST_BYTES: usize = 4 * 1024;
+const MAX_INTENTS: usize = 10_000;
+const MAX_INTENTS_PER_AGENT: usize = 2_000;
+const MAX_AUDIT_ENTRIES: usize = 100_000;
+const AUDIT_SAFETY_RESERVE: usize = 1_024;
+const EMERGENCY_AUDIT_RESERVE: usize = 256;
+const MAX_AGENTS: usize = 16;
+const MAX_POLICY_BYTES: usize = 2 * 1024;
+const MAX_AGENT_APPROVED_MERCHANTS: usize = 8;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -73,11 +85,24 @@ fn new_token() -> String {
     random_hex(32)
 }
 
+fn validate_capability_token(token: &str) -> Result<()> {
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TreasuryError::Invalid(
+            "prepared capability token must contain exactly 64 hexadecimal characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn token_hash(token: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"agent-treasury capability token v1\0");
+    digest.update(b"cixa capability token v1\0");
     digest.update(token.as_bytes());
     hex::encode(digest.finalize())
+}
+
+pub fn capability_fingerprint(token: &str) -> String {
+    token_hash(token)
 }
 
 fn hmac_hash(key: &[u8], value: &Value) -> String {
@@ -100,6 +125,49 @@ fn bounded(value: &str, field: &str, max: usize) -> Result<()> {
         return Err(TreasuryError::Invalid(format!("{field} contains a control character")));
     }
     Ok(())
+}
+
+fn bounded_bytes(value: &str, field: &str, max: usize) -> Result<()> {
+    if value.is_empty() || value.len() > max {
+        return Err(TreasuryError::Invalid(format!("{field} must contain 1..{max} bytes")));
+    }
+    Ok(())
+}
+
+fn is_emergency_audit(action: &str) -> bool {
+    matches!(action, "emergency_stop_on" | "emergency_stop_off")
+}
+
+fn is_money_safety_audit(action: &str) -> bool {
+    matches!(
+        action,
+        "reserve_funds"
+            | "provider_outcome"
+            | "quarantine_provider_error"
+            | "recover_interrupted_execution"
+            | "begin_manual_handoff"
+            | "complete_manual_handoff"
+            | "reconcile_intent"
+    )
+}
+
+fn audit_capacity_allows(non_emergency: usize, emergency: usize, action: &str) -> bool {
+    if action == "emergency_stop_on" {
+        return true;
+    }
+    if action == "emergency_stop_off" {
+        return emergency < EMERGENCY_AUDIT_RESERVE;
+    }
+    let limit = if is_money_safety_audit(action) {
+        MAX_AUDIT_ENTRIES
+    } else {
+        MAX_AUDIT_ENTRIES - AUDIT_SAFETY_RESERVE
+    };
+    non_emergency < limit
+}
+
+fn money_workflow_capacity_allows(used: usize, reserved: usize, new_slots: usize) -> bool {
+    used.saturating_add(reserved).saturating_add(new_slots) <= MAX_AUDIT_ENTRIES
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -307,6 +375,9 @@ impl Policy {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if serde_json::to_vec(self)?.len() > MAX_POLICY_BYTES {
+            return Err(TreasuryError::Invalid("policy exceeds the 2048-byte limit".to_string()));
+        }
         Money::zero(&self.primary_currency)?;
         if self.reinvestment_ratio_bps > 10_000 {
             return Err(TreasuryError::Invalid(
@@ -536,6 +607,11 @@ pub struct PurchaseRequest {
 
 impl PurchaseRequest {
     fn validate(&self, policy: &Policy, at: i64) -> Result<()> {
+        if serde_json::to_vec(self)?.len() > MAX_PURCHASE_REQUEST_BYTES {
+            return Err(TreasuryError::Invalid(
+                "purchase request exceeds the 4096-byte limit".to_string(),
+            ));
+        }
         bounded(&self.idempotency_key, "idempotency_key", 128)?;
         bounded(&self.merchant_domain, "merchant_domain", 253)?;
         bounded(&self.category, "category", 64)?;
@@ -552,6 +628,7 @@ impl PurchaseRequest {
         let mut item_total = 0_i64;
         for item in &self.items {
             bounded(&item.label, "item_label", 160)?;
+            bounded_bytes(&item.label, "item_label", 640)?;
             if item.quantity == 0 || item.quantity > 10_000 || item.unit_price_minor < 0 {
                 return Err(TreasuryError::Invalid("purchase line item is invalid".to_string()));
             }
@@ -591,6 +668,9 @@ impl PurchaseRequest {
         }
         if self.redirect_chain.len() > policy.max_redirects {
             return Err(TreasuryError::Invalid("redirect chain is too long".to_string()));
+        }
+        for redirect in &self.redirect_chain {
+            bounded_bytes(redirect, "redirect_url", 2048)?;
         }
         if self.idempotency_key.len() > 128 {
             return Err(TreasuryError::Invalid("idempotency key is too long".to_string()));
@@ -1187,6 +1267,14 @@ pub enum Request {
         intent_id: String,
     },
     ListTransactions,
+    ListTransactionsPage {
+        cursor: Option<String>,
+        limit: u32,
+    },
+    OwnerListTransactionsPage {
+        cursor: Option<String>,
+        limit: u32,
+    },
     GetReceipt {
         intent_id: String,
     },
@@ -1195,6 +1283,13 @@ pub enum Request {
         policy: Policy,
         mode: AutonomyMode,
         ttl_secs: i64,
+    },
+    OwnerCreateAgentPrepared {
+        name: String,
+        policy: Policy,
+        mode: AutonomyMode,
+        ttl_secs: i64,
+        capability_token: String,
     },
     OwnerUpdatePolicy {
         agent_id: String,
@@ -1207,10 +1302,18 @@ pub enum Request {
     OwnerRevokeAgent {
         agent_id: String,
     },
+    OwnerRotateAgentCapability {
+        agent_id: String,
+        ttl_secs: i64,
+        capability_token: String,
+    },
     OwnerSetEmergencyStop {
         stopped: bool,
     },
     OwnerApproveIntent {
+        intent_id: String,
+    },
+    OwnerDenyIntent {
         intent_id: String,
     },
     OwnerBeginManualHandoff {
@@ -1253,6 +1356,11 @@ pub enum Request {
         memo_template: String,
     },
     OwnerListAudit,
+    OwnerListAuditRecent,
+    OwnerListAuditPage {
+        cursor: Option<u64>,
+        limit: u32,
+    },
 }
 
 impl Request {
@@ -1261,10 +1369,13 @@ impl Request {
             self,
             Self::OwnerCreateAgent { .. }
                 | Self::OwnerUpdatePolicy { .. }
+                | Self::OwnerCreateAgentPrepared { .. }
                 | Self::OwnerSetAgentMode { .. }
                 | Self::OwnerRevokeAgent { .. }
+                | Self::OwnerRotateAgentCapability { .. }
                 | Self::OwnerSetEmergencyStop { .. }
                 | Self::OwnerApproveIntent { .. }
+                | Self::OwnerDenyIntent { .. }
                 | Self::OwnerBeginManualHandoff { .. }
                 | Self::OwnerCompleteManualHandoff { .. }
                 | Self::OwnerApproveMerchant { .. }
@@ -1274,7 +1385,29 @@ impl Request {
                 | Self::OwnerConfigureManualProvider { .. }
                 | Self::OwnerConfigureReceiveInstructions { .. }
                 | Self::OwnerListAudit
+                | Self::OwnerListAuditRecent
+                | Self::OwnerListAuditPage { .. }
+                | Self::OwnerListTransactionsPage { .. }
                 | Self::OwnerGetDashboard
+        )
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::GetStatus
+                | Self::GetCapabilities
+                | Self::GetBudget
+                | Self::GetReceiveInstructions
+                | Self::OwnerGetDashboard
+                | Self::GetPurchaseIntent { .. }
+                | Self::ListTransactions
+                | Self::ListTransactionsPage { .. }
+                | Self::OwnerListTransactionsPage { .. }
+                | Self::GetReceipt { .. }
+                | Self::OwnerListAudit
+                | Self::OwnerListAuditRecent
+                | Self::OwnerListAuditPage { .. }
         )
     }
 }
@@ -1316,19 +1449,28 @@ where
         | "get_receive_instructions"
         | "list_transactions"
         | "owner_list_audit"
+        | "owner_list_audit_recent"
         | "owner_get_dashboard" => &[],
+        "list_transactions_page" | "owner_list_transactions_page" | "owner_list_audit_page" => {
+            &["cursor", "limit"]
+        }
         "create_purchase_intent" => &["request"],
         "get_purchase_intent"
         | "execute_purchase_intent"
         | "cancel_purchase_intent"
         | "get_receipt"
         | "owner_approve_intent"
+        | "owner_deny_intent"
         | "owner_begin_manual_handoff"
         | "owner_complete_manual_handoff" => &["intent_id"],
         "owner_create_agent" => &["name", "policy", "mode", "ttl_secs"],
+        "owner_create_agent_prepared" => {
+            &["name", "policy", "mode", "ttl_secs", "capability_token"]
+        }
         "owner_update_policy" => &["agent_id", "policy"],
         "owner_set_agent_mode" => &["agent_id", "mode"],
         "owner_revoke_agent" => &["agent_id"],
+        "owner_rotate_agent_capability" => &["agent_id", "ttl_secs", "capability_token"],
         "owner_set_emergency_stop" => &["stopped"],
         "owner_approve_merchant" => &["agent_id", "merchant_domain"],
         "owner_reconcile" => &["intent_id", "outcome", "provider_reference"],
@@ -1375,6 +1517,16 @@ enum Actor {
 impl Treasury {
     pub fn is_owner_token(&self, token: &str) -> bool {
         self.state.owner.capability_token_hash == token_hash(token)
+    }
+
+    pub fn active_agent_capabilities(&self) -> Vec<(String, i64)> {
+        let at = now();
+        self.state
+            .agents
+            .values()
+            .filter(|agent| !agent.revoked && agent.expires_at > at)
+            .map(|agent| (agent.capability_token_hash.clone(), agent.expires_at))
+            .collect()
     }
 
     pub fn bind_approved_secret_operation(
@@ -1664,6 +1816,19 @@ impl Treasury {
         if self.state.schema_version != 2 {
             return Err(TreasuryError::Invalid("unsupported persisted state schema".to_string()));
         }
+        let emergency_audit_count =
+            self.state.audit.iter().filter(|entry| is_emergency_audit(&entry.action)).count();
+        let non_emergency_audit_count = self.state.audit.len() - emergency_audit_count;
+        let invalid_audit_overflow = non_emergency_audit_count > MAX_AUDIT_ENTRIES
+            || emergency_audit_count > EMERGENCY_AUDIT_RESERVE + 1;
+        if self.state.intents.len() > MAX_INTENTS
+            || self.state.agents.len() > MAX_AGENTS
+            || invalid_audit_overflow
+        {
+            return Err(TreasuryError::Invalid(
+                "persisted treasury exceeds its durable record quota".to_string(),
+            ));
+        }
         if self.state.owner.capability_token_hash.len() != 64 {
             return Err(TreasuryError::Invalid("owner token hash is invalid".to_string()));
         }
@@ -1683,6 +1848,11 @@ impl Treasury {
                 || agent.broker_session_expires_at > agent.expires_at
             {
                 return Err(TreasuryError::Invalid("persisted agent invariant failed".to_string()));
+            }
+            if agent.approved_merchants.len() > MAX_AGENT_APPROVED_MERCHANTS {
+                return Err(TreasuryError::Invalid(
+                    "agent merchant approvals exceed the durable limit".to_string(),
+                ));
             }
             for merchant in &agent.approved_merchants {
                 if canonicalize_domain(merchant)? != *merchant {
@@ -1941,6 +2111,12 @@ impl Treasury {
         request: Request,
         data_dir: &Path,
     ) -> Result<Value> {
+        if matches!(&request, Request::OwnerCreateAgent { .. }) {
+            return Err(TreasuryError::Forbidden(
+                "persisted agent creation requires a caller-prepared capability".to_string(),
+            ));
+        }
+        let read_only = request.is_read_only();
         match request {
             Request::ExecutePurchaseIntent { intent_id } => {
                 if self.state.provider_mode == ProviderMode::ManualPrepaidCard {
@@ -1974,12 +2150,23 @@ impl Treasury {
             request => {
                 let snapshot = self.state.clone();
                 match self.handle(token, request) {
+                    Ok(value) if read_only => Ok(value),
                     Ok(value) => {
                         if let Err(error) = self.save_to(data_dir) {
                             self.state = snapshot;
                             return Err(error);
                         }
                         Ok(value)
+                    }
+                    Err(error)
+                        if matches!(&error, TreasuryError::Forbidden(message) if message == "transaction rate limit exceeded")
+                            && self.state.generation > snapshot.generation =>
+                    {
+                        if let Err(save_error) = self.save_to(data_dir) {
+                            self.state = snapshot;
+                            return Err(save_error);
+                        }
+                        Err(error)
                     }
                     Err(error) => {
                         self.state = snapshot;
@@ -2003,10 +2190,30 @@ impl Treasury {
             Request::ExecutePurchaseIntent { intent_id } => self.execute_intent(&actor, &intent_id),
             Request::CancelPurchaseIntent { intent_id } => self.cancel_intent(&actor, &intent_id),
             Request::ListTransactions => self.list_transactions(&actor),
+            Request::ListTransactionsPage { cursor, limit } => {
+                self.list_transactions_page(&actor, cursor.as_deref(), limit)
+            }
+            Request::OwnerListTransactionsPage { cursor, limit } => {
+                self.owner_list_transactions_page(&actor, cursor.as_deref(), limit)
+            }
             Request::GetReceipt { intent_id } => self.get_receipt(&actor, &intent_id),
             Request::OwnerCreateAgent { name, policy, mode, ttl_secs } => {
-                self.owner_create_agent(&actor, name, policy, mode, ttl_secs)
+                self.owner_create_agent(&actor, name, policy, mode, ttl_secs, None)
             }
+            Request::OwnerCreateAgentPrepared {
+                name,
+                policy,
+                mode,
+                ttl_secs,
+                capability_token,
+            } => self.owner_create_agent(
+                &actor,
+                name,
+                policy,
+                mode,
+                ttl_secs,
+                Some(capability_token),
+            ),
             Request::OwnerUpdatePolicy { agent_id, policy } => {
                 self.owner_update_policy(&actor, &agent_id, policy)
             }
@@ -2014,10 +2221,14 @@ impl Treasury {
                 self.owner_set_agent_mode(&actor, &agent_id, mode)
             }
             Request::OwnerRevokeAgent { agent_id } => self.owner_revoke_agent(&actor, &agent_id),
+            Request::OwnerRotateAgentCapability { agent_id, ttl_secs, capability_token } => {
+                self.owner_rotate_agent_capability(&actor, &agent_id, ttl_secs, capability_token)
+            }
             Request::OwnerSetEmergencyStop { stopped } => {
                 self.owner_emergency_stop(&actor, stopped)
             }
             Request::OwnerApproveIntent { intent_id } => self.owner_approve(&actor, &intent_id),
+            Request::OwnerDenyIntent { intent_id } => self.owner_deny(&actor, &intent_id),
             Request::OwnerBeginManualHandoff { intent_id } => {
                 self.owner_begin_manual_handoff(&actor, &intent_id)
             }
@@ -2069,6 +2280,10 @@ impl Treasury {
                 self.owner_configure_receive(&actor, method, address, memo_template)
             }
             Request::OwnerListAudit => self.owner_list_audit(&actor),
+            Request::OwnerListAuditRecent => self.owner_list_audit_recent(&actor),
+            Request::OwnerListAuditPage { cursor, limit } => {
+                self.owner_list_audit_page(&actor, cursor, limit)
+            }
         }
     }
 
@@ -2144,37 +2359,60 @@ impl Treasury {
 
     fn owner_get_dashboard(&self, actor: &Actor) -> Result<Value> {
         Self::require_owner(actor)?;
-        let agents: Vec<Value> = self
-            .state
-            .agents
-            .values()
-            .map(|agent| {
-                json!({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "policy_id": agent.policy_id,
-                    "mode": agent.mode,
-                    "created_at": agent.created_at,
-                    "expires_at": agent.expires_at,
-                    "revoked": agent.revoked,
-                    "broker_session_expires_at": agent.broker_session_expires_at,
-                    "approved_merchants": agent.approved_merchants,
-                })
-            })
-            .collect();
-        let transactions: Vec<Value> =
-            self.state.intents.values().map(|intent| self.owner_intent(intent)).collect();
-        let pending_approvals: Vec<Value> = self
-            .state
-            .intents
-            .values()
-            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+        let mut agents = Vec::with_capacity(self.state.agents.len());
+        for agent in self.state.agents.values() {
+            let policy = self.policy(&agent.policy_id)?;
+            let usage = self.usage(&agent.id, &policy.primary_currency)?;
+            let transaction_count =
+                self.state.intents.values().filter(|intent| intent.agent_id == agent.id).count();
+            agents.push(json!({
+                "id": agent.id,
+                "name": agent.name,
+                "policy_id": agent.policy_id,
+                "mode": agent.mode,
+                "created_at": agent.created_at,
+                "expires_at": agent.expires_at,
+                "revoked": agent.revoked,
+                "broker_session_expires_at": agent.broker_session_expires_at,
+                "approved_merchants": agent.approved_merchants,
+                "transaction_count": transaction_count,
+                "budget": {
+                    "usage": usage,
+                    "remaining_rolling_24h": remaining_money(
+                        &policy.max_rolling_24h,
+                        &usage.rolling_24h_amount,
+                    )?,
+                    "remaining_session": remaining_money(
+                        &policy.max_per_session,
+                        &usage.session_amount,
+                    )?,
+                    "remaining_lifetime": remaining_money(
+                        &policy.max_lifetime,
+                        &usage.lifetime_amount,
+                    )?,
+                },
+            }));
+        }
+        let mut intents: Vec<&PurchaseIntent> = self.state.intents.values().collect();
+        intents.sort_by_key(|intent| std::cmp::Reverse((intent.updated_at, intent.created_at)));
+        let transactions_total = intents.len();
+        let transactions: Vec<Value> = intents
+            .iter()
+            .take(DASHBOARD_HISTORY_LIMIT)
             .map(|intent| self.owner_intent(intent))
             .collect();
-        let reconciliation_required: Vec<Value> = self
-            .state
-            .intents
-            .values()
+        let pending_total = intents
+            .iter()
+            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+            .count();
+        let pending_approvals: Vec<Value> = intents
+            .iter()
+            .filter(|intent| intent.state == TransactionState::ApprovalRequired)
+            .take(DASHBOARD_HISTORY_LIMIT)
+            .map(|intent| self.owner_intent(intent))
+            .collect();
+        let reconciliation_total = intents
+            .iter()
             .filter(|intent| {
                 matches!(
                     intent.state,
@@ -2183,6 +2421,18 @@ impl Treasury {
                         | TransactionState::ReconciliationRequired
                 )
             })
+            .count();
+        let reconciliation_required: Vec<Value> = intents
+            .iter()
+            .filter(|intent| {
+                matches!(
+                    intent.state,
+                    TransactionState::ProviderPending
+                        | TransactionState::Unknown
+                        | TransactionState::ReconciliationRequired
+                )
+            })
+            .take(DASHBOARD_HISTORY_LIMIT)
             .map(|intent| self.owner_intent(intent))
             .collect();
         let manual_card = self.state.manual_provider.as_ref().map(|provider| {
@@ -2197,21 +2447,35 @@ impl Treasury {
         } else {
             Vec::new()
         };
+        let reported_balance = self.provider_reported_balance().ok();
+        let authority_currency = reported_balance
+            .as_ref()
+            .map(|balance| balance.currency.clone())
+            .unwrap_or_else(|| self.state.provider.balance.currency.clone());
+        let ledger = self.ledger_snapshot(&authority_currency)?;
         Ok(json!({
             "emergency_stop": self.state.emergency_stop,
             "provider": {
                 "id": self.provider_id(),
                 "mode": self.state.provider_mode,
-                "balance": self.provider_reported_balance().ok(),
+                "balance": reported_balance,
                 "balance_status": self.provider_balance_status(),
                 "balance_evidence": self.provider_balance_evidence(),
                 "manual_card": manual_card,
             },
+            "available_authority": ledger.available_authority.clone(),
+            "ledger": ledger,
             "agents": agents,
             "policies": self.state.policies,
             "transactions": transactions,
+            "transactions_total": transactions_total,
+            "transactions_truncated": transactions_total > DASHBOARD_HISTORY_LIMIT,
             "pending_approvals": pending_approvals,
+            "pending_approvals_total": pending_total,
+            "pending_approvals_truncated": pending_total > DASHBOARD_HISTORY_LIMIT,
             "reconciliation_required": reconciliation_required,
+            "reconciliation_required_total": reconciliation_total,
+            "reconciliation_required_truncated": reconciliation_total > DASHBOARD_HISTORY_LIMIT,
             "receive_instructions": self.state.receive_instructions,
             "audit_entry_count": self.state.audit.len(),
             "unsafe_modes": unsafe_modes,
@@ -2314,6 +2578,19 @@ impl Treasury {
                 "idempotency key is already bound to another request".to_string(),
             ));
         }
+        if self.state.intents.len() >= MAX_INTENTS {
+            return Err(TreasuryError::Conflict(
+                "durable transaction quota reached; archive this treasury before continuing"
+                    .to_string(),
+            ));
+        }
+        let agent_intent_count =
+            self.state.intents.values().filter(|intent| intent.agent_id == agent_id).count();
+        if agent_intent_count >= MAX_INTENTS_PER_AGENT {
+            return Err(TreasuryError::Conflict(
+                "agent durable transaction quota reached; owner rotation is required".to_string(),
+            ));
+        }
         let policy = self.policy(&agent.policy_id)?.clone();
         if !self.state.emergency_stop && agent.broker_session_expires_at <= now() {
             return Err(TreasuryError::Forbidden(
@@ -2321,6 +2598,25 @@ impl Treasury {
             ));
         }
         let usage = self.usage(&agent_id, &policy.primary_currency)?;
+        if usage.recent_transaction_count >= policy.max_transactions_per_minute {
+            let at = now();
+            let already_recorded = self.state.audit.iter().rev().any(|entry| {
+                entry.at >= at - 60
+                    && entry.actor == agent_id
+                    && entry.action == "transaction_rate_limited"
+            });
+            if !already_recorded {
+                self.audit(
+                    &agent_id,
+                    "transaction_rate_limited",
+                    None,
+                    Some(policy.version),
+                    Some("denied"),
+                    json!({ "window_seconds": 60 }),
+                )?;
+            }
+            return Err(TreasuryError::Forbidden("transaction rate limit exceeded".to_string()));
+        }
         let merchant = canonicalize_domain(&request.merchant_domain)?;
         let known_merchant = policy.allowed_merchants.contains(&merchant)
             || agent.approved_merchants.contains(&merchant);
@@ -2433,6 +2729,7 @@ impl Treasury {
     }
 
     fn prepare_intent_execution(&mut self, actor: &Actor, intent_id: &str) -> Result<()> {
+        self.require_money_workflow_audit_capacity(4)?;
         let agent_id = self.require_agent_scope(actor, "purchase_intents:execute")?.to_string();
         let existing = self
             .state
@@ -2667,10 +2964,25 @@ impl Treasury {
     }
 
     fn list_transactions(&self, actor: &Actor) -> Result<Value> {
+        self.list_transactions_page(actor, None, 25)
+    }
+
+    fn list_transactions_page(
+        &self,
+        actor: &Actor,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
         if matches!(actor, Actor::Agent(_)) {
             self.require_agent_scope(actor, "transactions:read")?;
         }
-        let values: Vec<Value> = self
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if limit == 0 || limit > OWNER_PAGE_LIMIT {
+            return Err(TreasuryError::Invalid(format!(
+                "page limit must be between 1 and {OWNER_PAGE_LIMIT}"
+            )));
+        }
+        let mut intents: Vec<&PurchaseIntent> = self
             .state
             .intents
             .values()
@@ -2678,12 +2990,80 @@ impl Treasury {
                 Actor::Owner => true,
                 Actor::Agent(agent_id) => intent.agent_id == *agent_id,
             })
+            .collect();
+        intents.sort_by_key(|intent| std::cmp::Reverse((intent.created_at, intent.id.as_str())));
+        let start = match cursor {
+            Some(value) => intents
+                .iter()
+                .position(|intent| intent.id == value)
+                .map(|position| position + 1)
+                .ok_or_else(|| {
+                    TreasuryError::Invalid("transaction cursor is invalid".to_string())
+                })?,
+            None => 0,
+        };
+        let values: Vec<Value> = intents
+            .iter()
+            .skip(start)
+            .take(limit)
             .map(|intent| match actor {
                 Actor::Owner => self.owner_intent(intent),
                 Actor::Agent(_) => self.sanitized_intent(intent),
             })
             .collect();
-        Ok(json!({ "transactions": values }))
+        let has_more = start + values.len() < intents.len();
+        let next_cursor = has_more
+            .then(|| values.last().and_then(|value| value["id"].as_str()).map(str::to_string))
+            .flatten();
+        Ok(json!({
+            "transactions": values,
+            "transactions_total": intents.len(),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }))
+    }
+
+    fn owner_list_transactions_page(
+        &self,
+        actor: &Actor,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if limit == 0 || limit > OWNER_PAGE_LIMIT {
+            return Err(TreasuryError::Invalid(format!(
+                "page limit must be between 1 and {OWNER_PAGE_LIMIT}"
+            )));
+        }
+        let mut intents: Vec<&PurchaseIntent> = self.state.intents.values().collect();
+        intents.sort_by_key(|intent| std::cmp::Reverse((intent.created_at, intent.id.as_str())));
+        let start = match cursor {
+            Some(value) => intents
+                .iter()
+                .position(|intent| intent.id == value)
+                .map(|position| position + 1)
+                .ok_or_else(|| {
+                    TreasuryError::Invalid("transaction cursor is invalid".to_string())
+                })?,
+            None => 0,
+        };
+        let page: Vec<Value> = intents
+            .iter()
+            .skip(start)
+            .take(limit)
+            .map(|intent| self.owner_intent(intent))
+            .collect();
+        let has_more = start + page.len() < intents.len();
+        let next_cursor = has_more
+            .then(|| page.last().and_then(|value| value["id"].as_str()).map(str::to_string))
+            .flatten();
+        Ok(json!({
+            "transactions": page,
+            "transactions_total": intents.len(),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }))
     }
 
     fn get_receipt(&self, actor: &Actor, intent_id: &str) -> Result<Value> {
@@ -2718,8 +3098,14 @@ impl Treasury {
         mut policy: Policy,
         mode: AutonomyMode,
         ttl_secs: i64,
+        capability_token: Option<String>,
     ) -> Result<Value> {
         Self::require_owner(actor)?;
+        if self.state.agents.len() >= MAX_AGENTS {
+            return Err(TreasuryError::Conflict(
+                "agent quota reached; revoke and rotate an existing agent".to_string(),
+            ));
+        }
         bounded(&name, "agent_name", 128)?;
         policy.validate()?;
         self.validate_policy_exposure(&policy)?;
@@ -2728,10 +3114,13 @@ impl Treasury {
                 "agent TTL must be between 1 second and 24 hours".to_string(),
             ));
         }
-        let token = new_token();
+        let prepared = capability_token.is_some();
+        let token = capability_token.unwrap_or_else(new_token);
+        validate_capability_token(&token)?;
         let agent_id = new_id("agent");
         policy.id = format!("policy_{agent_id}");
         policy.version = 1;
+        policy.validate()?;
         let policy_id = policy.id.clone();
         let session_ttl = ttl_secs.min(policy.card_session_ttl_secs);
         let session_expires_at = if self.state.emergency_stop { 0 } else { now() + session_ttl };
@@ -2774,9 +3163,16 @@ impl Treasury {
             Some("allowed"),
             json!({ "agent_id": agent_id, "broker_session_expires_at": agent.broker_session_expires_at }),
         )?;
-        Ok(
-            json!({ "agent_id": agent.id, "capability_token": token, "expires_at": agent.expires_at, "broker_session_expires_at": agent.broker_session_expires_at, "warning": "Store this token once in a protected file. It is never shown again and is not an owner credential." }),
-        )
+        let mut response = json!({
+            "agent_id": agent.id,
+            "expires_at": agent.expires_at,
+            "broker_session_expires_at": agent.broker_session_expires_at,
+            "warning": "Store this token once in a protected file. It is never shown again and is not an owner credential.",
+        });
+        if !prepared {
+            response["capability_token"] = json!(token);
+        }
+        Ok(response)
     }
 
     fn owner_arm_agent_session(
@@ -2835,6 +3231,7 @@ impl Treasury {
         let current = self.policy(&agent.policy_id)?.clone();
         policy.id = agent.policy_id.clone();
         policy.version = current.version + 1;
+        policy.validate()?;
         self.state.policies.insert(policy.clone().id.clone(), policy.clone());
         self.audit(
             "owner",
@@ -2851,6 +3248,13 @@ impl Treasury {
 
     fn owner_emergency_stop(&mut self, actor: &Actor, stopped: bool) -> Result<Value> {
         Self::require_owner(actor)?;
+        if self.state.emergency_stop == stopped {
+            return Ok(json!({
+                "emergency_stop": stopped,
+                "invalidated_sessions": 0,
+                "unchanged": true,
+            }));
+        }
         let mut invalidated_sessions = 0;
         if stopped && !self.state.emergency_stop {
             for agent in self.state.agents.values_mut() {
@@ -2919,6 +3323,55 @@ impl Treasury {
         Ok(json!({ "agent_id": agent_id, "revoked": true, "mode": "disabled" }))
     }
 
+    fn owner_rotate_agent_capability(
+        &mut self,
+        actor: &Actor,
+        agent_id: &str,
+        ttl_secs: i64,
+        capability_token: String,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        if ttl_secs <= 0 || ttl_secs > 24 * 60 * 60 {
+            return Err(TreasuryError::Invalid(
+                "agent TTL must be between 1 second and 24 hours".to_string(),
+            ));
+        }
+        let policy = self.policy(&self.agent(agent_id)?.policy_id)?.clone();
+        validate_capability_token(&capability_token)?;
+        let expires_at = now() + ttl_secs;
+        let session_expires_at = if self.state.emergency_stop {
+            0
+        } else {
+            now() + ttl_secs.min(policy.card_session_ttl_secs)
+        };
+        let agent = self
+            .state
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?;
+        agent.capability_token_hash = token_hash(&capability_token);
+        agent.expires_at = expires_at;
+        agent.broker_session_id = new_id("session");
+        agent.broker_session_expires_at = session_expires_at;
+        agent.revoked = false;
+        agent.mode = AutonomyMode::ApprovalRequired;
+        self.audit(
+            "owner",
+            "rotate_agent_capability",
+            None,
+            Some(policy.version),
+            Some("allowed"),
+            json!({ "agent_id": agent_id, "expires_at": expires_at, "mode": "approval_required" }),
+        )?;
+        Ok(json!({
+            "agent_id": agent_id,
+            "expires_at": expires_at,
+            "broker_session_expires_at": session_expires_at,
+            "mode": "approval_required",
+            "warning": "The previous capability is invalid. Store this replacement once in a protected file.",
+        }))
+    }
+
     fn owner_approve(&mut self, actor: &Actor, intent_id: &str) -> Result<Value> {
         Self::require_owner(actor)?;
         let mut intent = self
@@ -2939,6 +3392,31 @@ impl Treasury {
             Some(intent.policy_version),
             Some("allowed"),
             json!({ "owner_action": true, "approval_scope": "intent_only" }),
+        )?;
+        Ok(self.sanitized_intent(&intent))
+    }
+
+    fn owner_deny(&mut self, actor: &Actor, intent_id: &str) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let mut intent = self
+            .state
+            .intents
+            .get(intent_id)
+            .ok_or_else(|| TreasuryError::NotFound(intent_id.to_string()))?
+            .clone();
+        if intent.state != TransactionState::ApprovalRequired {
+            return Err(TreasuryError::Conflict("intent is not awaiting approval".to_string()));
+        }
+        intent.transition(TransactionState::Cancelled)?;
+        intent.last_error = Some("owner_denied".to_string());
+        self.state.intents.insert(intent.id.clone(), intent.clone());
+        self.audit(
+            "owner",
+            "deny_intent",
+            Some(intent_id),
+            Some(intent.policy_version),
+            Some("denied"),
+            json!({ "owner_action": true, "retry": false }),
         )?;
         Ok(self.sanitized_intent(&intent))
     }
@@ -3021,12 +3499,22 @@ impl Treasury {
     ) -> Result<Value> {
         Self::require_owner(actor)?;
         let merchant = canonicalize_domain(merchant_domain)?;
-        self.state
+        let agent = self
+            .state
             .agents
             .get_mut(agent_id)
-            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?
-            .approved_merchants
-            .insert(merchant.clone());
+            .ok_or_else(|| TreasuryError::NotFound(format!("agent {agent_id}")))?;
+        if agent.approved_merchants.contains(&merchant) {
+            return Ok(
+                json!({ "agent_id": agent_id, "merchant_domain": merchant, "approved": true, "unchanged": true }),
+            );
+        }
+        if agent.approved_merchants.len() >= MAX_AGENT_APPROVED_MERCHANTS {
+            return Err(TreasuryError::Conflict(
+                "agent merchant-approval quota reached; update the policy instead".to_string(),
+            ));
+        }
+        agent.approved_merchants.insert(merchant.clone());
         self.audit(
             "owner",
             "approve_merchant",
@@ -3412,6 +3900,11 @@ impl Treasury {
                 "manual owner configuration cannot claim provider-verified status".to_string(),
             ));
         }
+        if balance.currency != self.state.provider.balance.currency {
+            return Err(TreasuryError::Invalid(
+                "manual provider currency must match the treasury currency".to_string(),
+            ));
+        }
         if let Some(last_four) = &last_four
             && (last_four.len() != 4 || !last_four.bytes().all(|byte| byte.is_ascii_digit()))
         {
@@ -3469,7 +3962,56 @@ impl Treasury {
 
     fn owner_list_audit(&self, actor: &Actor) -> Result<Value> {
         Self::require_owner(actor)?;
-        Ok(json!({ "entries": self.state.audit, "chain_valid": self.verify_audit_chain().is_ok() }))
+        Ok(json!({
+            "entries": self.state.audit,
+            "entries_total": self.state.audit.len(),
+            "truncated": false,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
+    }
+
+    fn owner_list_audit_recent(&self, actor: &Actor) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let total = self.state.audit.len();
+        let start = total.saturating_sub(DASHBOARD_AUDIT_LIMIT);
+        Ok(json!({
+            "entries": &self.state.audit[start..],
+            "entries_total": total,
+            "truncated": start > 0,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
+    }
+
+    fn owner_list_audit_page(
+        &self,
+        actor: &Actor,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<Value> {
+        Self::require_owner(actor)?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if limit == 0 || limit > OWNER_PAGE_LIMIT {
+            return Err(TreasuryError::Invalid(format!(
+                "page limit must be between 1 and {OWNER_PAGE_LIMIT}"
+            )));
+        }
+        let entries: Vec<&AuditEntry> = self
+            .state
+            .audit
+            .iter()
+            .rev()
+            .filter(|entry| cursor.is_none_or(|sequence| entry.sequence < sequence))
+            .take(limit)
+            .collect();
+        let has_more = entries.last().is_some_and(|entry| entry.sequence > 1);
+        let next_cursor = has_more.then(|| entries.last().map(|entry| entry.sequence)).flatten();
+        Ok(json!({
+            "entries": entries,
+            "entries_total": self.state.audit.len(),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "chain_valid": self.verify_audit_chain().is_ok(),
+        }))
     }
 
     fn agent(&self, agent_id: &str) -> Result<&AgentRecord> {
@@ -3811,6 +4353,29 @@ impl Treasury {
         Ok(hex::encode(digest.finalize()))
     }
 
+    fn require_money_workflow_audit_capacity(&self, new_slots: usize) -> Result<()> {
+        let used =
+            self.state.audit.iter().filter(|entry| !is_emergency_audit(&entry.action)).count();
+        let reserved: usize = self
+            .state
+            .intents
+            .values()
+            .map(|intent| match intent.state {
+                TransactionState::Executing => 2,
+                TransactionState::ProviderPending
+                | TransactionState::Unknown
+                | TransactionState::ReconciliationRequired => 1,
+                _ => 0,
+            })
+            .sum();
+        if !money_workflow_capacity_allows(used, reserved, new_slots) {
+            return Err(TreasuryError::Conflict(
+                "audit safety reserve is full; resolve existing payment outcomes first".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn audit(
         &mut self,
         actor: &str,
@@ -3820,6 +4385,14 @@ impl Treasury {
         decision: Option<&str>,
         details: Value,
     ) -> Result<()> {
+        let emergency =
+            self.state.audit.iter().filter(|entry| is_emergency_audit(&entry.action)).count();
+        let non_emergency = self.state.audit.len() - emergency;
+        if !audit_capacity_allows(non_emergency, emergency, action) {
+            return Err(TreasuryError::Conflict(
+                "durable audit quota reached; archive this treasury before continuing".to_string(),
+            ));
+        }
         self.state.generation = self
             .state
             .generation
@@ -4141,7 +4714,7 @@ fn sanitize_provider_reference(input: &str) -> String {
 
 fn opaque_reference(kind: &str, input: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(format!("agent-treasury {kind} reference v1\0").as_bytes());
+    digest.update(format!("cixa {kind} reference v1\0").as_bytes());
     digest.update(input.as_bytes());
     format!("{kind}_ref_{}", &hex::encode(digest.finalize())[..32])
 }
@@ -4983,6 +5556,7 @@ mod tests {
                 )
                 .is_err()
         );
+
         let stopped_agent = treasury
             .handle(
                 &bootstrap.owner_token,
@@ -5313,6 +5887,316 @@ mod tests {
     }
 
     #[test]
+    fn owner_can_deny_only_an_intent_awaiting_approval() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            Policy::conservative_demo().unwrap(),
+            AutonomyMode::ApprovalRequired,
+        );
+        let intent = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("deny", 500) })
+            .unwrap();
+        let intent_id = intent["id"].as_str().unwrap().to_string();
+
+        assert!(
+            treasury
+                .handle(&token, Request::OwnerDenyIntent { intent_id: intent_id.clone() },)
+                .is_err()
+        );
+        let denied = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerDenyIntent { intent_id: intent_id.clone() },
+            )
+            .unwrap();
+        assert_eq!(denied["state"], "cancelled");
+        assert_eq!(denied["last_error"], "owner_denied");
+        assert!(
+            treasury
+                .handle(&bootstrap.owner_token, Request::OwnerDenyIntent { intent_id })
+                .is_err()
+        );
+        let event = treasury.state.audit.last().unwrap();
+        assert_eq!(event.actor, "owner");
+        assert_eq!(event.action, "deny_intent");
+        assert_eq!(event.decision.as_deref(), Some("denied"));
+    }
+
+    #[test]
+    fn owner_dashboard_history_is_bounded_and_budget_usage_is_authoritative() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_transactions_per_minute = 1_000;
+        let (agent_id, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::ApprovalRequired,
+        );
+        for index in 0..205 {
+            treasury
+                .handle(
+                    &token,
+                    Request::CreatePurchaseIntent {
+                        request: request(&format!("history-{index}"), 1),
+                    },
+                )
+                .unwrap();
+        }
+        for index in 0..10 {
+            let mut purchase = request(&format!("wide-history-{index}"), 1);
+            purchase.items[0].label = "x".repeat(160);
+            purchase.redirect_chain = (0..2)
+                .map(|_| format!("https://merchant.example.test/{}", "y".repeat(1650)))
+                .collect();
+            let request_size = serde_json::to_vec(&purchase).unwrap().len();
+            assert!(request_size > 3_800 && request_size <= MAX_PURCHASE_REQUEST_BYTES);
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).unwrap();
+        }
+        let dashboard =
+            treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
+        assert_eq!(dashboard["transactions"].as_array().unwrap().len(), 10);
+        assert_eq!(dashboard["transactions_total"], 215);
+        assert_eq!(dashboard["transactions_truncated"], true);
+        assert!(serde_json::to_vec(&dashboard).unwrap().len() < 256 * 1024);
+        let agent = dashboard["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["id"] == agent_id)
+            .unwrap();
+        assert_eq!(agent["budget"]["usage"]["rolling_24h_amount"]["minor"], 0);
+        assert_eq!(agent["budget"]["remaining_rolling_24h"]["minor"], 10_000);
+        assert_eq!(agent["budget"]["remaining_session"]["minor"], 5_000);
+        assert_eq!(agent["budget"]["remaining_lifetime"]["minor"], 25_000);
+        assert_eq!(agent["transaction_count"], 215);
+        assert_eq!(dashboard["available_authority"]["minor"], 10_000);
+        assert_eq!(dashboard["ledger"]["verified_income"]["minor"], 0);
+        assert_eq!(dashboard["ledger"]["unverified_income"]["minor"], 0);
+
+        let first_page = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerListTransactionsPage { cursor: None, limit: 50 },
+            )
+            .unwrap();
+        assert_eq!(first_page["transactions"].as_array().unwrap().len(), 50);
+        assert_eq!(first_page["transactions_total"], 215);
+        assert_eq!(first_page["has_more"], true);
+        let second_page = treasury
+            .handle(
+                &bootstrap.owner_token,
+                Request::OwnerListTransactionsPage {
+                    cursor: first_page["next_cursor"].as_str().map(str::to_string),
+                    limit: 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(second_page["transactions"].as_array().unwrap().len(), 50);
+        assert_ne!(first_page["transactions"][49]["id"], second_page["transactions"][0]["id"]);
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerListTransactionsPage { cursor: None, limit: 51 }
+                )
+                .is_err()
+        );
+
+        let agent_first_page = treasury.handle(&token, Request::ListTransactions).unwrap();
+        assert_eq!(agent_first_page["transactions"].as_array().unwrap().len(), 25);
+        assert_eq!(agent_first_page["transactions_total"], 215);
+        assert_eq!(agent_first_page["has_more"], true);
+        assert!(serde_json::to_vec(&agent_first_page).unwrap().len() < 256 * 1024);
+        let agent_second_page = treasury
+            .handle(
+                &token,
+                Request::ListTransactionsPage {
+                    cursor: agent_first_page["next_cursor"].as_str().map(str::to_string),
+                    limit: 25,
+                },
+            )
+            .unwrap();
+        assert_ne!(
+            agent_first_page["transactions"][24]["id"],
+            agent_second_page["transactions"][0]["id"]
+        );
+
+        for stopped in (0..200).map(|index| index % 2 == 0) {
+            treasury
+                .handle(&bootstrap.owner_token, Request::OwnerSetEmergencyStop { stopped })
+                .unwrap();
+        }
+        let audit = treasury.handle(&bootstrap.owner_token, Request::OwnerListAuditRecent).unwrap();
+        assert_eq!(audit["entries"].as_array().unwrap().len(), 25);
+        assert_eq!(audit["truncated"], true);
+        assert!(audit["entries_total"].as_u64().unwrap() > 400);
+        assert_eq!(audit["chain_valid"], true);
+        assert!(serde_json::to_vec(&audit).unwrap().len() < 256 * 1024);
+        let audit_page = treasury
+            .handle(&bootstrap.owner_token, Request::OwnerListAuditPage { cursor: None, limit: 50 })
+            .unwrap();
+        assert_eq!(audit_page["entries"].as_array().unwrap().len(), 50);
+        assert_eq!(audit_page["has_more"], true);
+    }
+
+    #[test]
+    fn purchase_request_rejects_byte_heavy_redirects_and_oversized_payloads() {
+        let policy = Policy::conservative_demo().unwrap();
+        let mut purchase = request("oversized-redirect", 1);
+        purchase.redirect_chain =
+            vec![format!("https://merchant.example.test/{}", "x".repeat(2049))];
+        assert!(purchase.validate(&policy, now()).is_err());
+
+        let mut purchase = request("oversized-payload", 1);
+        purchase.items = (0..30)
+            .map(|_| PurchaseItem {
+                label: "wide-label".repeat(16),
+                quantity: 1,
+                unit_price_minor: 0,
+            })
+            .collect();
+        assert!(purchase.validate(&policy, now()).is_err());
+    }
+
+    #[test]
+    fn rate_limited_requests_do_not_consume_intent_quota_and_audit_is_coalesced() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_transactions_per_minute = 1;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::ApprovalRequired,
+        );
+        treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: request("accepted", 1) })
+            .unwrap();
+        let audit_before = treasury.state.audit.len();
+        for key in ["limited-one", "limited-two"] {
+            assert!(
+                treasury
+                    .handle(&token, Request::CreatePurchaseIntent { request: request(key, 1) })
+                    .is_err()
+            );
+        }
+        assert_eq!(treasury.state.intents.len(), 1);
+        assert_eq!(treasury.state.audit.len(), audit_before + 1);
+        assert_eq!(treasury.state.audit.last().unwrap().action, "transaction_rate_limited");
+    }
+
+    #[test]
+    fn idempotent_retry_survives_agent_quota() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut policy = Policy::conservative_demo().unwrap();
+        policy.max_transactions_per_minute = 5_000;
+        let (_, token) = create_agent(
+            &mut treasury,
+            &bootstrap.owner_token,
+            policy,
+            AutonomyMode::ApprovalRequired,
+        );
+        let purchase = request("stable-at-quota", 1);
+        let accepted = treasury
+            .handle(&token, Request::CreatePurchaseIntent { request: purchase.clone() })
+            .unwrap();
+        let template = treasury.state.intents.values().next().unwrap().clone();
+        for index in 1..MAX_INTENTS_PER_AGENT {
+            let mut intent = template.clone();
+            intent.id = format!("intent_quota_{index}");
+            intent.request.idempotency_key = format!("quota-{index}");
+            treasury.state.intents.insert(intent.id.clone(), intent);
+        }
+        let retried =
+            treasury.handle(&token, Request::CreatePurchaseIntent { request: purchase }).unwrap();
+        assert_eq!(retried["id"], accepted["id"]);
+        assert_eq!(treasury.state.intents.len(), MAX_INTENTS_PER_AGENT);
+    }
+
+    #[test]
+    fn agent_and_policy_bounds_keep_dashboard_response_bounded() {
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        let mut oversized = Policy::conservative_demo().unwrap();
+        oversized.allowed_merchants =
+            (0..32).map(|index| format!("{index}-{}.example.test", "x".repeat(80))).collect();
+        assert!(oversized.validate().is_err());
+
+        for index in 0..MAX_AGENTS {
+            let created = treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: format!("bounded-agent-{index}"),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::Observe,
+                        ttl_secs: 3600,
+                    },
+                )
+                .unwrap();
+            let agent_id = created["agent_id"].as_str().unwrap();
+            for merchant in 0..MAX_AGENT_APPROVED_MERCHANTS {
+                treasury
+                    .handle(
+                        &bootstrap.owner_token,
+                        Request::OwnerApproveMerchant {
+                            agent_id: agent_id.to_string(),
+                            merchant_domain: format!("merchant-{index}-{merchant}.example.test"),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            treasury
+                .handle(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: "one-too-many".to_string(),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::Observe,
+                        ttl_secs: 3600,
+                    }
+                )
+                .is_err()
+        );
+        let dashboard =
+            treasury.handle(&bootstrap.owner_token, Request::OwnerGetDashboard).unwrap();
+        assert!(serde_json::to_vec(&dashboard).unwrap().len() < 256 * 1024);
+    }
+
+    #[test]
+    fn emergency_stop_audit_is_never_blocked_by_the_ordinary_quota() {
+        assert!(!audit_capacity_allows(
+            MAX_AUDIT_ENTRIES - AUDIT_SAFETY_RESERVE,
+            0,
+            "update_policy"
+        ));
+        assert!(money_workflow_capacity_allows(MAX_AUDIT_ENTRIES - 4, 0, 4));
+        assert!(!money_workflow_capacity_allows(MAX_AUDIT_ENTRIES - 4, 1, 4));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES - 1, 0, "provider_outcome"));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, 0, "emergency_stop_on"));
+        assert!(audit_capacity_allows(MAX_AUDIT_ENTRIES, 0, "emergency_stop_off"));
+        assert!(!audit_capacity_allows(
+            MAX_AUDIT_ENTRIES,
+            EMERGENCY_AUDIT_RESERVE,
+            "emergency_stop_off"
+        ));
+    }
+
+    #[test]
     fn pending_provider_hold_is_reconciled_once() {
         let bootstrap =
             Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
@@ -5580,6 +6464,38 @@ mod tests {
     }
 
     #[test]
+    fn persisted_reads_do_not_rewrite_security_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let bootstrap =
+            Treasury::bootstrap("owner", Money::positive(10_000, "CAD").unwrap()).unwrap();
+        let mut treasury = bootstrap.treasury;
+        treasury.save_to(directory.path()).unwrap();
+        std::fs::remove_file(directory.path().join(STATE_FILE)).unwrap();
+
+        let status = treasury
+            .handle_persisted(&bootstrap.owner_token, Request::GetStatus, directory.path())
+            .unwrap();
+
+        assert_eq!(status["principal"], "owner");
+        assert!(!directory.path().join(STATE_FILE).exists());
+        assert!(
+            treasury
+                .handle_persisted(
+                    &bootstrap.owner_token,
+                    Request::OwnerCreateAgent {
+                        name: "unsafe-persisted-agent".to_string(),
+                        policy: Policy::conservative_demo().unwrap(),
+                        mode: AutonomyMode::ApprovalRequired,
+                        ttl_secs: 3600,
+                    },
+                    directory.path(),
+                )
+                .is_err()
+        );
+        assert!(treasury.state.agents.is_empty());
+    }
+
+    #[test]
     fn manual_provider_requires_fresh_non_estimated_balance_and_owner_handoff() {
         let bootstrap =
             Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
@@ -5588,7 +6504,7 @@ mod tests {
             .handle(
                 &bootstrap.owner_token,
                 Request::OwnerConfigureManualProvider {
-                    credential_reference: "keychain://agent-treasury/card".to_string(),
+                    credential_reference: "keychain://cixa/card".to_string(),
                     provider_kind: "os-credential-store".to_string(),
                     last_four: Some("1111".to_string()),
                     balance: Money::positive(1_000, "CAD").unwrap(),
@@ -5629,7 +6545,7 @@ mod tests {
         let secret_operation = treasury
             .bind_approved_secret_operation(&bootstrap.owner_token, intent["id"].as_str().unwrap())
             .unwrap();
-        assert_eq!(secret_operation.card_reference, "keychain://agent-treasury/card");
+        assert_eq!(secret_operation.card_reference, "keychain://cixa/card");
         assert!(
             treasury
                 .handle(
@@ -5710,7 +6626,7 @@ mod tests {
             Treasury::bootstrap("owner", Money::positive(1_000, "CAD").unwrap()).unwrap();
         let mut treasury = bootstrap.treasury;
         for (credential_reference, provider_kind) in
-            [("737", "os-credential-store"), ("keychain://agent-treasury/card", "arbitrary-plugin")]
+            [("737", "os-credential-store"), ("keychain://cixa/card", "arbitrary-plugin")]
         {
             assert!(
                 treasury
@@ -5733,7 +6649,7 @@ mod tests {
                 .handle(
                     &bootstrap.owner_token,
                     Request::OwnerConfigureManualProvider {
-                        credential_reference: "keychain://agent-treasury/card".to_string(),
+                        credential_reference: "keychain://cixa/card".to_string(),
                         provider_kind: "os-credential-store".to_string(),
                         last_four: Some("1111".to_string()),
                         balance: Money::positive(1_000, "CAD").unwrap(),
@@ -5747,7 +6663,7 @@ mod tests {
             .handle(
                 &bootstrap.owner_token,
                 Request::OwnerConfigureManualProvider {
-                    credential_reference: "keychain://agent-treasury/card".to_string(),
+                    credential_reference: "keychain://cixa/card".to_string(),
                     provider_kind: "os-credential-store".to_string(),
                     last_four: Some("1111".to_string()),
                     balance: Money::positive(1_000, "CAD").unwrap(),

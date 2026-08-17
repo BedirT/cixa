@@ -4,20 +4,20 @@ The broker and the agent should run as separate OS identities or containers. The
 
 ## macOS launchd
 
-Create an owner-reviewed `~/Library/LaunchAgents/com.example.agent-treasury.plist` with absolute paths and a private data directory. The important arguments are:
+Create an owner-reviewed `~/Library/LaunchAgents/com.example.cixa.plist` with absolute paths and a private data directory. The important arguments are:
 
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/absolute/path/target/release/treasury</string>
+  <string>/absolute/path/target/release/cixa</string>
   <string>serve</string>
   <string>--data-dir</string>
-  <string>/Users/OWNER/.local/agent-treasury</string>
+  <string>/Users/OWNER/.local/cixa</string>
 </array>
 <key>RunAtLoad</key><true/>
 <key>Umask</key><integer>63</integer>
-<key>StandardOutPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.out</string>
-<key>StandardErrorPath</key><string>/Users/OWNER/.local/agent-treasury/daemon.err</string>
+<key>StandardOutPath</key><string>/Users/OWNER/.local/cixa/daemon.out</string>
+<key>StandardErrorPath</key><string>/Users/OWNER/.local/cixa/daemon.err</string>
 ```
 
 Review the plist before `launchctl bootstrap gui/$UID ...`. Do not put a token or card secret in the plist.
@@ -30,30 +30,32 @@ Use a dedicated service account and a private directory. An owner-reviewed unit 
 
 ```ini
 [Service]
-ExecStart=/absolute/path/target/release/treasury serve --data-dir /var/lib/agent-treasury
-User=agent-treasury
-Group=agent-treasury
+ExecStart=/absolute/path/target/release/cixa serve --data-dir /var/lib/cixa
+User=cixa
+Group=cixa
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/agent-treasury
+ReadWritePaths=/var/lib/cixa
 ```
 
-The agent should connect through only the bounded `treasury.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/agent-treasury`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
+The agent should connect through only the bounded `cixa.sock` endpoint or a brokered IPC proxy, not receive `owner.sock` or read access to `/var/lib/cixa`. Mount the owner socket only into the owner CLI or dashboard identity so agent connection flooding cannot consume owner-control admission.
 
 For manual-provider mode, create a dedicated `treasury-agent-ipc` group and an agent service account. The broker owner must be permitted to assign that group, but the agent account must be a distinct UID. Put the shared socket and agent token outside the `0700` broker data directory, then run:
 
 ```bash
-treasury create-agent --data-dir /var/lib/agent-treasury \
-  --owner-token-file /var/lib/agent-treasury/owner.token \
-  --agent-token-file /run/agent-treasury-agent/agent.token \
+cixa create-agent --data-dir /var/lib/cixa \
+  --owner-token-file /var/lib/cixa/owner.token \
+  --agent-token-file /run/cixa-agent/agent.token \
   --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
-treasury serve --data-dir /var/lib/agent-treasury \
-  --socket /run/agent-treasury-agent/treasury.sock \
+cixa serve --data-dir /var/lib/cixa \
+  --socket /run/cixa-agent/cixa.sock \
   --agent-gid "$(getent group treasury-agent-ipc | cut -d: -f3)"
 ```
+
+`create-agent` writes, syncs, permissions, and syncs the token directory before it asks the broker to activate that capability. If activation fails or the broker response is lost, Cixa retains the named token file and reports an uncertain outcome. Reconcile the Agents view and that exact file before removing it or trying another creation.
 
 The broker changes only the agent token and agent socket to that group. `owner.sock`, `owner.token`, `audit.key`, and state remain private. Manual-provider startup rejects a missing or primary `--agent-gid`, and the socket rejects peers using the broker UID even if they can reach it.
 
@@ -67,7 +69,7 @@ Run the agent with a read-only root filesystem, no host network, no Docker socke
 
 ## Owner Dashboard
 
-The dashboard requires two private files: the broker owner token, which remains server-side, and a separate dashboard access token that the owner enters through the browser's HTTP Basic prompt. Generate the latter under `umask 077`, pass it with `--access-token-file`, and never mount it into the agent sandbox. Authentication is required before the HTML, static assets, status API, or emergency endpoint are served. The HTTP-only session cookie, readable CSRF cookie, Host allowlist, and exact Origin check are secondary controls. Stop the dashboard when it is not needed.
+The dashboard requires two private files: the broker owner token, which remains server-side, and a separate dashboard access token entered into the local unlock screen. Generate the latter under `umask 077`, pass it with `--access-token-file`, and never mount it into the agent sandbox. The HTML and bundled static assets contain no private data and load before unlock. The access token is exchanged once for an HTTP-only, random, per-process session plus a readable CSRF cookie, then cleared from the form. API data and owner controls require that session, the Host allowlist, and exact Origin and CSRF checks. A session captured after a loopback port takeover is invalid against a restarted dashboard. Stop the dashboard when it is not needed.
 
 ## TCP
 
@@ -76,3 +78,7 @@ No TCP mode is shipped. If a future deployment adds one, it must require explici
 ## Local Verification Policy
 
 This solo-developer repository intentionally has no hosted GitHub Actions workflow. The owner runs `./scripts/verify` locally before each push. This is an explicit resource and workflow choice, not evidence that hosted checks passed; a future multi-contributor or public release should reassess hosted branch protection and independent build infrastructure.
+
+## Durable Record Quotas
+
+Cixa accepts at most 16 agent records, 8 direct merchant approvals per agent, 10,000 purchase intents in one treasury, and 2,000 intents per agent. A revoked or expired record can be rotated in place to a fresh approval-required capability without consuming another agent slot. Policies are limited to 2 KiB. Ordinary audit actions stop 1,024 entries before the hard audit ceiling so provider outcomes, quarantine, restart recovery, handoff completion, and reconciliation retain capacity. Stop/resume transitions use a separate bounded reserve of 256 transitions, repeated no-op requests are suppressed, and a final stop remains available after that reserve is exhausted. Purchase requests are limited to 4 KiB and individual redirect URLs to 2 KiB. Requests above an agent's per-minute rate are rejected before an intent is stored, with one coalesced audit event per minute. These limits keep a compromised agent from growing `state.json` or dashboard responses without bound. Before a treasury reaches a quota, stop agents, keep an owner-only backup of the complete data directory and audit export, then initialize a new data directory and issue new capabilities. Do not delete individual records from an active treasury because that invalidates its authenticated state and audit chain.

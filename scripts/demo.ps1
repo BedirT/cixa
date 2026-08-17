@@ -1,2 +1,2 @@
 $ErrorActionPreference = "Stop"
-cargo run --quiet --manifest-path "$PSScriptRoot\..\Cargo.toml" -p agent-treasury -- demo
+cargo run --quiet --manifest-path "$PSScriptRoot\..\Cargo.toml" -p cixa -- demo

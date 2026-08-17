@@ -1,8 +1,19 @@
 {
-  "name": "agent-treasury-sdk",
+  "name": "cixa-sdk",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "description": "Thin provider-neutral TypeScript client for a local agent-treasury broker",
+  "description": "Thin provider-neutral TypeScript client for a local Cixa broker",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BedirT/cixa.git",
+    "directory": "packages/sdk-typescript"
+  },
+  "homepage": "https://github.com/BedirT/cixa#readme",
+  "bugs": "https://github.com/BedirT/cixa/issues",
+  "keywords": ["cixa", "payments", "agents", "local-first", "security"],
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "exports": {
     ".": {
