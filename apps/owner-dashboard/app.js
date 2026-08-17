@@ -21,6 +21,12 @@ function node(tag, options = {}, children = []) {
   for (const child of [].concat(children)) if (child != null) value.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return value;
 }
+function svgIcon(symbolId) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#${symbolId}`); svg.append(use); return svg;
+}
 function replace(target, children) { target.replaceChildren(...[].concat(children)); }
 function title(value) { return String(value ?? "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function money(value) {
@@ -184,9 +190,36 @@ function renderAgents() {
   replace(depositAgent, [node("option", { value:"", text:"No agent" }), ...agents.filter((agent) => !agent.revoked).map((agent) => node("option", { value:agent.id, text:agent.name }))]);
   depositAgent.value = selected;
 }
+function agentDescription(mode) {
+  return ({ bounded_autonomous:"Spends quietly inside its standing limits", approval_required:"Asks before spending when your decision is needed", observe:"Reads only, never buys", disabled:"Spending is paused" })[mode] ?? "Works inside the boundaries you set";
+}
+function halveAgentAllowance(agent, policy) {
+  const next = structuredClone(policy);
+  next.max_rolling_24h.minor = Math.max(1, Math.floor(next.max_rolling_24h.minor / 2));
+  next.max_per_transaction.minor = Math.max(1, Math.floor(next.max_per_transaction.minor / 2));
+  confirmAction({
+    title:`Halve ${agent.name}'s allowance?`,
+    copy:"This immediately halves both the rolling 24-hour allowance and the most this agent may spend at once. Existing purchases are not changed.",
+    facts:[["24-hour allowance",`${money(policy.max_rolling_24h)} → ${money(next.max_rolling_24h)}`],["Most at once",`${money(policy.max_per_transaction)} → ${money(next.max_per_transaction)}`]],
+    label:"Halve allowance",
+    action:()=>post("/api/policies/update",{agent_id:agent.id,policy:next},`${agent.name}'s allowance was halved.`),
+  });
+}
+function restoreAgentSpending(agent, sessionExpired, sessionTtl) {
+  if (agent.revoked || agent.expires_at <= Date.now()/1000) {
+    const tokenFilename = `${agent.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"") || "agent"}-${Date.now()}.token`;
+    confirmAction({title:`Let ${agent.name} spend again?`,copy:"Its old capability cannot be reused. Cixa will issue fresh approval-required access to a private local token file, with the same limits still in place.",label:"Let it spend",action:()=>post("/api/agents/rotate",{agent_id:agent.id,ttl_secs:86400,token_filename:tokenFilename},`${agent.name} can ask to spend again. Fresh access is approval-required.`)});
+  } else if (sessionExpired) {
+    confirmAction({title:`Let ${agent.name} spend again?`,copy:`This opens a new local spending session for ${durationMinutes(sessionTtl)}. Existing limits and approval rules still apply.`,label:"Let it spend",action:()=>post("/api/agents/arm-session",{agent_id:agent.id,ttl_secs:sessionTtl},`${agent.name} can spend inside its limits again.`)});
+  } else setAgentMode(agent,"approval_required");
+}
 function agentCard(agent) {
-  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const spendMode=["approval_required","bounded_autonomous"].includes(agent.mode); const active = !agent.revoked && spendMode && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":agent.mode==="observe"?"Observe only":sessionExpired&&spendMode?"Session expired":active?"Active":"Paused"; const sessionTtl=policy?.card_session_ttl_secs ?? 600; let primaryAction=null;if(agent.revoked||capabilityExpired)primaryAction=button("Rotate capability","quiet-button",()=>openRotateAgent(agent));else if(sessionExpired&&spendMode)primaryAction=button("Arm spending", "quiet-button",()=>confirmAction({title:"Arm this agent again?",copy:`This starts a new local spending session for ${durationMinutes(sessionTtl)}. Existing limits and approval rules still apply.`,label:"Arm spending",action:()=>post("/api/agents/arm-session",{agent_id:agent.id,ttl_secs:sessionTtl},`Agent session armed for ${durationMinutes(sessionTtl)}.`)}));else primaryAction=button(active?"Pause spending":spendMode?"Allow with approval":"Switch to approval mode",active?"secondary-button":"quiet-button",()=>setAgentMode(agent,active?"disabled":"approval_required"));
-  return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [node("div", {}, [node("h2", { text:agent.name }), node("p", { class:"agent-subtitle", text:title(agent.mode) })]), node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"progress-row" }, [node("span", { text:"Used or held against rolling limit" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } }), node("div", { class:"fact-list" }, [fact("Most at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session expires", when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [primaryAction, button("Manage limits", "quiet-button", () => openAgent(agent))])]);
+  const policy = state.overview.policies[agent.policy_id]; const used = agent.budget?.usage?.rolling_24h_amount?.minor ?? 0; const limit = policy?.max_rolling_24h?.minor ?? 0; const capabilityExpired=agent.expires_at <= Date.now()/1000; const sessionExpired=agent.broker_session_expires_at <= Date.now()/1000; const spendMode=["approval_required","bounded_autonomous"].includes(agent.mode); const active = !agent.revoked && spendMode && !capabilityExpired && !sessionExpired; const status=agent.revoked?"Revoked":capabilityExpired?"Capability expired":agent.mode==="observe"?"Observe only":sessionExpired&&spendMode?"Session expired":active?"Active":"Paused"; const sessionTtl=policy?.card_session_ttl_secs ?? 600;
+  const avatar=node("span",{class:"agent-avatar"},[svgIcon("icon-agents")]);
+  const identity=node("button",{type:"button",class:"agent-identity",onclick:()=>openAgent(agent),attrs:{"aria-label":`Open ${agent.name} settings`}},[avatar,node("span",{class:"agent-copy"},[node("h2",{text:agent.name}),node("span",{class:"agent-subtitle",text:agentDescription(agent.mode)})])]);
+  const allowance=button("Halve today's allowance","quiet-button agent-halve",()=>halveAgentAllowance(agent,policy));
+  const toggle=button(active?"Pause spending":"Let it spend",active?"secondary-button agent-toggle":"quiet-button agent-toggle",()=>active?setAgentMode(agent,"disabled"):restoreAgentSpending(agent,sessionExpired,sessionTtl));
+  return node("article", { class:"agent-card" }, [node("div", { class:"agent-head" }, [identity,node("span", { class:`state-badge ${active ? "success" : ""}`, text:status })]), node("div", { class:"agent-spend" }, [node("div", { class:"progress-row" }, [node("span", { text:"Used in the last 24 hours" }), node("strong", { text:`${money({minor:used,currency:policy?.primary_currency ?? "CAD"})} of ${money(policy?.max_rolling_24h)}` })]), node("progress", { class:"progress", value:limit ? Math.min(100,used/limit*100) : 0, max:100, attrs:{ "aria-label":`${agent.name} rolling-limit use` } })]), node("div", { class:"fact-list" }, [fact("Most it may spend at once", money(policy?.max_per_transaction)), fact("Purchases", String(agent.transaction_count ?? 0)), fact("Session ends", sessionExpired ? "Not armed" : when(agent.broker_session_expires_at))]), node("div", { class:"agent-actions" }, [allowance,toggle])]);
 }
 function fact(label, value) { return node("div", { class:"fact" }, [node("span", { text:label }), node("strong", { text:value })]); }
 function renderTrust() {
