@@ -848,15 +848,20 @@ def main() -> None:
     parser.add_argument("--checkout-runtime-directory")
     parser.add_argument("--checkout-profiles-directory")
     parser.add_argument("--checkout-browser-executable")
+    parser.add_argument("--bind-address", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--public-port", type=int)
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         raise SystemExit("port must be between 1024 and 65535")
+    public_port = args.public_port or args.port
+    if not 1024 <= public_port <= 65535:
+        raise SystemExit("public port must be between 1024 and 65535")
     state = DashboardState(
         args.socket_path,
         args.owner_token_file,
         args.access_token_file,
-        args.port,
+        public_port,
         args.agent_token_directory,
         args.cixa_binary,
         args.checkout_runtime_directory,
@@ -864,8 +869,8 @@ def main() -> None:
         args.checkout_browser_executable,
         args.agent_gid,
     )
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
-    print(f"owner dashboard listening on http://127.0.0.1:{args.port}")
+    server = http.server.ThreadingHTTPServer((args.bind_address, args.port), make_handler(state))
+    print(f"owner dashboard listening on {args.bind_address}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -12,13 +12,14 @@
 <p align="center">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2f6f8f?style=flat-square"></a>
   <img alt="Rust core" src="https://img.shields.io/badge/core-Rust-b85c38?style=flat-square&amp;logo=rust&amp;logoColor=white">
+  <img alt="Docker first" src="https://img.shields.io/badge/deploy-Docker%20Compose-397e9e?style=flat-square&amp;logo=docker&amp;logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20cloud-3a8f68?style=flat-square">
   <img alt="Unix socket transport" src="https://img.shields.io/badge/transport-Unix%20socket-536477?style=flat-square">
   <img alt="Project status: alpha" src="https://img.shields.io/badge/status-public%20alpha-c18b35?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="#try-the-demo">Demo</a> ·
+  <a href="#quick-start">Quick start</a> ·
   <a href="#owner-console">Screenshots</a> ·
   <a href="#connect-an-agent">Agent setup</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
@@ -35,7 +36,7 @@ Cixa sits between an autonomous agent and real money.
 
 An agent can ask to make a purchase. Cixa checks the amount, merchant, currency, checkout details, and the limits you set. Safe requests can continue, questionable ones wait for you, and anything ambiguous stops instead of guessing.
 
-Your agent does **not** receive your card number, account login, owner token, or permission to increase its own budget. Cixa runs locally, uses separate Unix sockets for agents and owner controls, and keeps a ledger of what happened.
+Your agent does **not** receive your card number, account login, owner token, or permission to increase its own budget. Cixa runs locally, uses separate Unix sockets for agents and owner controls, and keeps a ledger of what happened. Docker Compose is the primary deployment: it turns that separation into distinct Linux identities, filesystems, and volumes instead of asking you to recreate the boundary by hand.
 
 With a deliberately configured KOHO card, Cixa can also complete a real hosted-fields checkout for an approved merchant. The card exists only inside a short-lived owner-armed helper process. The agent supplies the shopping facts; Cixa independently checks the page, fills the isolated payment frame, submits once, then waits for you to confirm the result against KOHO. There is no private KOHO API or account scraping hiding underneath it.
 
@@ -63,28 +64,37 @@ Cixa gives those questions one small, explicit boundary. It can:
 - record an append-only ledger and tamper-evident audit chain;
 - stop all spending immediately from the CLI or owner console.
 
-## Try the demo
+## Quick start
 
-The demo is the easiest way to see the whole flow. It uses fake money, synthetic credentials, and a simulated provider. No account or API key is needed, and no real transaction is made.
-
-You will need:
-
-- Rust stable
-- Node.js 20 or newer
-- npm
-- Python 3.11 or newer
-- Chrome or Chromium for browser checks
+The supported path needs Docker Desktop or Docker Engine with Compose v2. You do not need a local Rust, Node.js, Python, or browser installation.
 
 ```bash
 git clone https://github.com/BedirT/cixa.git
 cd cixa
-npm ci
-./scripts/demo
+./scripts/cixa-docker up
+./scripts/cixa-docker dashboard-token
 ```
 
-The demo covers a normal bounded purchase, duplicate protection, an over-budget request, a recurring-payment attempt, a currency switch, a hostile checkout form, emergency stop, audit verification, and a secret-canary scan.
+Open `http://127.0.0.1:8765`, paste the printed dashboard token into the unlock screen, and create an agent from **Agents**. Use `default.token` as the token filename for the first agent.
 
-If Chrome is installed somewhere unusual, set `CIXA_BROWSER_EXECUTABLE` to its absolute path.
+Install the guidance skill on the machine where Codex or Claude Code runs, then generate the MCP entry:
+
+```bash
+./scripts/install-agent-skill --target all
+./scripts/cixa-docker agent-config default.token
+```
+
+Add the printed `mcpServers.cixa` object to your agent host. The MCP process starts as a disposable, network-disabled container and receives only the agent IPC volume. It cannot mount Cixa's owner state, dashboard credential, merchant profiles, payment session, audit key, or checkout browser.
+
+Useful lifecycle commands stay deliberately small:
+
+```bash
+./scripts/cixa-docker status
+./scripts/cixa-docker logs
+./scripts/cixa-docker down
+```
+
+`down` stops Cixa without deleting either named volume. Cixa does not include a casual destroy-data command because losing the authenticated ledger or an unresolved payment is not an ordinary cleanup operation.
 
 ## Owner console
 
@@ -121,17 +131,22 @@ The owner console is the human side of Cixa. It is intentionally small and pract
 
 The dashboard loads no CDN assets, analytics, or third-party scripts. It listens on loopback, keeps its access token separate from the broker owner token, and exchanges that token for a random per-process browser session.
 
-### Run the console locally
+### What Docker starts
 
-For the complete owner-side build and private directory setup, run:
+| Service | Identity | What it can access |
+| --- | --- | --- |
+| `cixa-init` | root, one shot | Initializes and permissions the two named volumes, then exits. It has no network and only the minimum filesystem capabilities needed for ownership setup. |
+| `cixa-broker` | UID `10000` | Private owner state, agent IPC volume, policy engine, ledger, controlled browser, and merchant network access. |
+| `cixa-console` | UID `10000` | Private owner state and agent token directory. Only its HTTP UI is published, and only on `127.0.0.1`. |
+| `cixa-mcp` | UID `10001` | Read-only agent IPC volume containing one scoped token and the Unix socket. It has no network and no owner volume. |
 
-```bash
-./scripts/setup-owner --data-dir "$HOME/.local/share/cixa"
-```
+The broker and console share the trusted owner identity because both perform owner-side work. They remain separate processes so the web surface does not supervise or contain the payment broker. The MCP bridge uses a different UID and a supplemental IPC group, which lets the kernel enforce the same boundary on macOS, Linux, and Docker Desktop's Linux VM.
 
-The script builds the Rust broker and browser adapter, installs a dedicated Chromium under the private Cixa directory, creates private owner and dashboard credentials, initializes the checkout helper, and prints the exact broker and console commands for your machine. It never asks for or stores a card number. Use `--skip-browser` only when you will supply another owner-controlled executable that passes Cixa's path checks.
+The owner volume is durable. It contains the authenticated state, owner and dashboard credentials, audit key, checkout profiles, and helper material. The agent volume contains only `cixa.sock` and capability files. Neither credential value is placed in Compose environment variables, image layers, or the repository.
 
-For real agent access, create the dedicated agent identity and IPC group from [Local deployment](docs/deployment.md), then run setup with both shared-boundary arguments:
+### Native installation
+
+Native deployment remains available as an advanced option for contributors and hosts that already manage separate service identities:
 
 ```bash
 ./scripts/setup-owner \
@@ -140,9 +155,7 @@ For real agent access, create the dedicated agent identity and IPC group from [L
   --agent-directory "/absolute/group-shared/cixa-agent"
 ```
 
-The printed broker command then exposes only the group socket, and the owner console writes new capability files as owner-readable, agent-group-readable `0640` files. It does not share the owner data, checkout profiles, browser, or payment session.
-
-Start the printed broker command, then start the printed owner-console command in another terminal. Open `http://127.0.0.1:8765` and unlock it with the contents of the printed `dashboard.token` path.
+It builds the same broker and adapter, installs a private Chromium, and prints matching commands. Unlike Docker, the native path requires you to create and maintain the separate agent UID, IPC group, file ownership, and service lifecycle yourself. See [Local deployment](docs/deployment.md).
 
 ## Use it with a KOHO card
 
@@ -159,74 +172,69 @@ For receiving money, copy the public third-party e-Transfer address shown by KOH
 
 The setup is intentionally a little deliberate. The sensitive half belongs to you; the repeatable shopping work belongs to the agent. Read the friendly [KOHO setup guide](docs/koho-setup.md) and the [deployment boundary](docs/deployment.md) before the first real purchase.
 
-### Start the broker manually
-
-After `scripts/setup-owner`, the controlled-checkout broker command has this shape:
-
-```bash
-target/release/cixa serve \
-  --data-dir "$HOME/.local/share/cixa" \
-  --checkout-runtime-dir "$HOME/.local/share/cixa/checkout-runtime" \
-  --checkout-profiles-dir "$HOME/.local/share/cixa/checkout-profiles" \
-  --node-path "$(command -v node)" \
-  --adapter-script "$PWD/packages/checkout-playwright/dist/index.js"
-```
-
-The owner console command has this shape:
-
-```bash
-python3 apps/owner-dashboard/server.py \
-  --socket-path "$HOME/.local/share/cixa/owner.sock" \
-  --owner-token-file "$HOME/.local/share/cixa/owner.token" \
-  --access-token-file "$HOME/.local/share/cixa/dashboard.token" \
-  --cixa-binary "$PWD/target/release/cixa" \
-  --checkout-runtime-directory "$HOME/.local/share/cixa/checkout-runtime" \
-  --checkout-profiles-directory "$HOME/.local/share/cixa/checkout-profiles" \
-  --checkout-browser-executable "/private/path/printed/by/setup-owner/chrome" \
-  --port 8765
-```
-
 ## How it fits together
 
-```mermaid
-flowchart LR
-  A["Software agent"] -->|"scoped capability"| I["MCP server or SDK"]
-  I -->|"local agent socket"| C["Cixa broker"]
-  O["Owner CLI or console"] -->|"separate owner socket"| C
-  C --> P["Policy and budget checks"]
-  C --> L["Ledger and audit chain"]
-  C --> S["Owner-armed secret helper"]
-  C --> X["Isolated checkout adapter"]
-  X --> M["Approved merchant and hosted fields"]
-  O --> K["KOHO app for balance and reconciliation"]
-```
+<p align="center">
+  <img src="docs/assets/cixa-architecture.svg" alt="Docker-first Cixa architecture separating the agent container, trusted owner services, controlled checkout browser, merchants, and KOHO reconciliation" width="1100">
+</p>
 
 The split matters. Agent integrations get the agent socket and one scoped capability token. They do not get the owner socket, data directory, payment credential, audit key, or dashboard handoff.
+
+### Architectural decisions
+
+These are product boundaries, not deployment trivia:
+
+| Decision | Why Cixa does it this way |
+| --- | --- |
+| Docker Compose is the default | A repeatable container boundary is easier to inspect and harder to accidentally weaken than hand-built local users, groups, runtimes, and browser installations. |
+| Owner and agent run as different UIDs | A behavioral skill cannot stop an unrestricted same-user agent from reading owner-readable files. Kernel credentials can. |
+| Agent IPC stays a Unix socket | Cixa has no public broker port. Peer credentials, filesystem ownership, bounded framing, and capability authentication all apply before an agent operation reaches the treasury. |
+| Capabilities are files, not environment secrets | Each token is scoped, expiring, revocable, hashed in state, and readable only through the IPC group. Compose carries a token filename, never its value. |
+| Owner state and agent IPC use different volumes | The agent can see its socket and token without seeing policy state, owner credentials, audit material, profiles, or the payment helper. |
+| The owner console and broker are separate processes | The loopback web UI can restart without becoming the payment daemon. It communicates through an independently authenticated owner socket. |
+| The MCP bridge has no network | Its job is only to translate agent tools into local Cixa RPC. Shopping remains with the agent; payment remains with the broker's isolated browser. |
+| The checkout browser belongs to Cixa | The agent never receives Playwright, CDP, DOM access, screenshots, traces, clipboard access, browser profiles, or payment-field values from the payment-critical process. |
+| Merchant automation is profile based | Generic DOM guessing is not safe around money. Every autonomous merchant needs owner-reviewed origins, hosted-field processors, selectors, and visible checkout evidence. |
+| Card access is owner armed and volatile | PAN, expiry, CVV, and cardholder data are piped into a short-lived helper and are never written to Cixa state, profiles, logs, receipts, or MCP output. |
+| KOHO stays manual | Cixa does not scrape an account, automate login, read one-time codes, or pretend a private API is supported. The owner supplies balance evidence and reconciles transactions in the official app. |
+| Browser success is not settlement | A submit can succeed while the network response is lost. Every real browser result stays unknown until owner reconciliation, and ambiguous execution is never retried. |
+| Receiving instructions are public, arrivals are not trusted | Agents may share an owner-approved receiving address and memo. Only owner-verified provider evidence can make incoming money spendable. |
+| Native deployment is advanced | It preserves the same model, but the operator owns UID separation, IPC groups, permissions, browser installation, and service supervision. |
 
 For a detailed tour, read [Architecture](docs/architecture.md), [Security model](docs/security-model.md), and the full [Threat model](THREAT_MODEL.md).
 
 ## Connect an agent
 
-Create an agent capability from the owner console, or while the broker is stopped:
+Create the agent in the owner console and choose a capability filename, such as `research-runner.token`. Then print a ready-to-paste MCP configuration:
 
 ```bash
-target/debug/cixa create-agent \
-  --data-dir .local \
-  --owner-token-file .local/owner.token \
-  --agent-token-file .local/research-runner.token \
-  --mode approval_required
+./scripts/cixa-docker agent-config research-runner.token
 ```
 
-Start the broker again, then choose whichever integration suits the agent.
+The generated command launches `cixa-mcp` on demand with `docker compose run --rm --no-deps -T`. The container runs as UID `10001`, has no network, mounts the agent volume read-only, and exits when the MCP session ends. Cixa must already be running through `./scripts/cixa-docker up`.
 
 ### MCP
 
-```bash
-npm run build
-
-CIXA_SOCKET_PATH="$PWD/.local/cixa.sock" \
-CIXA_AGENT_TOKEN_FILE="$PWD/.local/research-runner.token" \
-node packages/mcp-server/dist/index.js
+```json
+{
+  "mcpServers": {
+    "cixa": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "--project-directory",
+        "/absolute/path/to/cixa",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "-e",
+        "CIXA_AGENT_TOKEN_FILE=/run/cixa-agent/tokens/research-runner.token",
+        "cixa-mcp"
+      ]
+    }
+  }
+}
 ```
 
 The MCP server exposes the agent-safe surface for reading its budget, proposing or executing purchase intents, cancelling unexecuted intents, listing sanitized transactions, reading receiving instructions, and reading sanitized receipts. Owner actions never appear as MCP tools.
@@ -241,11 +249,13 @@ Cixa ships one Agent Skills-compatible package for Codex and Claude Code:
 
 It installs `cixa-payments` into `~/.codex/skills/` and `~/.claude/skills/`. The skill teaches an agent the exact purchase contract, state handling, no-retry rule, receiving flow, and credential boundary. It does not grant access by itself.
 
-Copy [`examples/mcp-agent-config.json`](examples/mcp-agent-config.json), replace its absolute paths, and add it to your agent host. For Claude Code, the same object can live in a project `.mcp.json`; for Codex, add the server through its MCP configuration. Give the MCP process only the agent socket and that agent's token file.
+For Claude Code, the generated object can live in a project `.mcp.json`. For Codex, add the same server through its MCP configuration. [`examples/mcp-agent-config.json`](examples/mcp-agent-config.json) remains the native-socket example.
 
-For a real card, run the agent integration under a distinct OS identity or container. This is not ceremony for ceremony's sake: an unrestricted coding agent running as the same user as the owner could read any owner-readable file. [Local deployment](docs/deployment.md) shows the safe socket, group, and service layout.
+If the whole agent already runs in another Compose stack, use the `agent` target from the supplied `Dockerfile`, attach only the `cixa-agent-ipc` volume, run as a non-owner UID with supplemental GID `12000`, and keep the owner volume absent. [Local deployment](docs/deployment.md) documents the invariant rather than requiring one agent framework.
 
 ### TypeScript
+
+The SDKs are useful when you are building a dedicated agent service inside the isolated agent container. They are not a reason to mount Cixa's owner state:
 
 ```ts
 import { BrokerClient } from "cixa-sdk";
@@ -300,13 +310,30 @@ Before connecting anything beyond the simulator, read [Security](SECURITY.md), [
 
 ## Development
 
+The Docker release path has its own end-to-end gate:
+
+```bash
+./scripts/verify-container
+```
+
+It builds both image targets, initializes fresh named volumes, starts the broker and console, checks the loopback UI, creates a scoped capability, and calls Cixa through a network-disabled MCP container under the separate agent UID. It uses synthetic state, no real transaction is made, and it removes its isolated test volumes afterward.
+
+For fast local development without a container build, install Rust stable, Node.js 20 or newer, npm, Python 3.11 or newer, and Chrome or Chromium. The simulator never touches a real provider:
+
+```bash
+npm ci
+./scripts/demo
+```
+
+The demo covers a bounded purchase, duplicate protection, budget denial, recurring-payment denial, currency changes, hostile checkout evidence, emergency stop, audit verification, and secret-canary scanning.
+
 Run the full local verification gate with:
 
 ```bash
 ./scripts/verify
 ```
 
-The full gate checks formatting, Rust and SDK builds, tests, fuzz-harness compilation, package installation, persisted daemon behavior, the owner console, adversarial scenarios, documentation, dependency licenses, SBOM generation, vulnerability scans, and secret canaries.
+The local gate checks formatting, Rust and SDK builds, tests, fuzz-harness compilation, package installation, persisted daemon behavior, the owner console, adversarial scenarios, container configuration, documentation, dependency licenses, SBOM generation, vulnerability scans, and secret canaries. Run both gates before publishing a Docker image or release tag.
 
 It expects the pinned Python build tools from `requirements-build.lock`, plus `pip-audit` 2.9.0, `cargo-audit` 0.22.2, and `gitleaks` 8.30.1.
 

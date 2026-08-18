@@ -1,31 +1,27 @@
 # Agent Integration
 
-## Start the Broker
+## Start Cixa
 
 ```bash
-target/debug/cixa init --data-dir .local --owner-token-file .local/owner.token
-target/debug/cixa create-agent --data-dir .local --owner-token-file .local/owner.token \
-  --agent-token-file .local/agent.token --mode bounded_autonomous
-target/debug/cixa serve --data-dir .local
+./scripts/cixa-docker up
+./scripts/cixa-docker dashboard-token
 ```
 
-Those compact commands are for the simulator. A manual card requires the controlled-checkout flags, an agent socket and token outside the private data directory, an explicit IPC group, and an agent process under a different UID. Use the exact layout in [deployment.md](deployment.md). The broker checks peer identity on every manual-provider request, including when the owner switches provider mode after startup.
+Open the loopback owner console, create an agent, and choose a capability filename. The console writes the secret directly into the agent IPC volume. The browser never receives or displays it.
 
-The daemon creates a bounded agent Unix-domain socket at `.local/cixa.sock` and an independently admitted owner control socket at `.local/owner.sock`. It does not bind a TCP port. An agent container must receive only `cixa.sock` and a scoped token file or brokered IPC handle, never `owner.sock`, the data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
+The Compose deployment creates a bounded agent Unix-domain socket in `cixa-agent-ipc` and an independently admitted owner socket in `cixa-owner-data`. It does not bind a broker TCP port. The agent-side MCP container mounts only the first volume, read-only. It never receives the owner socket, data directory, owner UI session, browser debugging port, secret helper, raw audit files, or provider credentials.
 
 ## MCP
 
-Build the workspace and start the server as a child process of an MCP host:
+Print the containerized MCP configuration for the token filename you created:
 
 ```bash
-npm ci
-npm run build
-CIXA_SOCKET_PATH="$PWD/.local/cixa.sock" \
-CIXA_AGENT_TOKEN_FILE="$PWD/.local/agent.token" \
-node packages/mcp-server/dist/index.js
+./scripts/cixa-docker agent-config research-runner.token
 ```
 
-The MCP server uses the maintained `@modelcontextprotocol/server` v2 SDK and stdio. stdout is reserved for the protocol; diagnostics go to stderr. Zod schemas are strict and bounded. Owner operations are not registered.
+The generated entry starts `cixa-mcp` through Compose as a disposable UID `10001` container. It has no network, no owner volume, a read-only root filesystem, and a read-only agent IPC mount. The MCP server uses the maintained `@modelcontextprotocol/server` v2 SDK and stdio. stdout is reserved for the protocol; diagnostics go to stderr. Zod schemas are strict and bounded. Owner operations are not registered.
+
+For a custom containerized agent, reproduce the `cixa-mcp` service boundary in `compose.yaml` rather than copying capability values into environment variables. [Docker deployment](docker.md) documents the volume and identity contract.
 
 ## TypeScript SDK
 
@@ -78,7 +74,7 @@ The canonical skill uses the Agent Skills `SKILL.md` format supported by Codex a
 
 Install only the host you use with `--target codex` or `--target claude`. Existing skills are never overwritten unless you pass `--force` after reviewing the destination. The installed skill contains the exact purchase contract, state table, owner-message examples, receiving flow, and hard credential boundaries.
 
-Skills are guidance, not authority. MCP configuration grants the actual capability. Start from [`examples/mcp-agent-config.json`](../examples/mcp-agent-config.json), replace all paths with absolute paths, and expose only the group-shared agent socket and one token file. Claude Code can use the object as a project `.mcp.json`; other MCP hosts use the equivalent server entry.
+Skills are guidance, not authority. The scoped file and broker policy grant the actual capability. Use `scripts/cixa-docker agent-config` for the default deployment. [`examples/mcp-agent-config.json`](../examples/mcp-agent-config.json) is intentionally the advanced native-socket example.
 
 ## Safe Failure
 

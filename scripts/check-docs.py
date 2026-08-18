@@ -13,6 +13,8 @@ REQUIRED = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "LICENSE",
+    "Dockerfile",
+    "compose.yaml",
     "docs/research.md",
     "docs/architecture.md",
     "docs/security-model.md",
@@ -24,6 +26,7 @@ REQUIRED = [
     "docs/incident-response.md",
     "docs/coverage.md",
     "docs/deployment.md",
+    "docs/docker.md",
     "docs/koho-setup.md",
     "docs/owner-console-plan.md",
     "skills/cixa-payments/SKILL.md",
@@ -32,6 +35,7 @@ REQUIRED = [
     "docs/adr/0001-core-boundary.md",
     "docs/adr/0002-secret-handling.md",
     "docs/adr/0003-checkout-trust.md",
+    "docs/assets/cixa-architecture.svg",
 ]
 
 missing = [path for path in REQUIRED if not (ROOT / path).is_file()]

@@ -32,6 +32,10 @@ Completed for the local laboratory. Rust tests, daemon integration, SDK protocol
 
 Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO setup, controlled-checkout runbook, owner bootstrap, Codex and Claude Code skill package, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Package publication, account creation, merchant-profile acceptance, and real-money tests remain owner-controlled actions.
 
+## Checkpoint 9 - Docker-First Deployment
+
+Completed. Multi-stage owner and agent images, fixed separate identities, a one-shot volume initializer, separate owner and agent IPC volumes, loopback-only console, health checks, network-disabled MCP bridge, lifecycle wrapper, containerized MCP smoke test, Docker runbook, and a designed SVG architecture diagram make Compose the primary supported installation. Native service deployment remains an advanced compatibility path.
+
 ## Release Gate
 
-Run `./scripts/verify` from a clean checkout before every push. Before public release, a human must review the exact files listed in the final report, run advisory and static-analysis tools locally, audit dependency licenses, and decide whether a formal payment-security assessment is required.
+Run `./scripts/verify` and `./scripts/verify-container` from a clean checkout before every Docker image or release push. Before public release, a human must review the exact files listed in the final report, run advisory and static-analysis tools locally, audit dependency licenses and image contents, and decide whether signing, provenance attestations, hosted image scanning, and a formal payment-security assessment are required.

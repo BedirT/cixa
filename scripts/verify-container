@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT="cixa-verify-$$"
+CIXA_DASHBOARD_PORT="$(python3 - <<'PY'
+import socket
+
+channel = socket.socket()
+channel.bind(("127.0.0.1", 0))
+print(channel.getsockname()[1])
+channel.close()
+PY
+)"
+export CIXA_DASHBOARD_PORT
+COMPOSE=(docker compose --project-directory "$ROOT" --project-name "$PROJECT")
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+docker info >/dev/null
+"${COMPOSE[@]}" config --quiet
+"${COMPOSE[@]}" --profile agent build cixa-broker cixa-mcp
+"${COMPOSE[@]}" up --detach --wait cixa-console
+
+dashboard_status="$(curl --fail --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${CIXA_DASHBOARD_PORT:-8765}/")"
+if [[ "$dashboard_status" != "200" ]]; then
+  printf 'owner console returned HTTP %s\n' "$dashboard_status" >&2
+  exit 1
+fi
+
+"${COMPOSE[@]}" exec --no-TTY cixa-broker cixa create-agent \
+  --data-dir /var/lib/cixa \
+  --owner-token-file /var/lib/cixa/owner.token \
+  --agent-token-file /run/cixa-agent/tokens/container-test.token \
+  --agent-gid 12000 \
+  --name container-test \
+  --mode approval_required \
+  --ttl-secs 600 >/dev/null
+
+CIXA_DOCKER_PROJECT="$PROJECT" node "$ROOT/tests/container-mcp-smoke.mjs"
+printf '%s\n' 'Cixa Docker owner, console, isolated agent, and MCP assertions passed.'

@@ -1,0 +1,123 @@
+#!/bin/sh
+set -eu
+
+DATA_DIR="${CIXA_DATA_DIR:-/var/lib/cixa}"
+IPC_DIR="${CIXA_AGENT_DIRECTORY:-/run/cixa-agent}"
+TOKEN_DIR="$IPC_DIR/tokens"
+OWNER_UID="${CIXA_OWNER_UID:-10000}"
+OWNER_GID="${CIXA_OWNER_GID:-10000}"
+IPC_GID="${CIXA_IPC_GID:-12000}"
+RUNTIME_DIR="$DATA_DIR/checkout-runtime"
+PROFILES_DIR="$DATA_DIR/checkout-profiles"
+
+initialize() {
+  if [ "$(id -u)" -ne 0 ]; then
+    printf '%s\n' 'container initialization must run as root' >&2
+    exit 1
+  fi
+  umask 077
+  mkdir -p "$DATA_DIR" "$RUNTIME_DIR" "$PROFILES_DIR" "$IPC_DIR" "$TOKEN_DIR"
+  chown "$OWNER_UID:$OWNER_GID" "$DATA_DIR" "$RUNTIME_DIR" "$PROFILES_DIR"
+  chmod 0700 "$DATA_DIR" "$RUNTIME_DIR" "$PROFILES_DIR"
+  chown "$OWNER_UID:$IPC_GID" "$IPC_DIR" "$TOKEN_DIR"
+  chmod 0750 "$IPC_DIR" "$TOKEN_DIR"
+
+  if [ -f "$DATA_DIR/state.json" ] && [ ! -f "$DATA_DIR/owner.token" ]; then
+    printf '%s\n' 'owner state exists but owner token is missing' >&2
+    exit 1
+  fi
+  if [ ! -f "$DATA_DIR/state.json" ] && [ -f "$DATA_DIR/owner.token" ]; then
+    printf '%s\n' 'owner token exists but owner state is missing' >&2
+    exit 1
+  fi
+  if [ ! -f "$DATA_DIR/state.json" ]; then
+    cixa init \
+      --data-dir "$DATA_DIR" \
+      --owner-token-file "$DATA_DIR/owner.token" \
+      --owner-name docker-owner \
+      --balance-minor 1 >/dev/null
+  fi
+  if [ ! -f "$DATA_DIR/dashboard.token" ]; then
+    python3 - "$DATA_DIR/dashboard.token" <<'PY'
+import os
+import secrets
+import sys
+
+path = sys.argv[1]
+descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, (secrets.token_hex(32) + "\n").encode("ascii"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  fi
+  if [ ! -f "$RUNTIME_DIR/helper.key" ] && [ ! -f "$RUNTIME_DIR/helper.id" ]; then
+    cixa init-helper --helper-dir "$RUNTIME_DIR" >/dev/null
+  elif [ ! -f "$RUNTIME_DIR/helper.key" ] || [ ! -f "$RUNTIME_DIR/helper.id" ]; then
+    printf '%s\n' 'checkout helper initialization is incomplete' >&2
+    exit 1
+  fi
+
+  chown -R "$OWNER_UID:$OWNER_GID" "$DATA_DIR"
+  chmod 0700 "$DATA_DIR" "$RUNTIME_DIR" "$PROFILES_DIR"
+  find "$DATA_DIR" -type f -exec chmod 0600 {} +
+  chown "$OWNER_UID:$IPC_GID" "$IPC_DIR" "$TOKEN_DIR"
+  chmod 0750 "$IPC_DIR" "$TOKEN_DIR"
+  find "$TOKEN_DIR" -type f -exec chown "$OWNER_UID:$IPC_GID" {} + -exec chmod 0640 {} +
+  printf '%s\n' 'Cixa container volumes are initialized.'
+}
+
+case "${1:-}" in
+  init)
+    initialize
+    ;;
+  broker)
+    mkdir -p "$HOME"
+    exec cixa serve \
+      --data-dir "$DATA_DIR" \
+      --socket "$IPC_DIR/cixa.sock" \
+      --agent-gid "$IPC_GID" \
+      --checkout-runtime-dir "$RUNTIME_DIR" \
+      --checkout-profiles-dir "$PROFILES_DIR" \
+      --node-path /usr/local/bin/node \
+      --adapter-script /opt/cixa/packages/checkout-playwright/dist/index.js
+    ;;
+  console)
+    mkdir -p "$HOME"
+    exec python3 /opt/cixa/apps/owner-dashboard/server.py \
+      --socket-path "$DATA_DIR/owner.sock" \
+      --owner-token-file "$DATA_DIR/owner.token" \
+      --access-token-file "$DATA_DIR/dashboard.token" \
+      --agent-token-directory "$TOKEN_DIR" \
+      --agent-gid "$IPC_GID" \
+      --cixa-binary /usr/local/bin/cixa \
+      --checkout-runtime-directory "$RUNTIME_DIR" \
+      --checkout-profiles-directory "$PROFILES_DIR" \
+      --checkout-browser-executable /opt/cixa/browser/chrome \
+      --bind-address 0.0.0.0 \
+      --public-port "${CIXA_DASHBOARD_PUBLIC_PORT:-8765}" \
+      --port 8765
+    ;;
+  mcp)
+    if [ ! -S "${CIXA_SOCKET_PATH:-$IPC_DIR/cixa.sock}" ]; then
+      printf '%s\n' 'Cixa agent socket is unavailable. Start the owner stack first.' >&2
+      exit 1
+    fi
+    if [ ! -r "${CIXA_AGENT_TOKEN_FILE:-$TOKEN_DIR/default.token}" ]; then
+      printf 'Cixa capability is unavailable at %s. Create the agent in the owner console first.\n' "${CIXA_AGENT_TOKEN_FILE:-$TOKEN_DIR/default.token}" >&2
+      exit 1
+    fi
+    exec node /opt/cixa/packages/mcp-server/dist/index.js
+    ;;
+  dashboard-token)
+    if [ ! -r "$DATA_DIR/dashboard.token" ]; then
+      printf '%s\n' 'dashboard token is unavailable; start Cixa first' >&2
+      exit 1
+    fi
+    exec cat "$DATA_DIR/dashboard.token"
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac

@@ -2,7 +2,7 @@
 
 ## Current Checkpoint
 
-Checkpoint 9, controlled KOHO checkout and agent packaging verification.
+Checkpoint 10, Docker-first deployment and containerized agent boundary verification.
 
 ## Completed
 
@@ -19,10 +19,12 @@ Checkpoint 9, controlled KOHO checkout and agent packaging verification.
 - The owner console manages KOHO reference metadata, card-session lifetime and operation limits, structured checkout profiles, receiving instructions, reconciliation, and group-shared agent capability files without persisting card data.
 - The setup script builds the broker and adapter, installs a private Playwright Chromium, initializes private owner state, and prints matching broker and console commands.
 - The Agent Skills-compatible `cixa-payments` package installs for Codex and Claude Code and documents the exact purchase contract, receiving flow, ambiguous-state handling, and no-retry rule.
+- Docker Compose is the primary deployment, with separate owner and agent images, fixed UIDs, separate owner and IPC volumes, a loopback-only console, a network-disabled MCP bridge, read-only runtime filesystems, bounded resources, and an end-to-end container gate.
+- The README and architecture documentation use a designed SVG system diagram and record the container, storage, IPC, credential, browser, provider, receiving, and reconciliation decisions explicitly.
 
 ## Verification Evidence
 
-The canonical command is `./scripts/verify`. It runs Rust formatting, tests and clippy, TypeScript build and tests, Python tests and compilation, daemon integration, one-shot and multi-operation helper flows, responsive owner-console browser checks, adversarial demo assertions, documentation validation, package and skill installation, dependency and license checks, SBOM generation, and generated-artifact secret-canary scanning.
+The canonical commands are `./scripts/verify` and `./scripts/verify-container`. Together they cover Rust formatting, tests and clippy, TypeScript build and tests, Python tests and compilation, daemon integration, one-shot and multi-operation helper flows, responsive owner-console browser checks, adversarial demo assertions, documentation validation, package and skill installation, dependency and license checks, SBOM generation, generated-artifact secret-canary scanning, both image targets, fresh-volume initialization, service health, loopback UI, separate agent UID, and containerized MCP calls.
 
 ## Security Findings
 

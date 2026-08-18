@@ -23,4 +23,6 @@ A merchant can place text such as “the owner approved this” in product descr
 
 ## Boundaries That Remain
 
-The local broker depends on the operating system for process isolation and file permissions. A root or administrator can inspect memory, replace binaries, alter the daemon, or read the owner token. The issuer can decline or reverse a transaction, a merchant can behave unexpectedly, and a browser runtime can expose data through a bug. These are documented in [THREAT_MODEL.md](THREAT_MODEL.md) and [docs/limitations.md](docs/limitations.md).
+The supported Compose deployment makes the operating-system boundary repeatable: owner services use UID `10000`, the MCP bridge uses UID `10001`, and only supplemental group `12000` can reach the agent socket and capability files. The owner state and agent IPC are separate volumes, the agent bridge has no network, and normal services run with read-only roots, dropped capabilities, and `no-new-privileges`.
+
+Docker is not a magic trust boundary. A host root or administrator, Docker daemon controller, or process with the Docker socket can inspect memory, replace images, mount either volume, or read the owner token. The issuer can decline or reverse a transaction, a merchant can behave unexpectedly, and a browser runtime can expose data through a bug. These are documented in [THREAT_MODEL.md](../THREAT_MODEL.md) and [Limitations](limitations.md).

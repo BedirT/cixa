@@ -1,6 +1,8 @@
 # Local Deployment
 
-The broker and the agent should run as separate OS identities or containers. The agent receives only the scoped interface and token file. It must not mount the broker data directory, secret-helper socket, owner dashboard session, raw audit files, or browser debugging ports.
+Docker Compose is the primary supported deployment. Start with [Docker deployment](docker.md) and the repository's `compose.yaml`. It supplies separate owner and agent identities, a private owner volume, a narrow agent IPC volume, a packaged checkout browser, loopback-only owner UI, health checks, and a network-disabled MCP bridge.
+
+Native deployment is an advanced alternative. The broker and the agent must still run as separate OS identities. The agent receives only the scoped interface and token file. It must not mount the broker data directory, secret-helper socket, owner dashboard session, raw audit files, or browser debugging ports.
 
 ## macOS launchd
 
@@ -75,11 +77,11 @@ The browser executable, Node binary, adapter script, runtime directory, and prof
 
 The current reference binary intentionally fails closed on Windows because it does not yet ship a named-pipe implementation. Do not substitute a public TCP listener. A Windows service adapter must bind a named pipe with a DACL granting only the broker service and explicitly authorized agent identity, use the same v1 envelope, and keep the data directory and Credential Manager access owner-only. This limitation is a release gate for Windows rather than a hidden unsafe fallback.
 
-## Containerized Agent
+## Custom Containerized Agent
 
-Run the agent with a read-only root filesystem, no host network, no Docker socket, no browser remote-debugging port, and only a narrow socket proxy or mounted token file. Keep the broker on the host or a separate service account. The owner dashboard remains on loopback and is never mounted into the agent container.
+Start from the supplied `agent` image target whenever possible. For a custom agent image, use a read-only root filesystem, no Docker socket, no browser remote-debugging port, and only the read-only `cixa-agent-ipc` volume. The shopping agent may need ordinary egress, but its Cixa MCP sidecar does not and should use `network_mode: none`. Keep the broker in the supplied owner service or a separate owner account. The owner dashboard remains on loopback and is never mounted into the agent container.
 
-For Codex CLI, Claude Code, or another general coding agent, a container or separate login is the easiest honest boundary. Install the `cixa-payments` skill and MCP server inside that agent environment, mount only `/run/cixa-agent/cixa.sock` and its capability token, and leave the repository checkout, owner data, dashboard browser profile, and checkout runtime outside. A skill can teach correct behavior, but it cannot prevent an unrestricted same-user agent from reading owner-readable files.
+For Codex CLI, Claude Code, or another general coding agent, `./scripts/cixa-docker agent-config TOKEN_FILENAME` prints a ready-to-paste MCP entry. Install the `cixa-payments` skill on the agent host, mount only `/run/cixa-agent/cixa.sock` and its capability token, and leave owner data, the dashboard session, browser profile, and checkout runtime absent. A skill can teach correct behavior, but it cannot replace this isolation.
 
 ## Owner Dashboard
 
@@ -93,7 +95,7 @@ No TCP mode is shipped. If a future deployment adds one, it must require explici
 
 ## Local Verification Policy
 
-This solo-developer repository intentionally has no hosted GitHub Actions workflow. The owner runs `./scripts/verify` locally before each push. This is an explicit resource and workflow choice, not evidence that hosted checks passed; a future multi-contributor or public release should reassess hosted branch protection and independent build infrastructure.
+This solo-developer repository intentionally has no hosted GitHub Actions workflow. The owner runs `./scripts/verify` and `./scripts/verify-container` before a Docker image or release is published. This is an explicit resource and workflow choice, not evidence that hosted checks passed; a future multi-contributor release should reassess hosted branch protection, image signing, provenance attestations, and independent build infrastructure.
 
 ## Durable Record Quotas
 

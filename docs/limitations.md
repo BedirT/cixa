@@ -16,4 +16,5 @@
 - The current browser reference is a safe-denial boundary, not a claim of universal Playwright payment isolation.
 - Browser submission cannot authenticate issuer settlement. Every real controlled submission requires owner reconciliation and must never be automatically retried after timeout or ambiguity.
 - Codex, Claude Code, or another unrestricted agent running under the owner's OS identity is not isolated by file permissions. Use a separate identity or container; the skill is behavioral guidance, not a sandbox.
+- Docker reduces setup mistakes but does not protect an owner who mounts `cixa-owner-data`, the Docker socket, host credentials, or a privileged host filesystem into the agent. The supplied Compose boundary is part of the security model.
 - Local IPC protects against ordinary accidental exposure with OS permissions. It is not a defense against a privileged local attacker.

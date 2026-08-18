@@ -21,10 +21,11 @@ The agent never gets the KOHO password, recovery details, full card number, expi
 From the repository:
 
 ```bash
-./scripts/setup-owner --data-dir "$HOME/.local/share/cixa"
+./scripts/cixa-docker up
+./scripts/cixa-docker dashboard-token
 ```
 
-Start the broker and owner console with the two commands printed by the script. Open `http://127.0.0.1:8765`, unlock the console, and go to **Trust → Provider**.
+Open `http://127.0.0.1:8765`, unlock the console, and go to **Trust → Provider**. The supplied Compose stack already runs the broker and MCP bridge under different UIDs and keeps the owner and agent volumes separate. Do not replace those mounts with one shared data directory.
 
 ### 1. Connect the manual provider
 

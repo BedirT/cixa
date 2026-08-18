@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+build
+coverage
+demo-state
+node_modules
+target
+**/target
+**/dist
+**/*.tsbuildinfo
+*.log
+*.token
+.DS_Store

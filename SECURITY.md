@@ -25,6 +25,7 @@ Include the affected version, platform, exact command, sanitized logs, threat-mo
 - The manual provider stores references, masked last-four metadata, and policy state only. It never persists PAN, expiry, or CVV.
 - A card entered in the owner console is piped to a short-lived local helper. The helper holds it only in process memory until its time or checkout-count limit, and the controlled browser is never exposed to the agent.
 - Real checkout submissions remain unknown until the owner reconciles them in the issuer's official application. Never retry an unknown submission.
+- The supported Compose file separates owner state from agent IPC and never mounts the Docker socket. Treat changes to service UIDs, groups, volumes, privileges, networking, or read-only filesystems as security-sensitive changes.
 - A compromised OS administrator or kernel can bypass local process boundaries. An external append-only sink is required for stronger tamper evidence.
 
 ## Incident Basics
