@@ -30,7 +30,7 @@ Completed for the local laboratory. Rust tests, daemon integration, SDK protocol
 
 ## Checkpoint 8 - Documentation and Release Readiness
 
-Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO setup, controlled-checkout runbook, owner bootstrap, Codex and Claude Code skill package, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Package publication, account creation, merchant-profile acceptance, and real-money tests remain owner-controlled actions.
+Completed for human review. The agent-first README, technical architecture diagram, security policy, threat model, research, ADRs, KOHO setup, controlled-checkout runbook, owner bootstrap, Codex and Claude Code skill package, AGPL-3.0-only release files, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Package publication, account creation, merchant-profile acceptance, and real-money tests remain owner-controlled actions.
 
 ## Checkpoint 9 - Docker-First Deployment
 

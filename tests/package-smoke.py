@@ -177,11 +177,14 @@ with tempfile.TemporaryDirectory(prefix="cixa-packages-") as raw_directory:
     wheel = next(python_dist.glob("*.whl"))
     source = next(python_dist.glob("*.tar.gz"))
     with zipfile.ZipFile(wheel) as archive:
-        if not any(name.endswith("/licenses/LICENSE") for name in archive.namelist()):
-            raise SystemExit("Python wheel is missing the Apache license")
+        license_files = [name for name in archive.namelist() if name.endswith("/licenses/LICENSE")]
+        if not license_files or b"GNU AFFERO GENERAL PUBLIC LICENSE" not in archive.read(license_files[0]):
+            raise SystemExit("Python wheel is missing the AGPLv3 license")
     with tarfile.open(source, "r:gz") as archive:
-        if not any(name.endswith("/LICENSE") for name in archive.getnames()):
-            raise SystemExit("Python sdist is missing the Apache license")
+        license_files = [name for name in archive.getnames() if name.endswith("/LICENSE")]
+        license_member = archive.extractfile(license_files[0]) if license_files else None
+        if license_member is None or b"GNU AFFERO GENERAL PUBLIC LICENSE" not in license_member.read():
+            raise SystemExit("Python sdist is missing the AGPLv3 license")
     virtualenv = directory / "venv"
     subprocess.run(["python3", "-m", "venv", str(virtualenv)], check=True)
     subprocess.run(

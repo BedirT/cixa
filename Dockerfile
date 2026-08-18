@@ -66,9 +66,7 @@ RUN apt-get update \
 COPY --from=rust-builder /src/target/release/cixa /usr/local/bin/cixa
 COPY apps/owner-dashboard /opt/cixa/apps/owner-dashboard
 COPY scripts/container-entrypoint /usr/local/bin/cixa-container
-RUN chmod 0755 /usr/local/bin/cixa /usr/local/bin/cixa-container \
-    && find /opt/cixa -type d -exec chmod 0755 {} + \
-    && find /opt/cixa -type f -exec chmod go-w {} +
+RUN chmod 0755 /usr/local/bin/cixa /usr/local/bin/cixa-container
 
 USER 10000:10000
 CMD ["broker"]

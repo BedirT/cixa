@@ -2,7 +2,7 @@
 
 ## Current Checkpoint
 
-Checkpoint 10, Docker-first deployment and containerized agent boundary verification.
+Checkpoint 10, public-release documentation, AGPLv3 licensing, and Docker-first agent onboarding.
 
 ## Completed
 
@@ -20,7 +20,8 @@ Checkpoint 10, Docker-first deployment and containerized agent boundary verifica
 - The setup script builds the broker and adapter, installs a private Playwright Chromium, initializes private owner state, and prints matching broker and console commands.
 - The Agent Skills-compatible `cixa-payments` package installs for Codex and Claude Code and documents the exact purchase contract, receiving flow, ambiguous-state handling, and no-retry rule.
 - Docker Compose is the primary deployment, with separate owner and agent images, fixed UIDs, separate owner and IPC volumes, a loopback-only console, a network-disabled MCP bridge, read-only runtime filesystems, bounded resources, and an end-to-end container gate.
-- The README and architecture documentation use a designed SVG system diagram and record the container, storage, IPC, credential, browser, provider, receiving, and reconciliation decisions explicitly.
+- The README starts with a structured Codex and Claude Code connection path, explains the agent's tool sequence and owner handoffs, and uses a technical SVG for the numbered request path, storage access, reconciliation, and architectural decisions.
+- Cixa and each publishable package use AGPL-3.0-only metadata and the complete GNU license text. The owner console visibly links to the corresponding source repository.
 
 ## Verification Evidence
 

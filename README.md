@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2f6f8f?style=flat-square"></a>
+  <a href="LICENSE"><img alt="AGPL version 3 license" src="https://img.shields.io/badge/license-AGPLv3-2f6f8f?style=flat-square"></a>
   <img alt="Rust core" src="https://img.shields.io/badge/core-Rust-b85c38?style=flat-square&amp;logo=rust&amp;logoColor=white">
   <img alt="Docker first" src="https://img.shields.io/badge/deploy-Docker%20Compose-397e9e?style=flat-square&amp;logo=docker&amp;logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20cloud-3a8f68?style=flat-square">
@@ -19,9 +19,9 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
+  <a href="#quick-start-connect-an-agent">Agent setup</a> ·
+  <a href="#how-an-agent-uses-cixa">Agent flow</a> ·
   <a href="#owner-console">Screenshots</a> ·
-  <a href="#connect-an-agent">Agent setup</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
@@ -40,7 +40,10 @@ Your agent does **not** receive your card number, account login, owner token, or
 
 With a deliberately configured KOHO card, Cixa can also complete a real hosted-fields checkout for an approved merchant. The card exists only inside a short-lived owner-armed helper process. The agent supplies the shopping facts; Cixa independently checks the page, fills the isolated payment frame, submits once, then waits for you to confirm the result against KOHO. There is no private KOHO API or account scraping hiding underneath it.
 
-The name comes from Laz. **Cixa** means fortress or castle. It is pronounced roughly **JEE-kha**, with the `x` sounding like the `ch` in *Bach* or *loch*.
+<details>
+  <summary><strong>A note on the name</strong></summary>
+  <p><em>Cixa</em> means fortress or castle in Laz. It is pronounced roughly <strong>JEE-kha</strong>, with the <code>x</code> sounding like the <code>ch</code> in <em>Bach</em> or <em>loch</em>.</p>
+</details>
 
 ## Why use it?
 
@@ -64,9 +67,11 @@ Cixa gives those questions one small, explicit boundary. It can:
 - record an append-only ledger and tamper-evident audit chain;
 - stop all spending immediately from the CLI or owner console.
 
-## Quick start
+## Quick start: connect an agent
 
-The supported path needs Docker Desktop or Docker Engine with Compose v2. You do not need a local Rust, Node.js, Python, or browser installation.
+This is the normal setup for Codex, Claude Code, or another MCP-capable agent. You need Docker Desktop or Docker Engine with Compose v2. Cixa packages Rust, Node.js, Python, and its private checkout browser inside the images.
+
+### 1. Start the owner side
 
 ```bash
 git clone https://github.com/BedirT/cixa.git
@@ -75,18 +80,89 @@ cd cixa
 ./scripts/cixa-docker dashboard-token
 ```
 
-Open `http://127.0.0.1:8765`, paste the printed dashboard token into the unlock screen, and create an agent from **Agents**. Use `default.token` as the token filename for the first agent.
+Open `http://127.0.0.1:8765` and unlock it with the printed token. This is the owner console. It is where you configure money, approve decisions, and stop spending. The agent never gets this token or this interface.
 
-Install the guidance skill on the machine where Codex or Claude Code runs, then generate the MCP entry:
+### 2. Create the agent capability
+
+In **Agents**, create one agent for the agent runtime you are connecting:
+
+- give it a recognizable name, such as `Research Runner`;
+- start with **Approval required**;
+- set the purchase, session, rolling 24-hour, and lifetime limits;
+- choose a capability filename, such as `research-runner.token`.
+
+Cixa writes the capability directly into the private agent IPC volume. The secret is not shown in the page, copied into chat, or placed in an environment variable. Remember the filename because the MCP launcher needs it.
+
+### 3. Install the payment skill
+
+Install the guidance on the same machine that runs your agent:
 
 ```bash
 ./scripts/install-agent-skill --target all
-./scripts/cixa-docker agent-config default.token
 ```
 
-Add the printed `mcpServers.cixa` object to your agent host. The MCP process starts as a disposable, network-disabled container and receives only the agent IPC volume. It cannot mount Cixa's owner state, dashboard credential, merchant profiles, payment session, audit key, or checkout browser.
+Use `--target codex` or `--target claude` if you only use one. The skill teaches the purchase contract and the no-retry rules. It does not grant spending authority. The capability file and the broker policy do that.
 
-Useful lifecycle commands stay deliberately small:
+### 4. Add the Cixa MCP server
+
+For **Claude Code**, generate the project configuration and place the printed `mcpServers.cixa` entry in `.mcp.json`:
+
+```bash
+./scripts/cixa-docker agent-config research-runner.token
+```
+
+For **Codex**, register the same disposable MCP container directly:
+
+```bash
+CIXA_ROOT="$(pwd)"
+codex mcp add cixa -- docker compose \
+  --project-directory "$CIXA_ROOT" \
+  run --rm --no-deps -T \
+  -e CIXA_AGENT_TOKEN_FILE=/run/cixa-agent/tokens/research-runner.token \
+  cixa-mcp
+```
+
+The command contains a filename, not the token value. Each agent session starts a disposable MCP container as UID `10001`. It has no network, a read-only root filesystem, and only the read-only agent IPC volume. It cannot mount owner state, dashboard credentials, merchant profiles, payment-session material, the audit key, or the checkout browser.
+
+### 5. Check the connection before buying
+
+Start a fresh agent session and ask:
+
+> Check your Cixa status, capabilities, and remaining budget. Do not make a purchase.
+
+The agent should call `cixa_get_status`, `cixa_get_capabilities`, and `cixa_get_budget`. It should report its own mode and limits without asking for a card, owner token, KOHO login, or dashboard access.
+
+### 6. Prepare real checkout only when needed
+
+The connection works without a real card, but real checkout remains owner-armed. Before asking an agent to buy something, use **Trust** in the owner console to configure the KOHO reference, approve the merchant's checkout profile, and open a short card session. Keep the agent in **Approval required** until the complete flow has worked for that merchant with limits you are comfortable with.
+
+## How an agent uses Cixa
+
+Cixa does not replace the agent's research or shopping tools. The agent finds the product and reaches the final checkout with its ordinary browser or tools. It sends only the final, typed checkout facts to Cixa. Cixa owns authorization and payment submission.
+
+| Step | Agent action | Cixa action | Owner involvement |
+| --- | --- | --- | --- |
+| 1. Preflight | Calls `cixa_get_status`, `cixa_get_capabilities`, and `cixa_get_budget`. | Returns only that agent's mode, scopes, and remaining limits. | None. |
+| 2. Shop | Finds the requested item or service and inspects the final checkout. | Has no role in product selection. | The original request defines what is wanted. |
+| 3. Describe checkout | Collects the exact total, currency, merchant, items, redirects, fulfillment, and recurring or card-saving flags. | Rejects malformed, incomplete, unsupported, or contradictory facts. | None unless the facts are unclear. |
+| 4. Create intent | Calls `cixa_create_purchase_intent` once with a stable idempotency key. | Evaluates policy and reserves the allowed amount before execution. | The intent appears in **Today** and **Ledger**. |
+| 5. Decide | Stops on denial, or waits when the state is `approval_required`. | Never accepts model text as owner approval. | Allows or declines the exact intent in the owner console. |
+| 6. Execute once | Calls `cixa_execute_purchase_intent` once only when the state allows it. | Rechecks live checkout facts, gives the card to the isolated helper, and submits once. | A card session must already be armed. |
+| 7. Resolve | Reads the resulting intent instead of retrying. | Records success, failure, or an ambiguous state. Ambiguous execution is quarantined. | Checks KOHO and reconciles any real submission. |
+
+The three agent-facing pieces have different jobs:
+
+| Piece | What it does | What it cannot do |
+| --- | --- | --- |
+| `cixa-payments` skill | Teaches the agent which tools to call and how to handle states safely. | Cannot authorize money or protect a secret from a compromised process. |
+| `cixa-mcp` container | Converts MCP calls into authenticated local broker requests. | Has no owner tools, network, card data, checkout browser, or owner volume. |
+| Cixa broker | Enforces capabilities, policy, budgets, state transitions, and one-submit execution. | Cannot infer owner consent or confirm KOHO settlement without the owner. |
+
+For receiving money, the agent calls `cixa_get_receive_instructions` and shares only the public address and memo returned by Cixa. A notification never becomes spendable money until the owner verifies and records the arrival.
+
+### Day-to-day commands
+
+These operate the owner stack. They do not grant additional authority to an agent:
 
 ```bash
 ./scripts/cixa-docker status
@@ -172,13 +248,24 @@ For receiving money, copy the public third-party e-Transfer address shown by KOH
 
 The setup is intentionally a little deliberate. The sensitive half belongs to you; the repeatable shopping work belongs to the agent. Read the friendly [KOHO setup guide](docs/koho-setup.md) and the [deployment boundary](docs/deployment.md) before the first real purchase.
 
-## How it fits together
+## Architecture and trust boundaries
 
 <p align="center">
   <img src="docs/assets/cixa-architecture.svg" alt="Docker-first Cixa architecture separating the agent container, trusted owner services, controlled checkout browser, merchants, and KOHO reconciliation" width="1100">
 </p>
 
-The split matters. Agent integrations get the agent socket and one scoped capability token. They do not get the owner socket, data directory, payment credential, audit key, or dashboard handoff.
+Read the diagram from left to right for a purchase, then follow the reconciliation arrow back from KOHO. The numbered path is the runtime flow:
+
+1. The agent gathers final checkout facts and calls only agent-safe MCP tools.
+2. The networkless MCP bridge reads one scoped capability file and crosses the Unix socket.
+3. The authenticated request moves from the broker into deterministic policy and ledger evaluation.
+4. Policy reserves the allowed amount durably before handing one intent to the checkout boundary.
+5. The isolated browser follows an owner-reviewed merchant profile, rechecks the live facts, and submits once.
+6. The resulting state is written back to the durable ledger. A timeout after submission becomes ambiguous, never a retry.
+7. For a real submission, the owner checks the transaction in KOHO because Cixa does not use a KOHO API.
+8. The owner reconciles the authoritative outcome in Cixa.
+
+The storage boxes explain the enforceable boundary. Agent integrations get the read-only IPC volume containing the agent socket and capability files. They do not get the owner socket, authenticated state, payment credential, audit key, merchant profiles, dashboard session, or helper runtime.
 
 ### Architectural decisions
 
@@ -203,55 +290,11 @@ These are product boundaries, not deployment trivia:
 
 For a detailed tour, read [Architecture](docs/architecture.md), [Security model](docs/security-model.md), and the full [Threat model](THREAT_MODEL.md).
 
-## Connect an agent
+## SDKs and custom agent runtimes
 
-Create the agent in the owner console and choose a capability filename, such as `research-runner.token`. Then print a ready-to-paste MCP configuration:
+The MCP setup above is the supported default for Codex and Claude Code. If you are building a dedicated agent service, the SDKs expose the same agent-only protocol. Keep that service under a non-owner identity and give it only the IPC volume. Do not mount Cixa's owner state to make integration easier.
 
-```bash
-./scripts/cixa-docker agent-config research-runner.token
-```
-
-The generated command launches `cixa-mcp` on demand with `docker compose run --rm --no-deps -T`. The container runs as UID `10001`, has no network, mounts the agent volume read-only, and exits when the MCP session ends. Cixa must already be running through `./scripts/cixa-docker up`.
-
-### MCP
-
-```json
-{
-  "mcpServers": {
-    "cixa": {
-      "command": "docker",
-      "args": [
-        "compose",
-        "--project-directory",
-        "/absolute/path/to/cixa",
-        "run",
-        "--rm",
-        "--no-deps",
-        "-T",
-        "-e",
-        "CIXA_AGENT_TOKEN_FILE=/run/cixa-agent/tokens/research-runner.token",
-        "cixa-mcp"
-      ]
-    }
-  }
-}
-```
-
-The MCP server exposes the agent-safe surface for reading its budget, proposing or executing purchase intents, cancelling unexecuted intents, listing sanitized transactions, reading receiving instructions, and reading sanitized receipts. Owner actions never appear as MCP tools.
-
-### Install the agent skill
-
-Cixa ships one Agent Skills-compatible package for Codex and Claude Code:
-
-```bash
-./scripts/install-agent-skill --target all
-```
-
-It installs `cixa-payments` into `~/.codex/skills/` and `~/.claude/skills/`. The skill teaches an agent the exact purchase contract, state handling, no-retry rule, receiving flow, and credential boundary. It does not grant access by itself.
-
-For Claude Code, the generated object can live in a project `.mcp.json`. For Codex, add the same server through its MCP configuration. [`examples/mcp-agent-config.json`](examples/mcp-agent-config.json) remains the native-socket example.
-
-If the whole agent already runs in another Compose stack, use the `agent` target from the supplied `Dockerfile`, attach only the `cixa-agent-ipc` volume, run as a non-owner UID with supplemental GID `12000`, and keep the owner volume absent. [Local deployment](docs/deployment.md) documents the invariant rather than requiring one agent framework.
+If the whole agent already runs in another Compose stack, use the `agent` target from the supplied `Dockerfile`, attach only `cixa-agent-ipc`, run as a non-owner UID with supplemental GID `12000`, and keep the owner volume absent. [Deployment](docs/deployment.md) documents the invariant rather than requiring a particular agent framework.
 
 ### TypeScript
 
@@ -341,4 +384,4 @@ Small, focused contributions are welcome. Please start with [Contributing](CONTR
 
 ## License
 
-Cixa is available under the [Apache License 2.0](LICENSE).
+Cixa is available under the [GNU Affero General Public License v3.0 only](LICENSE), identified as `AGPL-3.0-only`. If you modify Cixa and let users interact with that modified version over a network, the license requires you to offer those users the corresponding source for your version. See the license text for the complete terms.
