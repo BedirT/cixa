@@ -112,6 +112,8 @@ for manifest in ("Cargo.toml", "fuzz/Cargo.toml"):
         ).stdout
     )
     for package in metadata["packages"]:
+        if package["source"] is None:
+            continue
         identity = (package["name"], package["version"], package["source"])
         if identity in seen_cargo:
             continue
@@ -125,7 +127,7 @@ if unknown:
 lockfile = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 unknown_npm = []
 for path, package in lockfile["packages"].items():
-    if not path or package.get("link") is True:
+    if not path or package.get("link") is True or package.get("resolved") is None:
         continue
     license_value = package.get("license") or ""
     if not license_value or not permissive_expression(license_value):

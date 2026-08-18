@@ -1,138 +1,102 @@
 # Architecture
 
-## Principals and Trust Boundaries
+## System Boundary
 
-```mermaid
-flowchart TB
-  subgraph Untrusted[Untrusted boundary]
-    Agent[Agent process]
-    Merchant[Merchant page and content]
-    ProviderOutput[Provider and notification output]
-  end
-  subgraph Local[Owner device]
-    Adapter[MCP / SDK / CLI adapter]
-    Broker[Rust broker]
-    Owner[Owner CLI and dashboard]
-    Secrets[Owner-controlled secret provider]
-    Data[Private state, audit log, audit key]
-  end
-  Agent --> Adapter
-  Merchant --> Agent
-  ProviderOutput --> Agent
-  Adapter -->|agent token over local IPC| Broker
-  Owner -->|owner token| Broker
-  Broker --> Data
-  Broker --> Secrets
-```
+![Cixa Docker-first architecture](assets/cixa-architecture.svg)
 
-The agent, merchant, notifications, screenshots, and model traces are never trusted for security decisions. The broker revalidates amount, currency, origin, fulfillment, and policy immediately before the simulated provider call.
+Docker Compose is the reference deployment. The same invariants apply to a native installation, but Docker supplies the identities, mounts, read-only filesystems, process limits, and browser runtime consistently.
 
-## Process Architecture
+The agent, merchant page, provider output, notifications, screenshots, and model traces are untrusted. The broker, owner console, authenticated state, owner-created merchant profiles, short-lived card helper, and reviewed checkout adapter belong to the owner boundary. KOHO remains outside Cixa and is authoritative only when the owner checks it through the official app.
 
-```mermaid
-flowchart LR
-  MCP[MCP stdio process] -->|JSON-RPC tool call| SDK[SDK client]
-  SDK -->|v1 newline JSON| AgentSocket[Bounded agent socket 0600]
-  Owner[Owner CLI and dashboard] -->|owner token| OwnerSocket[Independent owner socket 0600]
-  AgentSocket --> Daemon[treasury daemon]
-  OwnerSocket --> Daemon
-  Daemon --> Mutex[Single process state lock]
-  Mutex --> State[Atomic authenticated state envelope]
-  Mutex --> Audit[Audit entries + separate audit.key]
-  Daemon --> Provider[Simulated provider]
-```
+## Container And Process Model
 
-The daemon owns an exclusive data-directory lock for its lifetime and serializes requests in one process. CLI mutations route through the independently admitted owner socket or acquire the same lock when the daemon is offline. The agent socket rejects owner operations, and the owner socket rejects non-owner credentials. State and audit entries are covered by an HMAC-authenticated envelope; writes use a random private temporary file, `sync_all`, atomic rename, and parent-directory synchronization. Both sockets are local by construction and are not public TCP listeners.
+| Process | UID | Network | Writable data | Responsibility |
+| --- | ---: | --- | --- | --- |
+| `cixa-init` | `0` | None | Both fresh named volumes | One-shot ownership and initialization. It exits before normal operation. |
+| `cixa-broker` | `10000` | Merchant egress | Owner data and agent IPC | Authentication, policy, ledger, audit, provider execution, helper grants, and checkout browser lifecycle. |
+| `cixa-console` | `10000` | Loopback HTTP | Owner data and agent token directory | Owner UI, agent provisioning, provider setup, payment-session lifecycle, profiles, approvals, and reconciliation. |
+| `cixa-mcp` | `10001` | None | None | Stateless stdio translation from agent-safe MCP tools to the local agent socket. |
 
-Before a provider call, the broker persists `funds_reserved` and `executing`. The verified `final_total`, rather than the earlier requested estimate, is the authoritative value for policy limits, reservations, provider submission, reconciliation, ledger events, and receipts. If the process exits before the final outcome is durable, restart recovery changes `executing` to `unknown` and forbids automatic resubmission. The intent ID is the provider idempotency key in the simulated adapter.
+The owner services share one trusted UID but not one process. The agent bridge uses a distinct UID and only supplemental IPC GID `12000`. Manual-provider requests also validate the Unix peer UID, so mounting the socket without the expected identity is insufficient.
 
-## Purchase State Machine
+## Storage Model
 
-```mermaid
-stateDiagram-v2
-  [*] --> draft
-  draft --> proposed
-  proposed --> policy_validated
-  proposed --> approval_required
-  proposed --> failed
-  proposed --> cancelled
-  approval_required --> approved
-  approval_required --> cancelled
-  policy_validated --> funds_reserved
-  approved --> funds_reserved
-  funds_reserved --> executing
-  executing --> provider_pending
-  executing --> settled
-  executing --> declined
-  executing --> failed
-  executing --> unknown
-  provider_pending --> settled
-  provider_pending --> declined
-  provider_pending --> unknown
-  unknown --> reconciliation_required
-  reconciliation_required --> settled
-  reconciliation_required --> declined
-  settled --> refunded
-```
+`cixa-owner-data` is mounted only into trusted owner services. It contains:
 
-There is no transition from `unknown` back to `executing`. A timeout after submission is an owner reconciliation task, not a retry opportunity.
+- the HMAC-authenticated state envelope and separate audit key;
+- owner and dashboard credentials;
+- the owner-only Unix socket;
+- checkout profiles and helper key material;
+- durable helper-redemption records.
 
-## Secure Checkout Critical Section
+`cixa-agent-ipc` is the only volume visible to an agent-side process. It contains:
 
-```mermaid
-sequenceDiagram
-  participant A as Agent
-  participant B as Broker
-  participant E as Executor
-  participant S as SecretProvider
-  participant P as Provider
-  A->>B: create intent
-  B->>B: deterministic policy and schema validation
-  A->>B: execute intent
-  B->>E: suspend agent control and validate origin/total
-  B->>B: reserve funds and revalidate policy
-  B->>S: owner-controlled just-in-time secret request
-  S-->>E: volatile secret, not agent-readable
-  E->>P: submit exactly once
-  P-->>E: approved, pending, declined, or ambiguous
-  E-->>B: sanitized outcome
-  B->>S: clear transaction secret
-  B->>B: append ledger and audit; destroy/sanitize context
-  B-->>A: sanitized receipt or reconciliation state
-```
+- `cixa.sock`, owned by the owner UID and IPC group with mode `0660`;
+- scoped agent capability files with mode `0640`;
+- no owner token, owner socket, state, policy file, audit key, browser, profile, or payment material.
 
-The default simulator exercises the state shape with synthetic facts and no money. The manual provider always requires owner approval and never trusts agent claims. The default real-card workflow is a two-phase owner-manual handoff. For owner-reviewed hosted-field integrations, the experimental Playwright adapter independently observes configured checkout facts, excludes agent RPC with the broker lock, leaves capture channels disabled, and destroys its fresh context. Unknown forms or observations return an explicit unsupported or ambiguous result.
+Capability values are not Compose environment secrets. The generated MCP configuration contains only a token filename inside the read-only agent volume.
 
-## Provider Abstraction
+## Request Path
 
-```mermaid
-classDiagram
-  class PaymentProvider {
-    <<interface>>
-    provider_id()
-    available_balance()
-    authorize(intent)
-  }
-  class SimulatedProvider
-  class ManualPrepaidCardProvider
-  PaymentProvider <|.. SimulatedProvider
-  PaymentProvider <|.. ManualPrepaidCardProvider
-```
+1. The software agent calls a `cixa_*` MCP tool.
+2. The network-disabled MCP container reads its scoped token file and sends one bounded v1 request through `cixa.sock`.
+3. The broker checks peer identity, capability hash, scope, expiry, revocation, rate limit, and intent ownership.
+4. Typed domain code evaluates the exact final total, currency, merchant, items, redirect chain, fulfillment, consent facts, authority mode, active session, provider balance freshness, and all budgets.
+5. The broker returns a denial, an owner-approval state, or a policy-validated intent. The model cannot promote its own state.
 
-The manual adapter is selectable through the owner CLI. It stores a non-secret credential reference and a freshness-limited balance snapshot, not a login or private issuer session. Estimated or expired snapshots cannot authorize spending. It returns an ambiguous/manual outcome for submission so the owner controls the real checkout and reconciliation.
+Owner requests use a different socket, credential, connection pool, and operation set. Agent RPC rejects owner operations even if a request attempts to name one.
+
+## Controlled Checkout Critical Section
+
+1. The agent requests execution once for a policy-validated or owner-approved intent.
+2. The broker loads the unique owner profile for the canonical merchant and validates every executable and configuration path.
+3. The broker creates an intent-bound, helper-bound, broker-UID-bound signed grant.
+4. The checkout executor independently validates the approved request before card retrieval.
+5. The broker reserves authority, moves the intent to `executing`, appends audit evidence, and durably synchronizes state before browser submission.
+6. The helper redeems the grant once and sends the volatile card object directly to the short-lived adapter process.
+7. A fresh Playwright process and context enforce public network destinations, exact navigation origins, approved processor frames, visible checkout facts, and one submit.
+8. The process is destroyed and the broker records the result as ambiguous until owner reconciliation.
+
+The agent never receives Playwright, CDP, DOM, browser profiles, screenshots, traces, console output, network bodies, clipboard contents, or payment values from this process.
+
+## Purchase State Model
+
+| State | Permitted next step |
+| --- | --- |
+| `draft` / `proposed` | Broker validation only. |
+| `policy_validated` | One execution request. |
+| `approval_required` | Owner approve or deny. |
+| `approved` | One execution request. |
+| `funds_reserved` / `executing` | Provider critical section only. |
+| `provider_pending` | Provider outcome or owner reconciliation. |
+| `unknown` | `reconciliation_required` only. Never execute again. |
+| `reconciliation_required` | Owner records settled, declined, or refunded evidence. |
+| `settled`, `declined`, `failed`, `cancelled`, `refunded` | Terminal according to the domain transition table. |
+
+Before any external side effect, the verified `final_total` is used for policy limits, reservations, submission, reconciliation, ledger events, and receipts. Restart recovery changes interrupted `executing` work to `unknown`; there is no transition from `unknown` back to execution.
+
+## Provider And Receiving Decisions
+
+The simulator is deterministic and never contacts a merchant. The manual prepaid-card provider stores a non-secret reference, masked last four, controlled-checkout flag, and freshness-limited owner balance snapshot. It does not automate KOHO login or use a private API.
+
+A merchant page is not authenticated issuer evidence. Even a visible success message produces an unknown result until the owner checks KOHO and reconciles the intent. Receiving follows the same evidence rule: an agent may share public instructions, but only owner-verified arrival evidence can become spending authority.
 
 ## Owner Versus Agent Interfaces
 
 | Capability | Agent | Owner |
 | --- | --- | --- |
-| Read effective budget | Yes | Yes |
+| Read effective budget and status | Yes | Yes |
 | Read public receiving instructions | Yes | Yes |
-| Create and execute a bounded intent | Yes, policy-bound | Yes, through owner workflow |
+| Create and execute a bounded intent | Yes, policy-bound | Through owner workflows |
 | Cancel own unexecuted intent | Yes | Yes |
-| Create or revoke agents | No | Yes |
-| Change policy or limits | No | Yes |
-| Approve exception | No | Yes |
+| Create, rotate, or revoke agents | No | Yes |
+| Change policy, limits, or authority | No | Yes |
+| Approve an exception or merchant | No | Yes |
+| Configure card session or profiles | No | Yes |
 | Record or verify income | No | Yes |
-| Reconcile unknown transaction | No | Yes |
-| Read credentials or audit key | No | No normal agent or dashboard path |
+| Reconcile an unknown transaction | No | Yes |
+| Read credentials or audit key | No | No normal UI or agent path |
 | Emergency stop | No | Yes |
+
+The detailed rationale is recorded in [`docs/adr/`](adr), with operational boundaries in [Docker deployment](docker.md), [Credential handling](credential-handling.md), and the [Threat model](../THREAT_MODEL.md).

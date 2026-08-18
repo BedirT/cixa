@@ -1,0 +1,115 @@
+name: cixa
+
+x-owner-runtime: &owner-runtime
+  image: cixa-owner:local
+  build:
+    context: .
+    target: owner
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+  volumes:
+    - cixa-owner-data:/var/lib/cixa
+    - cixa-agent-ipc:/run/cixa-agent
+
+services:
+  cixa-init:
+    <<: *owner-runtime
+    command:
+      - init
+    user: "0:0"
+    network_mode: none
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    restart: "no"
+
+  cixa-broker:
+    <<: *owner-runtime
+    command:
+      - broker
+    user: "10000:10000"
+    group_add:
+      - "12000"
+    depends_on:
+      cixa-init:
+        condition: service_completed_successfully
+    pids_limit: 512
+    shm_size: 1gb
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cixa audit --data-dir /var/lib/cixa --owner-token-file /var/lib/cixa/owner.token >/dev/null 2>&1
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  cixa-console:
+    <<: *owner-runtime
+    command:
+      - console
+    user: "10000:10000"
+    group_add:
+      - "12000"
+    depends_on:
+      cixa-init:
+        condition: service_completed_successfully
+      cixa-broker:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CIXA_DASHBOARD_PORT:-8765}:8765"
+    environment:
+      CIXA_DASHBOARD_PUBLIC_PORT: ${CIXA_DASHBOARD_PORT:-8765}
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/', timeout=2).read(1)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  cixa-mcp:
+    image: cixa-agent:local
+    build:
+      context: .
+      target: agent
+    command:
+      - mcp
+    user: "10001:10001"
+    group_add:
+      - "12000"
+    read_only: true
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    volumes:
+      - cixa-agent-ipc:/run/cixa-agent:ro
+    environment:
+      CIXA_SOCKET_PATH: /run/cixa-agent/cixa.sock
+      CIXA_AGENT_TOKEN_FILE: ${CIXA_AGENT_TOKEN_FILE:-/run/cixa-agent/tokens/default.token}
+    pids_limit: 64
+    profiles:
+      - agent
+    stdin_open: true
+
+volumes:
+  cixa-owner-data:
+  cixa-agent-ipc:

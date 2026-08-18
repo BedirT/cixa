@@ -10,12 +10,12 @@ The core exposes a one-shot, operation-bound `SecretProvider` trait with these i
 
 1. `InteractiveOwnerEntryProvider`: the owner supplies bytes over a caller-controlled reader for one approved operation; the provider consumes them once.
 2. `VolatileSessionSecretProvider`: the daemon keeps only transaction-scoped bytes, consumes them once, and best-effort zeroizes them on drop.
-3. `OwnerControlledSecretHelperProvider` on Unix: the shipped one-operation helper authenticates the broker peer UID, durably redeems a short-lived signed grant, and returns one length-bounded secret over a private socket. `init-helper` provisions a private key and helper identifier; rotation replaces that directory only between handoffs.
+3. `OwnerControlledSecretHelperProvider` on Unix: the shipped helper authenticates the broker peer UID, durably redeems each short-lived signed intent grant, and returns one length-bounded secret per grant over a private socket. `secret-helper` serves one operation; `secret-session` serves a bounded number until its TTL or operation limit. `init-helper` provisions a private key and helper identifier; rotation replaces that directory only between sessions.
 4. Simulated test provider: synthetic canaries are used only in local tests.
 
-`Treasury::bind_approved_secret_operation` requires the owner capability, an intent already in the explicit `approved` state, and the configured manual card reference. Every provider compares that complete binding before retrieval. None of these providers is exposed through the agent RPC or MCP surface.
+`Treasury::bind_approved_secret_operation` requires the owner capability, an intent already in the explicit `approved` state, and the configured manual card reference. Controlled checkout uses a separate agent binding that additionally requires owner-enabled controlled mode, execute scope, intent ownership, policy-validated or approved state, hosted fields, and a bound HTTPS checkout. Every provider compares the complete binding before retrieval. The secret providers themselves are never exposed through agent RPC or MCP.
 
-The `ManualPrepaidCardProvider` stores a `SecretReference`, provider kind, masked last four, and a freshness-labeled balance snapshot. It does not store a PAN or CVV. An OS keychain bridge remains explicit owner opt-in because macOS Keychain, Linux Secret Service, and Windows Credential Manager each have different UI, session, backup, and access-control semantics. The helper accepts its one-operation JSON secret on stdin and never logs it; an owner-controlled bridge may write to that stdin without exposing the secret to the agent.
+The `ManualPrepaidCardProvider` stores a `SecretReference`, provider kind, masked last four, a controlled-checkout flag, and a freshness-labeled balance snapshot. It does not persist a PAN or CVV. An OS keychain bridge remains explicit owner opt-in because macOS Keychain, Linux Secret Service, and Windows Credential Manager each have different UI, session, backup, and access-control semantics. The helper accepts one strict JSON secret on stdin and never logs it; the owner console writes to that stdin and discards its copy. The helper process necessarily retains the secret in volatile memory until expiry or its checkout limit.
 
 ## CVV
 
@@ -23,7 +23,7 @@ PCI SSC guidance says card verification codes are sensitive authentication data 
 
 ## Browser Exposure
 
-The agent never receives CDP, WebDriver, Playwright, DOM, autofill, clipboard, screenshot, trace, video, console, or network-body access to the payment-critical browser. `execute-handoff` takes the exclusive broker lock and uses the owner-only Playwright adapter in a fresh browser process and context. Only explicitly approved cross-origin hosted fields are filled, capture features are never enabled, and context cleanup runs on every consumed-operation exit. Unsupported forms and observations fail closed.
+The agent never receives CDP, WebDriver, Playwright, DOM, autofill, clipboard, screenshot, trace, video, console, or network-body access to the payment-critical browser. `execute-handoff` takes the exclusive broker lock; daemon-controlled checkout holds the serialized treasury critical section. Both use the owner-approved Playwright adapter in a fresh browser process and context. Only explicitly approved cross-origin hosted fields are filled, capture features are never enabled, and context cleanup runs on every consumed-operation exit. Unsupported forms and observations fail closed.
 
 ## Redaction and Residual Risk
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { mkdtemp, chmod, lstat, readFile, writeFile, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConnection } from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
@@ -19,7 +18,7 @@ function findBrowser() {
   throw new Error("Chrome or Chromium is required for dashboard UI verification. Set CIXA_BROWSER_EXECUTABLE to its absolute path.");
 }
 const chrome = findBrowser();
-const directory = await mkdtemp(join(tmpdir(), "cixa-dashboard-ui-"));
+const directory = await mkdtemp("/tmp/cixa-dashboard-ui-");
 const ownerFile = join(directory, "owner.token");
 const accessFile = join(directory, "dashboard.token");
 const agentSocket = join(directory, "cixa.sock");
@@ -118,14 +117,26 @@ try {
   await page.getByRole("button", {name:"Provider"}).click();
   const providerForm = page.locator("#provider-form");
   await page.setViewportSize({width:940,height:1189});assert.equal(await page.locator("#trust-provider").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);
-  const lastFourBefore=await providerForm.getByLabel("Last four").boundingBox();await providerForm.getByRole("button",{name:/Provider kind:/}).click();const lastFourAfter=await providerForm.getByLabel("Last four").boundingBox();assert.equal(lastFourAfter.y,lastFourBefore.y);assert.equal(await providerForm.getByRole("listbox",{name:"Provider kind options"}).evaluate((menu)=>getComputedStyle(menu).position),"absolute");await page.keyboard.press("Escape");
+  const lastFourBefore=await providerForm.getByLabel("Last four digits").boundingBox();await providerForm.getByRole("button",{name:/Where you keep it:/}).click();const lastFourAfter=await providerForm.getByLabel("Last four digits").boundingBox();assert.equal(lastFourAfter.y,lastFourBefore.y);assert.equal(await providerForm.getByRole("listbox",{name:"Where you keep it options"}).evaluate((menu)=>getComputedStyle(menu).position),"absolute");await page.keyboard.press("Escape");
   await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-provider.png"),fullPage:false});
   await providerForm.getByLabel("Credential reference").fill("keychain://cixa/browser-card");
-  await providerForm.getByLabel("Last four").fill("4417");
-  await providerForm.getByLabel("Confirmed balance").fill("250.00");
-  await providerForm.getByRole("button", {name:"Save provider reference"}).click();
-  await dialog.getByRole("button", {name:"Save reference"}).click();
-  await dialog.waitFor({state:"hidden"});
+  await providerForm.getByLabel("Last four digits").fill("4417");
+  await providerForm.getByLabel("Available balance").fill("250.00");
+  const paymentSessionForm=page.locator("#payment-session-form");
+  await paymentSessionForm.getByLabel("Card number").fill("4242 4242 4242 4242");
+  await paymentSessionForm.getByLabel("Expiry (MM/YY)").fill("08/29");
+  await paymentSessionForm.getByLabel("CVV").fill("123");
+  await paymentSessionForm.getByLabel("Cardholder").fill("Synthetic Owner");
+  await paymentSessionForm.getByRole("button",{name:"Arm payment session"}).click();
+  await page.getByText("Armed",{exact:true}).waitFor();
+  assert.equal(await paymentSessionForm.getByLabel("Card number").inputValue(),"");
+  await paymentSessionForm.getByRole("button",{name:"End session"}).click();
+  await page.getByText("Not armed",{exact:true}).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.locator("#trust-provider").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);
+  assert.equal(await page.locator("#trust-provider .trust-card").evaluateAll((cards)=>cards.every((card)=>card.scrollWidth<=card.clientWidth)),true);
+  await page.screenshot({path:join(root,"build","ui-artifacts","owner-console-trust-provider-mobile.png"),fullPage:false});
+  await page.setViewportSize({width:940,height:1189});
   await page.getByRole("button", {name:"Receiving"}).click();
   const receiveForm = page.locator("#receive-form");
   assert.equal(await page.locator("#trust-receiving").evaluate((panel)=>panel.scrollWidth<=panel.clientWidth),true);assert.equal(await page.locator("#trust-receiving .trust-card").evaluateAll((cards)=>cards.every((card)=>card.scrollWidth<=card.clientWidth)),true);
@@ -140,6 +151,10 @@ try {
   await depositForm.getByRole("button", {name:"Record arrival"}).click();
   await dialog.getByRole("button", {name:"Keep unverified"}).click();
   await dialog.waitFor({state:"hidden"});
+  await waitFor(async()=>{
+    const dashboard=await rpc(ownerSocket,ownerToken,{type:"owner_get_dashboard"});
+    return dashboard.ledger?.unverified_income?.minor===1200;
+  },"unverified arrival did not reach the ledger");
   await depositForm.getByLabel("Amount").fill("8.00");
   await depositForm.getByLabel("Source").fill("Verified browser invoice");
   await depositForm.getByLabel("Provider reference").fill("browser-deposit-2");
@@ -148,6 +163,10 @@ try {
   await depositForm.getByRole("button", {name:"Record arrival"}).click();
   await dialog.getByRole("button", {name:"Record verified arrival"}).click();
   await dialog.waitFor({state:"hidden"});
+  await waitFor(async()=>{
+    const dashboard=await rpc(ownerSocket,ownerToken,{type:"owner_get_dashboard"});
+    return dashboard.ledger?.verified_income?.minor===800&&dashboard.ledger?.unverified_income?.minor===1200;
+  },"verified and unverified arrivals did not reach the ledger");
   await page.getByRole("link", {name:/Today/}).first().click();
   await page.getByRole("button", {name:"Refresh"}).click();
   await page.getByText("CA$8.00", {exact:true}).waitFor();
@@ -171,27 +190,11 @@ try {
   await secondCard.getByRole("button", {name:"Decline"}).click();
   await dialog.getByRole("button", {name:"Decline"}).click();
   await secondTitle.waitFor({state:"detached"});
+  assert.equal((await rpc(agentSocket,agentToken,{type:"execute_purchase_intent",intent_id:first.id})).status,"settled");
 
   await page.getByRole("link", {name:"Ledger"}).first().click();
   await page.getByRole("button", {name:/Dataset approve/}).click();
   await page.getByRole("heading", {name:"$18.00"}).waitFor();
-  await page.getByRole("button", {name:"Begin owner handoff"}).click();
-  await dialog.getByLabel("I will keep the agent suspended and submit at most once").check();
-  await dialog.getByRole("button", {name:"Prepare handoff"}).click();
-  await page.getByRole("heading", {name:"Verify before paying"}).waitFor();
-  await page.getByText("https://merchant.example.test/checkout", {exact:true}).waitFor();
-  await page.getByRole("button", {name:"I submitted exactly once"}).click();
-  await dialog.getByRole("button", {name:"Complete handoff"}).click();
-  await dialog.waitFor({state:"hidden"});
-  await page.getByRole("button", {name:"Close details"}).click();
-  await page.getByRole("button", {name:"Waiting"}).click();
-  await page.getByRole("button", {name:/Dataset approve/}).click();
-  await page.getByRole("button", {name:"Reconcile"}).click();
-  await dialog.getByLabel("Provider reference").fill("browser-payment-1");
-  await dialog.getByRole("button", {name:"Record outcome"}).click();
-  await dialog.waitFor({state:"hidden"});
-  await page.getByRole("button", {name:"All", exact:true}).click();
-  await page.getByRole("button", {name:/Dataset approve/}).click();
   await page.getByText("Sanitized receipt", {exact:true}).waitFor();
   await page.getByRole("button", {name:"Close details"}).click();
   await page.getByRole("button", {name:"Stopped"}).click();

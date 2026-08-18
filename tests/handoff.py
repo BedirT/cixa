@@ -318,4 +318,48 @@ setTimeout(() => process.stdout.write(JSON.stringify({{outcome: 'unknown', reaso
     persisted = json.loads((directory / "state.json").read_text(encoding="utf-8"))
     assert persisted["state"]["intents"][detached_intent["id"]]["state"] == "unknown"
     assert "detached-canary" not in json.dumps(persisted)
+
+    session_intents = [
+        create_approved_intent("payment-session-first", 504),
+        create_approved_intent("payment-session-second", 505),
+    ]
+    adapter.write_text("""
+import readline from 'node:readline';
+const lines = readline.createInterface({input: process.stdin, terminal: false});
+for await (const line of lines) {
+  const value = JSON.parse(line);
+  if (value.secret.pan !== '4000000000001091') process.exit(3);
+  process.stdout.write(JSON.stringify({outcome: 'unknown', reason: 'owner reconciliation required'}) + '\\n');
+  break;
+}
+""".strip() + "\n", encoding="utf-8")
+    session_helper = subprocess.Popen([
+        str(BINARY), "secret-session", "--socket", str(helper_socket),
+        "--helper-key-file", str(helper_dir / "helper.key"),
+        "--helper-id-file", str(helper_dir / "helper.id"),
+        "--redemption-dir", str(redemption_dir), "--ttl-secs", "60",
+        "--max-operations", "2",
+    ], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert session_helper.stdin is not None
+    session_helper.stdin.write(b'{"pan":"4000000000001091","expiry":"12/99","cvv":"737","cardholder":"Synthetic Owner"}\n')
+    session_helper.stdin.close()
+    for _ in range(100):
+        if helper_socket.exists():
+            break
+        time.sleep(0.02)
+    assert helper_socket.exists(), "payment session helper did not bind"
+    for session_intent in session_intents:
+        result = run(
+            "execute-handoff", "--data-dir", str(directory),
+            "--owner-token-file", str(owner_file), "--intent-id", session_intent["id"],
+            "--helper-socket", str(helper_socket), "--helper-key-file", str(helper_dir / "helper.key"),
+            "--helper-id-file", str(helper_dir / "helper.id"), "--node-path", str(NODE),
+            "--adapter-script", str(adapter), "--adapter-config", str(adapter_config),
+        )
+        assert result["status"] == "unknown"
+    assert session_helper.wait(timeout=5) == 0
+    assert session_helper.stdout is not None and session_helper.stderr is not None
+    (ARTIFACTS / "helper-session.stdout").write_bytes(session_helper.stdout.read())
+    (ARTIFACTS / "helper-session.stderr").write_bytes(session_helper.stderr.read())
+    assert "4000000000001091" not in (directory / "state.json").read_text(encoding="utf-8")
     print("owner helper and automated handoff assertions passed")

@@ -1,0 +1,4 @@
+interface:
+  display_name: Cixa Payments
+  short_description: Make bounded payments through the local Cixa fortress.
+  default_prompt: Use Cixa to handle this payment safely and stay within the owner's policy.

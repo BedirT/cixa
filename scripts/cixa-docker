@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE=(docker compose --project-directory "$ROOT")
+
+usage() {
+  printf '%s\n' 'usage: scripts/cixa-docker up|down|status|logs|dashboard-token|agent-config [TOKEN_FILENAME]|verify'
+}
+
+case "${1:-}" in
+  up)
+    "${COMPOSE[@]}" --profile agent build cixa-broker cixa-mcp
+    "${COMPOSE[@]}" up --detach --wait cixa-console
+    printf '\nCixa is ready at http://127.0.0.1:%s\n' "${CIXA_DASHBOARD_PORT:-8765}"
+    printf '%s\n' 'Unlock it with: ./scripts/cixa-docker dashboard-token'
+    ;;
+  down)
+    "${COMPOSE[@]}" down
+    printf '%s\n' 'Cixa stopped. Owner data and capabilities were preserved.'
+    ;;
+  status)
+    "${COMPOSE[@]}" ps
+    ;;
+  logs)
+    "${COMPOSE[@]}" logs --follow cixa-broker cixa-console
+    ;;
+  dashboard-token)
+    "${COMPOSE[@]}" exec --no-TTY cixa-console cixa-container dashboard-token
+    ;;
+  agent-config)
+    token_filename="${2:-default.token}"
+    if [[ "$token_filename" == "." || "$token_filename" == ".." || ! "$token_filename" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+      printf '%s\n' 'token filename must contain only letters, digits, dot, underscore, or hyphen' >&2
+      exit 2
+    fi
+    python3 - "$ROOT" "$token_filename" <<'PY'
+import json
+import sys
+
+root, token_filename = sys.argv[1:]
+print(json.dumps({
+    "mcpServers": {
+        "cixa": {
+            "command": "docker",
+            "args": [
+                "compose", "--project-directory", root, "run", "--rm", "--no-deps", "-T",
+                "-e", f"CIXA_AGENT_TOKEN_FILE=/run/cixa-agent/tokens/{token_filename}", "cixa-mcp",
+            ],
+        }
+    }
+}, indent=2))
+PY
+    ;;
+  verify)
+    exec "$ROOT/scripts/verify-container"
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

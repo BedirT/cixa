@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -65,6 +66,32 @@ if not {"Cargo.toml", "src/main.rs"}.issubset(daemon_files):
 
 with tempfile.TemporaryDirectory(prefix="cixa-packages-") as raw_directory:
     directory = Path(raw_directory)
+    skill_environment = dict(
+        os.environ,
+        CODEX_HOME=str(directory / "codex-home"),
+        CLAUDE_HOME=str(directory / "claude-home"),
+    )
+    subprocess.run(
+        [str(ROOT / "scripts" / "install-agent-skill"), "--target", "all"],
+        cwd=ROOT,
+        env=skill_environment,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    for home in (directory / "codex-home", directory / "claude-home"):
+        installed_skill = home / "skills" / "cixa-payments" / "SKILL.md"
+        if "Never retry an ambiguous payment" not in installed_skill.read_text(encoding="utf-8"):
+            raise SystemExit(f"installed agent skill is incomplete: {installed_skill}")
+    refused = subprocess.run(
+        [str(ROOT / "scripts" / "install-agent-skill"), "--target", "all"],
+        cwd=ROOT,
+        env=skill_environment,
+        capture_output=True,
+        text=True,
+    )
+    if refused.returncode == 0 or "refusing to replace" not in refused.stderr:
+        raise SystemExit("agent skill installer replaced an existing skill without --force")
+
     rust_install = directory / "rust-install"
     subprocess.run(
         [
@@ -150,11 +177,14 @@ with tempfile.TemporaryDirectory(prefix="cixa-packages-") as raw_directory:
     wheel = next(python_dist.glob("*.whl"))
     source = next(python_dist.glob("*.tar.gz"))
     with zipfile.ZipFile(wheel) as archive:
-        if not any(name.endswith("/licenses/LICENSE") for name in archive.namelist()):
-            raise SystemExit("Python wheel is missing the Apache license")
+        license_files = [name for name in archive.namelist() if name.endswith("/licenses/LICENSE")]
+        if not license_files or b"GNU AFFERO GENERAL PUBLIC LICENSE" not in archive.read(license_files[0]):
+            raise SystemExit("Python wheel is missing the AGPLv3 license")
     with tarfile.open(source, "r:gz") as archive:
-        if not any(name.endswith("/LICENSE") for name in archive.getnames()):
-            raise SystemExit("Python sdist is missing the Apache license")
+        license_files = [name for name in archive.getnames() if name.endswith("/LICENSE")]
+        license_member = archive.extractfile(license_files[0]) if license_files else None
+        if license_member is None or b"GNU AFFERO GENERAL PUBLIC LICENSE" not in license_member.read():
+            raise SystemExit("Python sdist is missing the AGPLv3 license")
     virtualenv = directory / "venv"
     subprocess.run(["python3", "-m", "venv", str(virtualenv)], check=True)
     subprocess.run(

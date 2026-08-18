@@ -16,6 +16,7 @@ npm run build
 npm test
 PYTHONPATH=packages/sdk-python python3 -m unittest discover -s packages/sdk-python/tests
 ./scripts/verify
+./scripts/verify-container
 ```
 
 Keep `Cargo.lock` and `package-lock.json` committed. Prefer a small dependency-free implementation when it is safer. Do not use floating point for money. Preserve unrelated worktree changes and review the exact diff before committing.
@@ -23,4 +24,3 @@ Keep `Cargo.lock` and `package-lock.json` committed. Prefer a small dependency-f
 ## Changes and Reports
 
 Explain the trust boundary, failure mode, tests, residual risks, and documentation impact in the change description. Never include raw credentials, owner tokens, agent tokens, audit keys, or browser artifacts in commits, issues, or pull requests. Public release and external transactions remain owner decisions.
-

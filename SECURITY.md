@@ -22,7 +22,10 @@ Include the affected version, platform, exact command, sanitized logs, threat-mo
 
 - PAN, expiry, CVV/CVC, billing identity, shipping identity, owner authentication, capability tokens, and audit keys are sensitive.
 - Secrets must not be put in source, shell arguments, ordinary environment variables, logs, traces, screenshots, crash reports, or MCP output.
-- The default provider stores references and masked last-four metadata only. CVV is volatile and best-effort cleared after an operation.
+- The manual provider stores references, masked last-four metadata, and policy state only. It never persists PAN, expiry, or CVV.
+- A card entered in the owner console is piped to a short-lived local helper. The helper holds it only in process memory until its time or checkout-count limit, and the controlled browser is never exposed to the agent.
+- Real checkout submissions remain unknown until the owner reconciles them in the issuer's official application. Never retry an unknown submission.
+- The supported Compose file separates owner state from agent IPC and never mounts the Docker socket. Treat changes to service UIDs, groups, volumes, privileges, networking, or read-only filesystems as security-sensitive changes.
 - A compromised OS administrator or kernel can bypass local process boundaries. An external append-only sink is required for stronger tamper evidence.
 
 ## Incident Basics
@@ -35,4 +38,3 @@ Include the affected version, platform, exact command, sanitized logs, threat-mo
 6. Reconcile every unknown transaction with the issuer before any new execution.
 
 See [docs/incident-response.md](docs/incident-response.md) for the detailed runbook.
-

@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${CIXA_DATA_DIR:-$HOME/.local/share/cixa}"
+BUILD=1
+INSTALL_BROWSER=1
+AGENT_GID=""
+AGENT_DIRECTORY=""
+
+usage() {
+  printf '%s\n' 'usage: scripts/setup-owner [--data-dir DIR] [--agent-gid GID --agent-directory DIR] [--skip-build] [--skip-browser]'
+}
+
+while (($#)); do
+  case "$1" in
+    --data-dir) DATA_DIR="${2:-}"; shift 2 ;;
+    --skip-build) BUILD=0; shift ;;
+    --skip-browser) INSTALL_BROWSER=0; shift ;;
+    --agent-gid) AGENT_GID="${2:-}"; shift 2 ;;
+    --agent-directory) AGENT_DIRECTORY="${2:-}"; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$DATA_DIR" != /* ]]; then
+  printf '%s\n' '--data-dir must be absolute' >&2
+  exit 2
+fi
+if [[ -n "$AGENT_GID" || -n "$AGENT_DIRECTORY" ]]; then
+  if [[ ! "$AGENT_GID" =~ ^[1-9][0-9]*$ || "$AGENT_DIRECTORY" != /* ]]; then
+    printf '%s\n' '--agent-gid and an absolute --agent-directory must be supplied together' >&2
+    exit 2
+  fi
+fi
+
+umask 077
+mkdir -p "$DATA_DIR" "$DATA_DIR/checkout-runtime" "$DATA_DIR/checkout-profiles" "$DATA_DIR/agent-tokens"
+chmod 700 "$DATA_DIR" "$DATA_DIR/checkout-runtime" "$DATA_DIR/checkout-profiles" "$DATA_DIR/agent-tokens"
+if [[ -n "$AGENT_GID" ]]; then
+  mkdir -p "$AGENT_DIRECTORY" "$AGENT_DIRECTORY/tokens"
+  chgrp "$AGENT_GID" "$AGENT_DIRECTORY" "$AGENT_DIRECTORY/tokens"
+  chmod 750 "$AGENT_DIRECTORY" "$AGENT_DIRECTORY/tokens"
+fi
+
+if [[ "$BUILD" == "1" ]]; then
+  (cd "$ROOT" && cargo build --locked --release)
+  (cd "$ROOT" && npm ci --ignore-scripts && npm run build)
+fi
+
+BINARY="${CIXA_BINARY:-$ROOT/target/release/cixa}"
+if [[ ! -x "$BINARY" ]]; then
+  printf 'missing %s; run without --skip-build first\n' "$BINARY" >&2
+  exit 1
+fi
+
+if [[ ! -e "$DATA_DIR/state.json" ]]; then
+  "$BINARY" init \
+    --data-dir "$DATA_DIR" \
+    --owner-token-file "$DATA_DIR/owner.token" \
+    --owner-name local-owner \
+    --balance-minor 1 >/dev/null
+fi
+
+if [[ ! -e "$DATA_DIR/dashboard.token" ]]; then
+  python3 - "$DATA_DIR/dashboard.token" <<'PY'
+import os
+import secrets
+import sys
+
+path = sys.argv[1]
+descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, (secrets.token_hex(32) + "\n").encode("ascii"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+fi
+
+if [[ ! -e "$DATA_DIR/checkout-runtime/helper.key" ]]; then
+  "$BINARY" init-helper --helper-dir "$DATA_DIR/checkout-runtime" >/dev/null
+fi
+
+NODE_PATH="${CIXA_NODE_PATH:-$(command -v node || true)}"
+if [[ -z "$NODE_PATH" ]]; then
+  printf '%s\n' 'Node.js is required to run the controlled checkout adapter' >&2
+  exit 1
+fi
+NODE_PATH="$(cd "$(dirname "$NODE_PATH")" && pwd)/$(basename "$NODE_PATH")"
+
+BROWSER_PATH=""
+if [[ "$INSTALL_BROWSER" == "1" ]]; then
+  mkdir -p "$DATA_DIR/browsers"
+  chmod 700 "$DATA_DIR/browsers"
+  (cd "$ROOT" && PLAYWRIGHT_BROWSERS_PATH="$DATA_DIR/browsers" node node_modules/playwright-core/cli.js install chromium)
+  BROWSER_PATH="$(cd "$ROOT" && PLAYWRIGHT_BROWSERS_PATH="$DATA_DIR/browsers" node --input-type=module -e "import { chromium } from 'playwright-core'; process.stdout.write(chromium.executablePath())")"
+fi
+
+printf '\n%s\n' 'Cixa owner files are ready.'
+printf 'Data directory: %s\n' "$DATA_DIR"
+printf 'Owner token: %s\n' "$DATA_DIR/owner.token"
+printf 'Dashboard unlock token: %s\n' "$DATA_DIR/dashboard.token"
+if [[ -n "$BROWSER_PATH" ]]; then printf 'Private checkout browser: %s\n' "$BROWSER_PATH"; fi
+printf '\n%s\n' 'Start the broker under the protected Cixa owner identity with:'
+printf '  %q serve --data-dir %q' "$BINARY" "$DATA_DIR"
+if [[ -n "$AGENT_GID" ]]; then printf ' --socket %q --agent-gid %q' "$AGENT_DIRECTORY/cixa.sock" "$AGENT_GID"; fi
+printf ' --checkout-runtime-dir %q --checkout-profiles-dir %q --node-path %q --adapter-script %q\n' \
+  "$DATA_DIR/checkout-runtime" "$DATA_DIR/checkout-profiles" "$NODE_PATH" "$ROOT/packages/checkout-playwright/dist/index.js"
+printf '\n%s\n' 'Start the owner console in another terminal with:'
+printf '  python3 %q --socket-path %q --owner-token-file %q --access-token-file %q --cixa-binary %q --checkout-runtime-directory %q --checkout-profiles-directory %q' \
+  "$ROOT/apps/owner-dashboard/server.py" "$DATA_DIR/owner.sock" "$DATA_DIR/owner.token" "$DATA_DIR/dashboard.token" "$BINARY" "$DATA_DIR/checkout-runtime" "$DATA_DIR/checkout-profiles"
+if [[ -n "$BROWSER_PATH" ]]; then printf ' --checkout-browser-executable %q' "$BROWSER_PATH"; fi
+if [[ -n "$AGENT_GID" ]]; then printf ' --agent-token-directory %q --agent-gid %q' "$AGENT_DIRECTORY/tokens" "$AGENT_GID"; fi
+printf ' --port 8765\n'
+printf '\n%s\n' 'Before real use, follow docs/deployment.md to expose only the agent socket and capability through a distinct OS identity or container.'
+if [[ -z "$AGENT_GID" ]]; then printf '%s\n' 'This initial command is owner-only. Rerun setup-owner with --agent-gid and --agent-directory before enabling the manual provider.'; fi

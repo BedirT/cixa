@@ -191,7 +191,7 @@ with tempfile.TemporaryDirectory(prefix="cixa-integration-") as raw_directory:
             "--owner-token-file",
             str(owner_file),
             "--agent-id",
-            client.get_status()["agent_id"],
+            created["agent_id"],
         )
         try:
             client.get_status()
@@ -199,6 +199,23 @@ with tempfile.TemporaryDirectory(prefix="cixa-integration-") as raw_directory:
             pass
         else:
             raise SystemExit("revoked agent remained authorized")
+        run(
+            "configure-manual-provider",
+            "--data-dir", str(directory),
+            "--owner-token-file", str(owner_file),
+            "--credential-reference", "keychain://cixa/live-transition-test",
+            "--provider-kind", "os-credential-store",
+            "--last-four", "1111",
+            "--balance-minor", "10000",
+            "--balance-status", "owner_confirmed",
+            "--autonomous-checkout", "true",
+        )
+        try:
+            CixaClient(str(socket_path), str(agent_file)).get_status()
+        except BrokerError as error:
+            assert "separate agent OS identity" in str(error)
+        else:
+            raise SystemExit("live switch to manual provider retained same-UID agent access")
         print("persisted daemon integration assertions passed")
     finally:
         daemon.send_signal(signal.SIGTERM)

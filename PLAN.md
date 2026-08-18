@@ -22,7 +22,7 @@ Completed. Owner CLI operations, loopback dashboard, CSRF and origin checks, pro
 
 ## Checkpoint 6 - Checkout Execution
 
-Completed as a safe reference boundary. The simulator executes known outcomes. The core exposes `CheckoutExecutor` and merchant trust tiers. Unknown merchant-controlled forms, hostile redirects, recurring behavior, and ambiguous provider outcomes are denied or approval-gated. A real browser automation adapter is intentionally not enabled by default; see [docs/checkout-adapters.md](docs/checkout-adapters.md).
+Completed as an owner-enabled, deny-by-default boundary. The simulator executes known outcomes. The manual provider can run an owner-approved Playwright profile for a policy-validated or explicitly approved intent while a bounded volatile card session is armed. Unknown merchant-controlled forms, hostile redirects, changed checkout facts, missing profiles, unavailable owner authentication, and ambiguous provider outcomes fail closed. Real browser results require independent owner reconciliation; see [docs/checkout-adapters.md](docs/checkout-adapters.md).
 
 ## Checkpoint 7 - Adversarial Validation
 
@@ -30,8 +30,12 @@ Completed for the local laboratory. Rust tests, daemon integration, SDK protocol
 
 ## Checkpoint 8 - Documentation and Release Readiness
 
-Completed for human review. README, security policy, threat model, research, ADRs, architecture diagrams, KOHO manual setup, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Public release, package publication, account creation, and real-money tests remain owner-controlled actions.
+Completed for human review. The agent-first README, technical architecture diagram, security policy, threat model, research, ADRs, KOHO setup, controlled-checkout runbook, owner bootstrap, Codex and Claude Code skill package, AGPL-3.0-only release files, incident response, SBOM generation, dependency checks, license checks, and canonical local verification are present. Hosted CI is intentionally omitted at the owner's request for this solo-developer repository. Package publication, account creation, merchant-profile acceptance, and real-money tests remain owner-controlled actions.
+
+## Checkpoint 9 - Docker-First Deployment
+
+Completed. Multi-stage owner and agent images, fixed separate identities, a one-shot volume initializer, separate owner and agent IPC volumes, loopback-only console, health checks, network-disabled MCP bridge, lifecycle wrapper, containerized MCP smoke test, Docker runbook, and a designed SVG architecture diagram make Compose the primary supported installation. Native service deployment remains an advanced compatibility path.
 
 ## Release Gate
 
-Run `./scripts/verify` from a clean checkout before every push. Before public release, a human must review the exact files listed in the final report, run advisory and static-analysis tools locally, audit dependency licenses, and decide whether a formal payment-security assessment is required.
+Run `./scripts/verify` and `./scripts/verify-container` from a clean checkout before every Docker image or release push. Before public release, a human must review the exact files listed in the final report, run advisory and static-analysis tools locally, audit dependency licenses and image contents, and decide whether signing, provenance attestations, hosted image scanning, and a formal payment-security assessment are required.

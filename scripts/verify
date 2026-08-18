@@ -78,6 +78,7 @@ node tests/dashboard-ui.mjs
 printf '%s\n' '[11/14] Adversarial demo'
 python3 tests/adversarial.py
 printf '%s\n' '[12/14] Documentation and supply chain'
+python3 tests/container-config.py
 python3 scripts/check-docs.py
 python3 scripts/dependency-check.py
 python3 scripts/license-check.py

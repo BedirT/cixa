@@ -31,6 +31,7 @@ export type BrokerClientOptions = {
   socketPath: string;
   tokenFile: string;
   timeoutMs?: number;
+  executeTimeoutMs?: number;
 };
 
 function assertBounded(value: string, field: string, max: number): void {
@@ -51,6 +52,7 @@ function assertMoney(value: Money, field: string): void {
 export class BrokerClient {
   private readonly token: string;
   private readonly timeoutMs: number;
+  private readonly executeTimeoutMs: number;
 
   constructor(private readonly options: BrokerClientOptions) {
     assertBounded(options.socketPath, "socketPath", 4096);
@@ -58,9 +60,10 @@ export class BrokerClient {
     this.token = readFileSync(options.tokenFile, "utf8").trim();
     assertBounded(this.token, "capability token", 128);
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.executeTimeoutMs = options.executeTimeoutMs ?? 180_000;
   }
 
-  async request<T = unknown>(operation: Operation): Promise<T> {
+  async request<T = unknown>(operation: Operation, timeoutMs = this.timeoutMs): Promise<T> {
     const request = JSON.stringify({
       api_version: "v1",
       request_id: randomUUID(),
@@ -74,7 +77,7 @@ export class BrokerClient {
       const timer = setTimeout(() => {
         finish(new BrokerError("broker request timed out"));
         socket.destroy();
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       const finish = (error?: Error, value?: T): void => {
         if (settled) return;
@@ -160,7 +163,7 @@ export class BrokerClient {
 
   executePurchaseIntent(intentId: string): Promise<PurchaseIntentResult> {
     assertBounded(intentId, "intent_id", 128);
-    return this.request({ type: "execute_purchase_intent", intent_id: intentId });
+    return this.request({ type: "execute_purchase_intent", intent_id: intentId }, this.executeTimeoutMs);
   }
 
   cancelPurchaseIntent(intentId: string): Promise<PurchaseIntentResult> {

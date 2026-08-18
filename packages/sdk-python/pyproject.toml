@@ -7,7 +7,7 @@ name = "cixa-sdk"
 version = "0.1.0"
 description = "Thin provider-neutral Python client for a local Cixa broker"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 readme = "README.md"
 keywords = ["cixa", "payments", "agents", "local-first", "security"]

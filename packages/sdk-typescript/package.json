@@ -1,7 +1,7 @@
 {
   "name": "cixa-sdk",
   "version": "0.1.0",
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0-only",
   "description": "Thin provider-neutral TypeScript client for a local Cixa broker",
   "repository": {
     "type": "git",

@@ -89,7 +89,7 @@ It is not:
 
 Include clear unaffiliated-product disclaimers.
 
-Use the Apache-2.0 license unless a concrete dependency or legal compatibility issue requires another permissive license. Prefer permissively licensed dependencies and document any exceptions.
+License Cixa under AGPL-3.0-only so modified network-served versions remain available to their users. Prefer permissively licensed dependencies and document any exceptions.
 
 The complete core project must be usable without a paid cloud service, hosted database, subscription, analytics platform, proprietary secret manager, or required API key.
 

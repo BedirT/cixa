@@ -12,15 +12,21 @@ import argparse
 import http.server
 import json
 import os
+import re
 import secrets
+import subprocess
 import socket
 import stat
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 
 MAX_BODY = 32 * 1024
+PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+DOMAIN = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
 class ActivationUncertain(RuntimeError):
@@ -53,6 +59,11 @@ class DashboardState:
         access_token_file: str,
         port: int,
         agent_token_directory: str | None = None,
+        cixa_binary: str | None = None,
+        checkout_runtime_directory: str | None = None,
+        checkout_profiles_directory: str | None = None,
+        checkout_browser_executable: str | None = None,
+        agent_gid: int | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.owner_token = read_private_token(owner_token_file)
@@ -62,18 +73,390 @@ class DashboardState:
         self.csrf = secrets.token_urlsafe(32)
         self.session = secrets.token_urlsafe(32)
         self.port = port
+        self.agent_gid = agent_gid
+        if self.agent_gid is not None and (self.agent_gid < 1 or self.agent_gid == os.getegid()):
+            raise ValueError("agent GID must be positive and differ from the owner primary group")
         self.agent_token_directory = Path(
             agent_token_directory or Path(owner_token_file).parent / "agent-tokens"
-        )
+        ).expanduser().resolve()
         self._prepare_agent_token_directory()
+        project_binary = Path(__file__).resolve().parents[2] / "target" / "debug" / "cixa"
+        self.cixa_binary = (Path(cixa_binary) if cixa_binary else project_binary).expanduser().resolve()
+        base = Path(owner_token_file).parent
+        self.checkout_runtime_directory = Path(
+            checkout_runtime_directory or base / "checkout-runtime"
+        ).expanduser().resolve()
+        self.checkout_profiles_directory = Path(
+            checkout_profiles_directory or base / "checkout-profiles"
+        ).expanduser().resolve()
+        self.checkout_browser_executable = (
+            Path(checkout_browser_executable).expanduser().resolve()
+            if checkout_browser_executable
+            else None
+        )
+        self._prepare_private_directory(self.checkout_runtime_directory)
+        self._prepare_private_directory(self.checkout_profiles_directory)
+        self._payment_session: subprocess.Popen[bytes] | None = None
+        self._payment_session_expires_at = 0
+        self._payment_session_max_operations = 0
+        self._payment_session_lock = threading.RLock()
+        if self.checkout_browser_executable is not None:
+            self._require_owner_executable(self.checkout_browser_executable, "checkout browser")
+
+    def _prepare_private_directory(self, path: Path) -> None:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"{path} must be a directory, not a symlink")
+        if metadata.st_mode & 0o077:
+            raise ValueError(f"{path} permissions are too broad")
+
+    def _require_cixa_binary(self) -> None:
+        self._require_owner_executable(self.cixa_binary, "cixa binary")
+
+    @staticmethod
+    def _require_owner_executable(path: Path, label: str) -> None:
+        if not path.is_absolute():
+            raise ValueError(f"{label} must be an absolute path")
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{label} must be a regular non-symlink file")
+        if metadata.st_uid not in {0, os.geteuid()} or metadata.st_mode & 0o022 or not os.access(path, os.X_OK):
+            raise ValueError(f"{label} must be root/owner-controlled, non-writable, and executable")
+        parent = path.parent
+        while parent != parent.parent:
+            parent_metadata = parent.lstat()
+            if (
+                stat.S_ISLNK(parent_metadata.st_mode)
+                or not stat.S_ISDIR(parent_metadata.st_mode)
+                or parent_metadata.st_uid not in {0, os.geteuid()}
+                or parent_metadata.st_mode & 0o022
+            ):
+                raise ValueError(f"{label} has an unsafe parent directory")
+            parent = parent.parent
+
+    def ensure_checkout_runtime(self) -> None:
+        self._prepare_private_directory(self.checkout_runtime_directory)
+        key = self.checkout_runtime_directory / "helper.key"
+        helper_id = self.checkout_runtime_directory / "helper.id"
+        if key.exists() or helper_id.exists():
+            if not key.exists() or not helper_id.exists():
+                raise ValueError("checkout helper initialization is incomplete")
+            read_private_token(str(key))
+            read_private_token(str(helper_id))
+            return
+        self._require_cixa_binary()
+        subprocess.run(
+            [
+                str(self.cixa_binary),
+                "init-helper",
+                "--helper-dir",
+                str(self.checkout_runtime_directory),
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+
+    def payment_session_status(self) -> dict[str, Any]:
+        with self._payment_session_lock:
+            process = self._payment_session
+            active = process is not None and process.poll() is None
+            if not active:
+                if process is not None and process.stderr is not None:
+                    process.stderr.close()
+                self._payment_session = None
+                self._payment_session_expires_at = 0
+                self._payment_session_max_operations = 0
+            return {
+                "active": active,
+                "expires_at": self._payment_session_expires_at if active else None,
+                "max_operations": self._payment_session_max_operations if active else 0,
+                "secret_persisted": False,
+            }
+
+    def stop_payment_session(self) -> dict[str, Any]:
+        with self._payment_session_lock:
+            process = self._payment_session
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+            if process is not None and process.stderr is not None:
+                process.stderr.close()
+            self._payment_session = None
+            self._payment_session_expires_at = 0
+            self._payment_session_max_operations = 0
+            (self.checkout_runtime_directory / "session.sock").unlink(missing_ok=True)
+        return self.payment_session_status()
+
+    @staticmethod
+    def _luhn_valid(pan: str) -> bool:
+        digits = [int(value) for value in pan]
+        checksum = 0
+        parity = len(digits) % 2
+        for index, digit in enumerate(digits):
+            if index % 2 == parity:
+                digit *= 2
+                if digit > 9:
+                    digit -= 9
+            checksum += digit
+        return checksum % 10 == 0
+
+    def arm_payment_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        if set(body) != {"pan", "expiry", "cvv", "cardholder", "ttl_secs", "max_operations"}:
+            raise ValueError("payment session fields are invalid")
+        pan = body["pan"]
+        expiry = body["expiry"]
+        cvv = body["cvv"]
+        cardholder = body["cardholder"]
+        ttl_secs = body["ttl_secs"]
+        max_operations = body["max_operations"]
+        if not isinstance(pan, str) or not pan.isascii() or not pan.isdigit() or not 12 <= len(pan) <= 19 or not self._luhn_valid(pan):
+            raise ValueError("card number is invalid")
+        if not isinstance(expiry, str) or re.fullmatch(r"(?:0[1-9]|1[0-2])/[0-9]{2}", expiry) is None:
+            raise ValueError("expiry must use MM/YY")
+        expiry_month, expiry_year = (int(value) for value in expiry.split("/"))
+        current = time.localtime()
+        expiry_year += 2000
+        if (expiry_year, expiry_month) < (current.tm_year, current.tm_mon) or expiry_year > current.tm_year + 20:
+            raise ValueError("card expiry is outside the supported range")
+        if not isinstance(cvv, str) or not cvv.isascii() or not cvv.isdigit() or not 3 <= len(cvv) <= 4:
+            raise ValueError("security code is invalid")
+        if not isinstance(cardholder, str) or not 1 <= len(cardholder) <= 128 or any(ord(value) < 32 or ord(value) == 127 for value in cardholder):
+            raise ValueError("cardholder is invalid")
+        if not isinstance(ttl_secs, int) or isinstance(ttl_secs, bool) or not 60 <= ttl_secs <= 3600:
+            raise ValueError("session duration must be within 60..3600 seconds")
+        if not isinstance(max_operations, int) or isinstance(max_operations, bool) or not 1 <= max_operations <= 100:
+            raise ValueError("session operation limit must be within 1..100")
+        self.ensure_checkout_runtime()
+        self._require_cixa_binary()
+        self.stop_payment_session()
+        socket_path = self.checkout_runtime_directory / "session.sock"
+        if len(os.fsencode(socket_path)) >= 100:
+            raise ValueError("checkout runtime path is too long for a Unix socket; choose a shorter absolute directory")
+        secret = json.dumps(
+            {"pan": pan, "expiry": expiry, "cvv": cvv, "cardholder": cardholder},
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        with self._payment_session_lock:
+            process = subprocess.Popen(
+                [
+                    str(self.cixa_binary),
+                    "secret-session",
+                    "--socket",
+                    str(socket_path),
+                    "--helper-key-file",
+                    str(self.checkout_runtime_directory / "helper.key"),
+                    "--helper-id-file",
+                    str(self.checkout_runtime_directory / "helper.id"),
+                    "--redemption-dir",
+                    str(self.checkout_runtime_directory / "redeemed"),
+                    "--ttl-secs",
+                    str(ttl_secs),
+                    "--max-operations",
+                    str(max_operations),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            assert process.stdin is not None
+            process.stdin.write(secret)
+            process.stdin.close()
+            secret = b""
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and process.poll() is None and not socket_path.exists():
+                time.sleep(0.02)
+            if process.poll() is not None or not socket_path.exists():
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+                detail = process.stderr.read(4096).decode("utf-8", errors="replace").strip() if process.stderr else ""
+                if process.stderr is not None:
+                    process.stderr.close()
+                raise RuntimeError(
+                    "payment session could not be armed"
+                    + (f": {detail}" if detail else "")
+                )
+            self._payment_session = process
+            self._payment_session_expires_at = int(time.time()) + ttl_secs
+            self._payment_session_max_operations = max_operations
+        return self.payment_session_status()
+
+    @staticmethod
+    def _canonical_origin(value: Any) -> str:
+        if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+            raise ValueError("checkout origin is invalid")
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in {None, 443}:
+            raise ValueError("checkout origins must be credential-free HTTPS URLs")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("checkout origin must not contain a path, query, or fragment")
+        return f"https://{parsed.hostname.lower()}"
+
+    def list_checkout_profiles(self) -> list[dict[str, Any]]:
+        self._prepare_private_directory(self.checkout_profiles_directory)
+        profiles: list[dict[str, Any]] = []
+        for path in sorted(self.checkout_profiles_directory.glob("*.json")):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+                raise ValueError("checkout profile permissions are invalid")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            profiles.append(
+                {
+                    "profile_id": path.stem,
+                    "merchant_domain": value["merchantDomain"],
+                    "processor_origins": value["config"]["allowedProcessorOrigins"],
+                    "timeout_ms": value["config"]["timeoutMs"],
+                }
+            )
+        return profiles
+
+    def save_checkout_profile(self, body: dict[str, Any]) -> dict[str, Any]:
+        expected = {
+            "profile_id",
+            "merchant_domain",
+            "browser_executable",
+            "allowed_navigation_origins",
+            "allowed_processor_origins",
+            "selectors",
+            "timeout_ms",
+        }
+        if set(body) != expected:
+            raise ValueError("checkout profile fields are invalid")
+        profile_id = body["profile_id"]
+        merchant_domain = body["merchant_domain"]
+        browser_executable = body["browser_executable"]
+        timeout_ms = body["timeout_ms"]
+        if not isinstance(profile_id, str) or PROFILE_ID.fullmatch(profile_id) is None:
+            raise ValueError("profile identifier is invalid")
+        if not isinstance(merchant_domain, str) or DOMAIN.fullmatch(merchant_domain.lower()) is None:
+            raise ValueError("merchant domain is invalid")
+        merchant_domain = merchant_domain.lower()
+        if not isinstance(browser_executable, str) or not Path(browser_executable).is_absolute():
+            raise ValueError("browser executable must be an absolute path")
+        self._require_owner_executable(Path(browser_executable), "browser executable")
+        if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or not 1_000 <= timeout_ms <= 120_000:
+            raise ValueError("checkout timeout is invalid")
+        navigation = body["allowed_navigation_origins"]
+        processors = body["allowed_processor_origins"]
+        if not isinstance(navigation, list) or not 1 <= len(navigation) <= 16:
+            raise ValueError("navigation origins are invalid")
+        if not isinstance(processors, list) or not 1 <= len(processors) <= 16:
+            raise ValueError("processor origins are invalid")
+        navigation = [self._canonical_origin(value) for value in navigation]
+        processors = [self._canonical_origin(value) for value in processors]
+        if f"https://{merchant_domain}" not in navigation:
+            raise ValueError("navigation origins must include the merchant origin")
+        if set(navigation) & set(processors):
+            raise ValueError("processor and navigation origins must be disjoint")
+        required_selectors = {
+            "finalTotal",
+            "currency",
+            "fulfillment",
+            "items",
+            "recurring",
+            "trialAutoRenew",
+            "storedCard",
+            "tipMinor",
+            "preauthorization",
+            "installments",
+            "paymentFrame",
+            "pan",
+            "expiry",
+            "cvv",
+            "submit",
+        }
+        selectors = body["selectors"]
+        selector_keys = set(selectors) if isinstance(selectors, dict) else set()
+        if not isinstance(selectors, dict) or (
+            selector_keys != required_selectors
+            and selector_keys != required_selectors | {"cardholder"}
+        ):
+            raise ValueError("checkout selectors are incomplete")
+        if any(not isinstance(value, str) or not 1 <= len(value) <= 512 or any(ord(character) < 32 for character in value) for value in selectors.values()):
+            raise ValueError("checkout selector is invalid")
+        profile = {
+            "profileVersion": 1,
+            "merchantDomain": merchant_domain,
+            "config": {
+                "browserExecutable": browser_executable,
+                "checkoutUrl": f"https://{merchant_domain}/",
+                "allowedNavigationOrigins": navigation,
+                "allowedProcessorOrigins": processors,
+                "selectors": selectors,
+                "timeoutMs": timeout_ms,
+            },
+        }
+        self._prepare_private_directory(self.checkout_profiles_directory)
+        destination = self.checkout_profiles_directory / f"{profile_id}.json"
+        temporary = self.checkout_profiles_directory / f".{profile_id}.{secrets.token_hex(8)}.tmp"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            payload = (json.dumps(profile, separators=(",", ":")) + "\n").encode("utf-8")
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("checkout profile write made no progress")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, destination)
+        directory = os.open(self.checkout_profiles_directory, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {"saved": True, "profile_id": profile_id, "merchant_domain": merchant_domain}
+
+    def delete_checkout_profile(self, body: dict[str, Any]) -> dict[str, Any]:
+        if set(body) != {"profile_id"}:
+            raise ValueError("checkout profile delete fields are invalid")
+        profile_id = body["profile_id"]
+        if not isinstance(profile_id, str) or PROFILE_ID.fullmatch(profile_id) is None:
+            raise ValueError("profile identifier is invalid")
+        destination = self.checkout_profiles_directory / f"{profile_id}.json"
+        metadata = destination.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("checkout profile is invalid")
+        destination.unlink()
+        directory = os.open(self.checkout_profiles_directory, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {"deleted": True, "profile_id": profile_id}
+
+    def checkout_status(self) -> dict[str, Any]:
+        return {
+            "runtime_initialized": (self.checkout_runtime_directory / "helper.key").exists()
+            and (self.checkout_runtime_directory / "helper.id").exists(),
+            "payment_session": self.payment_session_status(),
+            "profiles": self.list_checkout_profiles(),
+            "runtime_directory": str(self.checkout_runtime_directory),
+            "profiles_directory": str(self.checkout_profiles_directory),
+            "suggested_browser_executable": str(self.checkout_browser_executable)
+            if self.checkout_browser_executable is not None
+            else None,
+        }
 
     def _prepare_agent_token_directory(self) -> None:
         self.agent_token_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         metadata = self.agent_token_directory.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("agent token directory must be a directory, not a symlink")
-        if metadata.st_mode & 0o077:
-            raise ValueError("agent token directory permissions are too broad")
+        expected_mode = 0o750 if self.agent_gid is not None else 0o700
+        if self.agent_gid is not None:
+            os.chown(self.agent_token_directory, -1, self.agent_gid)
+        os.chmod(self.agent_token_directory, expected_mode)
 
     def _sync_agent_token_directory(self) -> None:
         descriptor = os.open(self.agent_token_directory, os.O_RDONLY)
@@ -108,6 +491,11 @@ class DashboardState:
             os.fsync(descriptor)
             os.close(descriptor)
             descriptor = -1
+            if self.agent_gid is not None:
+                os.chown(token_path, -1, self.agent_gid)
+                os.chmod(token_path, 0o640)
+                with token_path.open("rb") as token_file:
+                    os.fsync(token_file.fileno())
             self._sync_agent_token_directory()
             operation["capability_token"] = token
             activation_started = True
@@ -230,7 +618,7 @@ def make_handler(state: DashboardState):
                 "/api/reconcile": ("owner_reconcile", {"intent_id", "outcome", "provider_reference"}),
                 "/api/provider/manual": (
                     "owner_configure_manual_provider",
-                    {"credential_reference", "provider_kind", "last_four", "balance", "balance_status", "balance_ttl_secs"},
+                    {"credential_reference", "provider_kind", "last_four", "balance", "balance_status", "balance_ttl_secs", "autonomous_checkout"},
                 ),
                 "/api/receive": ("owner_configure_receive_instructions", {"method", "address", "memo_template"}),
                 "/api/deposits/record": (
@@ -317,6 +705,14 @@ def make_handler(state: DashboardState):
                 except (OSError, RuntimeError, ValueError):
                     self._send_json(502, {"error": "broker request failed"})
                 return
+            if path == "/api/checkout":
+                if not self._require_owner():
+                    return
+                try:
+                    self._send_json(200, state.checkout_status())
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                    self._send_json(502, {"error": "checkout runtime status is unavailable"})
+                return
             if path in {"/api/overview", "/api/transactions", "/api/audit", "/api/export"}:
                 if not self._require_owner():
                     return
@@ -388,6 +784,26 @@ def make_handler(state: DashboardState):
                 return
             try:
                 body = self._read_json()
+                if self.path == "/api/checkout/setup":
+                    if body:
+                        raise ValueError("checkout setup body must be empty")
+                    state.ensure_checkout_runtime()
+                    self._send_json(200, state.checkout_status())
+                    return
+                if self.path == "/api/checkout/session/arm":
+                    self._send_json(200, state.arm_payment_session(body))
+                    return
+                if self.path == "/api/checkout/session/stop":
+                    if body:
+                        raise ValueError("checkout stop body must be empty")
+                    self._send_json(200, state.stop_payment_session())
+                    return
+                if self.path == "/api/checkout/profiles":
+                    self._send_json(200, state.save_checkout_profile(body))
+                    return
+                if self.path == "/api/checkout/profiles/delete":
+                    self._send_json(200, state.delete_checkout_profile(body))
+                    return
                 operation = self._owner_operation(self.path, body)
                 if operation["type"] == "owner_set_emergency_stop" and not isinstance(
                     operation["stopped"], bool
@@ -413,7 +829,9 @@ def make_handler(state: DashboardState):
                         "agent_token_file": str(error.token_path),
                     },
                 )
-            except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            except ValueError as error:
+                self._send_json(400, {"error": str(error)})
+            except (OSError, RuntimeError, json.JSONDecodeError):
                 self._send_json(400, {"error": "request rejected"})
 
     return Handler
@@ -425,20 +843,41 @@ def main() -> None:
     parser.add_argument("--owner-token-file", required=True)
     parser.add_argument("--access-token-file", required=True)
     parser.add_argument("--agent-token-directory")
+    parser.add_argument("--agent-gid", type=int)
+    parser.add_argument("--cixa-binary")
+    parser.add_argument("--checkout-runtime-directory")
+    parser.add_argument("--checkout-profiles-directory")
+    parser.add_argument("--checkout-browser-executable")
+    parser.add_argument("--bind-address", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--public-port", type=int)
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         raise SystemExit("port must be between 1024 and 65535")
+    public_port = args.public_port or args.port
+    if not 1024 <= public_port <= 65535:
+        raise SystemExit("public port must be between 1024 and 65535")
     state = DashboardState(
         args.socket_path,
         args.owner_token_file,
         args.access_token_file,
-        args.port,
+        public_port,
         args.agent_token_directory,
+        args.cixa_binary,
+        args.checkout_runtime_directory,
+        args.checkout_profiles_directory,
+        args.checkout_browser_executable,
+        args.agent_gid,
     )
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
-    print(f"owner dashboard listening on http://127.0.0.1:{args.port}")
-    server.serve_forever()
+    server = http.server.ThreadingHTTPServer((args.bind_address, args.port), make_handler(state))
+    print(f"owner dashboard listening on {args.bind_address}:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        state.stop_payment_session()
+        server.server_close()
 
 
 if __name__ == "__main__":
