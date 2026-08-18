@@ -21,6 +21,7 @@
 <p align="center">
   <a href="#quick-start-connect-an-agent">Agent setup</a> ·
   <a href="#how-an-agent-uses-cixa">Agent flow</a> ·
+  <a href="#watch-the-walkthrough">Demo</a> ·
   <a href="#owner-console">Screenshots</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="SECURITY.md">Security</a>
@@ -28,6 +29,16 @@
 
 <p align="center">
   <img src="docs/assets/cixa-banner.png" alt="Cixa, open-source checkout orchestration for software agents">
+</p>
+
+## Watch the walkthrough
+
+<p align="center">
+  <a href="docs/assets/cixa-demo.mp4">
+    <img src="docs/assets/cixa-demo-poster.png" alt="Watch the Cixa setup and owner-console walkthrough" width="900">
+  </a>
+  <br>
+  <sub><a href="docs/assets/cixa-demo.mp4">Watch the three-minute demo</a> · Docker setup, agent connection, dashboard controls, approval, checkout, and reconciliation</sub>
 </p>
 
 ## What is Cixa?
